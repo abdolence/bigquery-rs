@@ -98,6 +98,7 @@ impl BigQueryQuerySupport for MockDatabase {
         record("execute_query", params);
         Ok(BigQueryQueryOutcome {
             job: None,
+            query_id: None,
             statement_type: None,
             num_dml_affected_rows: None,
             dml_stats: None,

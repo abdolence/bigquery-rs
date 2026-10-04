@@ -137,8 +137,8 @@ mod tests {
     use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
     use crate::{
         BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobId, BigQueryJobRef,
-        BigQueryJobStats, BigQueryLocation, BigQueryQueryOutcome, BigQueryRequestId,
-        BigQueryResult, BigQueryStatementType,
+        BigQueryJobStats, BigQueryLocation, BigQueryQueryId, BigQueryQueryOutcome,
+        BigQueryRequestId, BigQueryResult, BigQueryStatementType,
     };
     use arrow_array::{ArrayRef, Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
@@ -300,7 +300,7 @@ mod tests {
             [
                 "Query SELECT 1",
                 "format=Arrow legacy=Some(false) int64_timestamp=Some(true) timeout_ms=Some(10000) \
-                 location=\"\" job_creation_mode=0 dry_run=false request_id_len=32"
+                 location=\"\" job_creation_mode=2 dry_run=false request_id_len=32"
             ]
         );
         Ok(())
@@ -394,14 +394,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retried_query_keeps_its_request_id() -> BigQueryResult<()> {
+    async fn retried_query_keeps_its_request_id_and_requires_a_job() -> BigQueryResult<()> {
         let attempts = Arc::new(AtomicUsize::new(0));
         let fake = FakeBigQuery::start(move |mut call: FakeCall| {
             let attempts = attempts.clone();
             async move {
                 let request = query_request(&mut call).await;
-                let id = request.query_request.unwrap_or_default().request_id;
-                call.log(id);
+                let q = request.query_request.unwrap_or_default();
+                call.log(format!("{} {:?}", q.request_id, q.job_creation_mode()));
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     call.fail(Code::Unavailable, "backend went away");
                 } else {
@@ -413,10 +413,27 @@ mod tests {
         rows(&fake, "SELECT 1").await?;
         rows(&fake, "SELECT 1").await?;
         let calls = fake.calls();
-        let ids: Vec<&String> = calls.iter().skip(1).step_by(2).collect();
-        assert_eq!(ids.len(), 3, "{calls:?}");
-        assert_eq!(ids[0], ids[1], "a retry repeats the id");
-        assert_ne!(ids[1], ids[2], "another terminal call sends another id");
+        let sent: Vec<(&str, &str)> = calls
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .filter_map(|line| line.split_once(' '))
+            .collect();
+        assert_eq!(sent.len(), 3, "{calls:?}");
+        assert_eq!(sent[0].0, sent[1].0, "a retry repeats the id");
+        assert_ne!(
+            sent[1].0, sent[2].0,
+            "another terminal call sends another id"
+        );
+        assert_eq!(
+            sent.iter().map(|(_, mode)| *mode).collect::<Vec<_>>(),
+            [
+                "JobCreationOptional",
+                "JobCreationRequired",
+                "JobCreationOptional"
+            ],
+            "a retry requires a job, so that BigQuery replays the first attempt's job"
+        );
         Ok(())
     }
 
@@ -575,6 +592,7 @@ mod tests {
         assert_eq!(
             outcome,
             BigQueryQueryOutcome {
+                query_id: None,
                 job: Some(BigQueryJobRef {
                     project_id: "fake-project".into(),
                     job_id: BigQueryJobId::new("job1").expect("a job ID"),
@@ -662,6 +680,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn required_job_creation_reaches_the_query_request() -> BigQueryResult<()> {
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            let request = query_request(&mut call).await;
+            let q = request.query_request.unwrap_or_default();
+            call.log(format!("job_creation_mode={:?}", q.job_creation_mode()));
+            call.reply(&inline_response(&people(&[1]), 1));
+        })
+        .await;
+        fake.db
+            .fluent()
+            .query("SELECT 1")
+            .job_creation_required()
+            .obj::<Person>()
+            .query()
+            .await?;
+        assert_eq!(
+            fake.calls(),
+            ["Query SELECT 1", "job_creation_mode=JobCreationRequired"]
+        );
+        Ok(())
+    }
+
+    /// A short query's response: the whole result inline, a query ID, and no job.
+    fn job_less_response(batch: &RecordBatch, total_rows: u64) -> QueryResponse {
+        QueryResponse {
+            job_reference: None,
+            query_id: "query-1".into(),
+            location: "US".into(),
+            ..inline_response(batch, total_rows)
+        }
+    }
+
+    #[tokio::test]
+    async fn job_less_result_is_decoded_inline_with_its_query_id() -> BigQueryResult<()> {
+        let (spans, _guard) = CapturedSpans::capture();
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            query_request(&mut call).await;
+            let mut response = job_less_response(&people(&[1, 2]), 2);
+            response.total_bytes_processed = Some(0);
+            response.total_slot_ms = Some(3);
+            call.reply(&response);
+        })
+        .await;
+        let (rows, stats) = fake
+            .db
+            .fluent()
+            .query("SELECT 1")
+            .obj::<Person>()
+            .query_with_stats()
+            .await?;
+        assert_eq!(rows, [person(1), person(2)]);
+        assert_eq!(stats.job, None);
+        assert_eq!(
+            stats.query_id.as_ref().map(BigQueryQueryId::as_str),
+            Some("query-1")
+        );
+        assert_eq!(stats.total_slot_ms, Some(3));
+        assert_eq!(fake.calls(), ["Query SELECT 1"]);
+        assert_eq!(
+            spans.only("BigQuery Query"),
+            bigquery_fields(&[
+                ("sql_len", "8"),
+                ("query_id", "query-1"),
+                ("location", "US"),
+                ("statement_type", "SELECT"),
+                ("bytes_processed", "0"),
+                ("slot_ms", "3"),
+                ("total_rows", "2"),
+                ("route", "inline"),
+            ])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_given_a_job_anyway_waits_for_it_and_reads_its_table() -> BigQueryResult<()> {
+        let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1])]]));
+        let fake = FakeBigQuery::start(move |mut call: FakeCall| {
+            let table = table.clone();
+            async move {
+                match call.method() {
+                    "Query" => {
+                        query_request(&mut call).await;
+                        call.reply(&QueryResponse {
+                            query_id: "query-1".into(),
+                            ..incomplete_response()
+                        });
+                    }
+                    "GetQueryResults" => {
+                        query_results_request(&mut call).await;
+                        call.reply(&GetQueryResultsResponse {
+                            job_reference: Some(job_reference()),
+                            job_complete: Some(true),
+                            total_rows: Some(1),
+                            ..Default::default()
+                        });
+                    }
+                    "GetJob" => {
+                        get_job_request(&mut call).await;
+                        call.reply(&done_job("_anon", "anon1"));
+                    }
+                    _ => storage_read(call, &table).await,
+                }
+            }
+        })
+        .await;
+        let (rows, stats) = fake
+            .db
+            .fluent()
+            .query("SELECT slow")
+            .obj::<Person>()
+            .query_with_stats()
+            .await?;
+        assert_eq!(rows, [person(1)]);
+        assert_eq!(stats.job, Some(job_reference().into()));
+        assert_eq!(
+            stats.query_id.as_ref().map(BigQueryQueryId::as_str),
+            Some("query-1")
+        );
+        assert_eq!(
+            fake.calls(),
+            [
+                "Query SELECT slow",
+                "GetQueryResults job1 at US max_results=Some(0)",
+                "GetJob job1 at US",
+                "GetTable _anon.anon1",
+                "CreateReadSession [id,name]",
+                "ReadRows s0 at 0"
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            let request = query_request(&mut call).await;
+            let q = request.query_request.unwrap_or_default();
+            call.log(format!("job_creation_mode={:?}", q.job_creation_mode()));
+            call.reply(&QueryResponse {
+                query_id: "query-1".into(),
+                job_complete: Some(true),
+                statement_type: "DELETE".into(),
+                num_dml_affected_rows: Some(1),
+                dml_stats: Some(DmlStats {
+                    deleted_row_count: Some(1),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        })
+        .await;
+        let outcome = fake.db.fluent().query("DELETE t").execute().await?;
+        assert_eq!(outcome.job, None);
+        assert_eq!(
+            outcome.query_id.as_ref().map(BigQueryQueryId::as_str),
+            Some("query-1")
+        );
+        assert_eq!(outcome.num_dml_affected_rows, Some(1));
+        assert_eq!(outcome.dml_stats.map(|s| s.deleted), Some(1));
+        assert_eq!(
+            fake.calls(),
+            ["Query DELETE t", "job_creation_mode=JobCreationOptional"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn inline_result_records_the_response_figures() -> BigQueryResult<()> {
         let (spans, _guard) = CapturedSpans::capture();
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
@@ -687,6 +873,7 @@ mod tests {
             stats,
             BigQueryJobStats {
                 job: Some(job_reference().into()),
+                query_id: None,
                 statement_type: Some(BigQueryStatementType::Select),
                 total_rows: Some(2),
                 total_bytes_processed: Some(100),
@@ -764,6 +951,7 @@ mod tests {
             stats,
             BigQueryJobStats {
                 job: Some(job_reference().into()),
+                query_id: None,
                 statement_type: Some(BigQueryStatementType::Select),
                 total_rows: Some(3),
                 total_bytes_processed: Some(500),
@@ -855,6 +1043,7 @@ mod tests {
             stats,
             BigQueryJobStats {
                 job: Some(job_reference().into()),
+                query_id: None,
                 statement_type: Some(BigQueryStatementType::Insert),
                 total_rows: None,
                 total_bytes_processed: Some(77),

@@ -217,7 +217,11 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
                 .await?;
         eprintln!("LIVE stats inline: {inline:?}");
         assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
-        assert!(inline.job.is_some(), "{inline:?}");
+        assert_eq!(
+            inline.job, None,
+            "a short query runs without a job: {inline:?}"
+        );
+        assert!(inline.query_id.is_some(), "{inline:?}");
         assert_eq!(inline.statement_type, Some(BigQueryStatementType::Select));
         assert_eq!(inline.total_rows, Some(1000));
         assert_eq!(inline.total_bytes_processed, Some(0));
@@ -237,6 +241,10 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
         let rows: Vec<Row> = rows.try_collect().await?;
         eprintln!("LIVE stats storage read: {read:?}");
         assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
+        assert!(
+            read.job.is_some(),
+            "a result over the inline limit has a job: {read:?}"
+        );
         assert_eq!(read.statement_type, Some(BigQueryStatementType::Select));
         assert_eq!(read.total_rows, Some(1000));
         assert_eq!(read.total_bytes_processed, Some(0));

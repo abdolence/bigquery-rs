@@ -17,7 +17,9 @@ impl BigQueryDb {
     ///
     /// Dropping a query's stream or future does not cancel its job, so a long query that is no
     /// longer wanted is cancelled with this, by the
-    /// [`job`](crate::BigQueryQueryOutcome::job) its outcome named.
+    /// [`job`](crate::BigQueryQueryOutcome::job) its outcome named. A short query BigQuery
+    /// answered without a job names none; see
+    /// [`job_creation_required`](crate::BigQueryQueryBuilder::job_creation_required).
     pub async fn cancel_job(&self, job: &BigQueryJobRef) -> BigQueryResult<()> {
         let span = tracing::debug_span!(
             "BigQuery Cancel Job",

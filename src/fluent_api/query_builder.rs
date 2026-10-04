@@ -1,8 +1,8 @@
 use crate::query::{infer_param, struct_params, typed_param, ParamFailure, ParamLabel};
 use crate::{
-    BigQueryDatasetRef, BigQueryDryRunResult, BigQueryJobStats, BigQueryParamType,
-    BigQueryQueryOutcome, BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions,
-    BigQueryResult,
+    BigQueryDatasetRef, BigQueryDryRunResult, BigQueryJobCreation, BigQueryJobStats,
+    BigQueryParamType, BigQueryQueryOutcome, BigQueryQueryParams, BigQueryQuerySupport,
+    BigQueryReadOptions, BigQueryResult,
 };
 use crate::{BigQueryLabels, BigQueryLocation, BigQueryRequestId};
 use arrow_array::RecordBatch;
@@ -196,6 +196,23 @@ where
     pub fn inline_rows_limit(self, rows: u32) -> Self {
         Self {
             params: self.params.with_inline_rows_limit(rows),
+            ..self
+        }
+    }
+
+    /// Makes BigQuery run the query as a job, which it otherwise skips for a short query whose
+    /// result fits in the first response.
+    ///
+    /// A query without a job is answered sooner, and is still listed in the
+    /// `INFORMATION_SCHEMA.JOBS` views with its labels, under its
+    /// [`query_id`](crate::BigQueryJobStats::query_id). But its outcome names no
+    /// [`job`](crate::BigQueryQueryOutcome::job), so there is nothing for `GetJob` to read or
+    /// for [`cancel_job`](crate::BigQueryDb::cancel_job) to cancel. Set this when a query needs
+    /// a job resource: for job history read through the job calls, for a job ID it is sure to
+    /// get, or to be cancelled by its job.
+    pub fn job_creation_required(self) -> Self {
+        Self {
+            params: self.params.with_job_creation(BigQueryJobCreation::Required),
             ..self
         }
     }

@@ -1,0 +1,32 @@
+[package]
+name = "bench-compare"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Benchmarks this crate against Google's official BigQuery clients on the same data"
+
+# A workspace of its own, so the root crate's build, tests and package never see this one.
+[workspace]
+
+[dependencies]
+bigquery = { path = ".." }
+google-cloud-bigquery = "=0.18.0"
+google-cloud-wkt = "1"
+google-cloud-type = "1"
+arrow-array = "60"
+arrow-schema = "60"
+arrow-buffer = "60"
+arrow-ipc = { version = "60", features = ["lz4"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = "1"
+jiff = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = "0.23"
+anyhow = "1"
+
+[profile.release]
+debug = false

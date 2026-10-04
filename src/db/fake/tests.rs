@@ -186,3 +186,37 @@ async fn hung_call_stays_open_until_the_client_gives_up() {
     let waited = tokio::time::timeout(std::time::Duration::from_millis(200), pending).await;
     assert!(waited.is_err(), "the call must still be in flight");
 }
+
+#[tokio::test]
+async fn an_endpoint_with_a_trailing_slash_or_a_path_reaches_the_service() {
+    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+        let request: GetTableRequest = call.next_request().await.expect("the fake server answers");
+        call.log(format!("GetTable {}", request.table_id));
+        call.reply(&Table::default());
+    })
+    .await;
+    let endpoint = fake.db.options().effective_bigquery_api_url();
+    assert!(endpoint.as_str().ends_with('/'), "{endpoint}");
+    let options = fake
+        .db
+        .options()
+        .clone()
+        .with_bigquery_api_url(endpoint.join("prefix/").expect("a relative path joins"));
+    let db = BigQueryDb::with_options_token_source(
+        options,
+        Vec::new(),
+        gcloud_sdk::TokenSourceType::ExternalSource(Box::new(FakeTokenSource)),
+    )
+    .await
+    .expect("a client for the fake server");
+    for (db, table_id) in [(&fake.db, "t1"), (&db, "t2")] {
+        db.table_client()
+            .get_table(GetTableRequest {
+                table_id: table_id.into(),
+                ..Default::default()
+            })
+            .await
+            .expect("the fake server answers");
+    }
+    assert_eq!(fake.calls(), ["GetTable t1", "GetTable t2"]);
+}

@@ -1,0 +1,1073 @@
+{
+ "run_label": "p20261004_215003",
+ "dataset": "bench_compare_20261004_215003",
+ "location": "europe-north2",
+ "started": "2026-10-04T21:50:03+0200",
+ "finished": "2026-10-04T22:25:38+0200",
+ "method": {
+  "runs_per_scenario": 5,
+  "warmup_runs": 1,
+  "order": "round-robin per run, client order rotated each round",
+  "quiet_rule": {
+   "foreign_cores_below": 1.6,
+   "foreign_process_pct_below": 20.0,
+   "no_foreign_compiler": [
+    "build-script-b",
+    "c++",
+    "cargo",
+    "cc",
+    "cc1",
+    "cc1plus",
+    "clang",
+    "clang++",
+    "clippy-driver",
+    "collect2",
+    "g++",
+    "gcc",
+    "ld",
+    "ld.lld",
+    "lld",
+    "mold",
+    "rust-lld",
+    "rustc",
+    "rustdoc"
+   ],
+   "idle_network_bytes_per_sec_below": 2000000,
+   "wait": "30s steps up to 900s",
+   "during_run": "sampled every 2.0s; a run with a violating sample is discarded and repeated, up to 4 attempts"
+  },
+  "query_cache": "off for every client",
+  "endpoints": "global defaults for every client: bigquery.googleapis.com (this crate over gRPC; the official crate, Python and bq over REST) and bigquerystorage.googleapis.com (gRPC)"
+ },
+ "machine": {
+  "cpu": "Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz",
+  "nproc": 16,
+  "mem": "Mem:           64118       14541       41191          94        9388       49577",
+  "kernel": "7.2.6-1-cachyos",
+  "cpufreq": {
+   "mhz_min": 800,
+   "mhz_max": 4705,
+   "governors": [
+    "powersave"
+   ]
+  },
+  "location_note": "Sweden, home connection"
+ },
+ "versions": {
+  "repo_commit": "55ff654d1673a7dc482c599e937aadc0f2d5f7c9",
+  "repo_dirty": false,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "cargo_lock": {
+   "arrow-array": [
+    "60.0.0"
+   ],
+   "arrow-ipc": [
+    "60.0.0"
+   ],
+   "bigquery": [
+    "0.1.0"
+   ],
+   "gcloud-sdk": [
+    "0.32.3"
+   ],
+   "google-cloud-auth": [
+    "1.17.0"
+   ],
+   "google-cloud-bigquery": [
+    "0.18.0"
+   ],
+   "google-cloud-bigquery-v2": [
+    "1.0.0"
+   ],
+   "google-cloud-gax": [
+    "1.15.0"
+   ],
+   "google-cloud-gax-internal": [
+    "0.7.20"
+   ],
+   "hyper": [
+    "1.11.1"
+   ],
+   "reqwest": [
+    "0.13.5"
+   ],
+   "tonic": [
+    "0.14.6"
+   ]
+  }
+ },
+ "network": {
+  "baseline": {
+   "bigquery.googleapis.com": {
+    "address": [
+     "142.251.38.106  STREAM bigquery.googleapis.com"
+    ],
+    "runs": [
+     {
+      "tcp_connect": 0.009519,
+      "tls_done": 0.02811
+     },
+     {
+      "tcp_connect": 0.009814,
+      "tls_done": 0.029932
+     },
+     {
+      "tcp_connect": 0.009751,
+      "tls_done": 0.031581
+     },
+     {
+      "tcp_connect": 0.009689,
+      "tls_done": 0.030039
+     },
+     {
+      "tcp_connect": 0.00975,
+      "tls_done": 0.029648
+     }
+    ]
+   },
+   "bigquerystorage.googleapis.com": {
+    "address": [
+     "172.217.115.4   STREAM bigquerystorage.googleapis.com"
+    ],
+    "runs": [
+     {
+      "tcp_connect": 0.009743,
+      "tls_done": 0.029327
+     },
+     {
+      "tcp_connect": 0.009532,
+      "tls_done": 0.029181
+     },
+     {
+      "tcp_connect": 0.009879,
+      "tls_done": 0.029594
+     },
+     {
+      "tcp_connect": 0.00988,
+      "tls_done": 0.028589
+     },
+     {
+      "tcp_connect": 0.009548,
+      "tls_done": 0.029087
+     }
+    ]
+   }
+  },
+  "datasets_get": {
+   "call": "datasets.get (gRPC)",
+   "secs": [
+    0.281808921,
+    0.200165256,
+    0.18526208,
+    0.214499117,
+    0.100279346,
+    0.099178639,
+    0.100302885,
+    0.086102046,
+    0.098504038,
+    0.114647034,
+    0.085684953
+   ]
+  }
+ },
+ "clients": {
+  "ours": {
+   "client": "ours",
+   "crate": "bigquery",
+   "settings": "defaults: Storage Read max_stream_count = available parallelism, LZ4; writes: default stream, max_request_bytes 19 MB, 8 requests in flight",
+   "storage_read_max_streams_default": 16
+  },
+  "official": {
+   "client": "official",
+   "crate": "google-cloud-bigquery",
+   "settings": "client defaults; scans: Storage Read raw client, max_stream_count = 16 (same as the bigquery crate's default), LZ4, one task per stream; writes: Arrow on the default stream, 25000 rows per request, 8 requests in flight (same window as the bigquery crate's default)"
+  },
+  "python": {
+   "client": "python",
+   "python": "3.14.7",
+   "packages": {
+    "google-cloud-bigquery": "3.46.1",
+    "google-cloud-bigquery-storage": "2.42.0",
+    "pyarrow": "25.0.1",
+    "pandas": "3.0.6",
+    "grpcio": "1.84.0",
+    "db-dtypes": "1.7.2"
+   },
+   "settings": "client defaults: queries through query_and_wait (jobs.query); Storage Read with max_stream_count 0 (BigQuery decides), LZ4, one thread per stream"
+  },
+  "bq": {
+   "client": "bq",
+   "version": "This is BigQuery CLI 2.1.39",
+   "path": "/home/abdulla/tmp/bq-sdk/google-cloud-sdk/bin/bq",
+   "settings": "bq query --nouse_legacy_sql --nouse_cache --format=json, output read in full; time measured around the process"
+  }
+ },
+ "not_applicable": {
+  "official": {
+   "query_200k_arrow": "n/a: the query client returns JSON rows only; it has no Arrow result path",
+   "decode": "n/a: FromRow converts the JSON rows of a live query (Row has no public constructor), and there is no Arrow to struct decoder"
+  },
+  "python": {
+   "write": "n/a: the Python Storage Write helper (AppendRowsStream) sends AppendRowsRequest messages the caller builds, protobuf rows with a hand-made descriptor; it has no row-object writer"
+  }
+ },
+ "setup": {
+  "scan_table_logical_bytes": 214646031,
+  "scan_table_rows": 1000000,
+  "setup_bytes_billed": 0
+ },
+ "billing": [
+  {
+   "bytes_billed": 0,
+   "bytes_processed": 0,
+   "client": "bq",
+   "jobs": 12
+  },
+  {
+   "bytes_billed": 1719664640,
+   "bytes_processed": 1717168248,
+   "client": "official",
+   "jobs": 26
+  },
+  {
+   "bytes_billed": 0,
+   "bytes_processed": 0,
+   "client": "ours",
+   "jobs": 28
+  },
+  {
+   "bytes_billed": 0,
+   "bytes_processed": 0,
+   "client": "python",
+   "jobs": 24
+  }
+ ],
+ "teardown": {
+  "deleted": "bench_compare_20261004_215003",
+  "write_tables": {
+   "write_official": {
+    "logical_bytes": 1475677581,
+    "rows": 6875000
+   },
+   "write_ours": {
+    "logical_bytes": 904213877,
+    "rows": 4212989
+   }
+  }
+ },
+ "summary": {
+  "query_const": {
+   "official": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 0.102250307,
+    "min_secs": 0.094215009,
+    "max_secs": 0.10460478,
+    "rows": 1,
+    "rows_per_sec": 9.7799217365675,
+    "path": "rest_json_pages",
+    "streams": []
+   },
+   "python": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 0.16174975100148004,
+    "min_secs": 0.1541565770021407,
+    "max_secs": 0.16707458699966082,
+    "rows": 1,
+    "rows_per_sec": 6.182389733575849,
+    "path": "rest_json_pages",
+    "streams": []
+   },
+   "bq": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 2.3589963690028526,
+    "min_secs": 2.3075832440008526,
+    "max_secs": 2.51394052800606,
+    "rows": 1,
+    "rows_per_sec": 0.42390908826311585,
+    "path": "bq_cli_rest",
+    "streams": []
+   },
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 0.231508559,
+    "min_secs": 0.194374426,
+    "max_secs": 0.711000463,
+    "rows": 1,
+    "rows_per_sec": 4.319494727622575,
+    "path": "inline",
+    "streams": []
+   }
+  },
+  "query_1k": {
+   "official": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 0.130825593,
+    "min_secs": 0.112927631,
+    "max_secs": 0.161685059,
+    "rows": 1000,
+    "rows_per_sec": 7643.764320640229,
+    "path": "rest_json_pages",
+    "streams": []
+   },
+   "python": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 0.1975488600000972,
+    "min_secs": 0.1730807290005032,
+    "max_secs": 0.22998117600218393,
+    "rows": 1000,
+    "rows_per_sec": 5062.038829277517,
+    "path": "rest_json_pages",
+    "streams": []
+   },
+   "bq": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 2.3167430570028955,
+    "min_secs": 2.3056982859998243,
+    "max_secs": 2.397231440001633,
+    "rows": 1000,
+    "rows_per_sec": 431.6404432408968,
+    "path": "bq_cli_rest",
+    "streams": []
+   },
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 0.255248156,
+    "min_secs": 0.229119055,
+    "max_secs": 0.293601749,
+    "rows": 1000,
+    "rows_per_sec": 3917.756020928903,
+    "path": "inline",
+    "streams": []
+   }
+  },
+  "query_200k_rows": {
+   "official": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 3.690152425,
+    "min_secs": 3.580040286,
+    "max_secs": 3.921168272,
+    "rows": 200000,
+    "rows_per_sec": 54198.30320423688,
+    "path": "rest_json_pages",
+    "streams": []
+   },
+   "python": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 4.934726169994974,
+    "min_secs": 4.380494955999893,
+    "max_secs": 6.1905124859986245,
+    "rows": 200000,
+    "rows_per_sec": 40529.09788917501,
+    "path": "rest_json_pages",
+    "streams": []
+   },
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 1.259709794,
+    "min_secs": 1.187786033,
+    "max_secs": 2.394772617,
+    "rows": 200000,
+    "rows_per_sec": 158766.72623536023,
+    "path": "storage_read",
+    "streams": [
+     1
+    ]
+   }
+  },
+  "query_200k_arrow": {
+   "python": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 2.3727862640007515,
+    "min_secs": 2.351352320998558,
+    "max_secs": 2.6081911779983784,
+    "rows": 200000,
+    "rows_per_sec": 84289.09212529758,
+    "path": "storage_read",
+    "streams": [
+     1
+    ]
+   },
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 1.124427644,
+    "min_secs": 1.106556243,
+    "max_secs": 1.201744731,
+    "rows": 200000,
+    "rows_per_sec": 177868.27019702832,
+    "path": "storage_read",
+    "streams": [
+     1
+    ]
+   }
+  },
+  "scan_rows": {
+   "official": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 94.723408033,
+    "min_secs": 92.797967029,
+    "max_secs": 94.883929189,
+    "rows": 1000000,
+    "rows_per_sec": 10557.052588855517,
+    "path": "rest_json_pages_select_star",
+    "streams": [],
+    "logical_mb_per_sec": 2.2660294372561114
+   },
+   "python": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 10.745684902001813,
+    "min_secs": 10.494230072996288,
+    "max_secs": 11.395727112001623,
+    "rows": 1000000,
+    "rows_per_sec": 93060.61075862276,
+    "path": "storage_read",
+    "streams": [
+     1
+    ],
+    "logical_mb_per_sec": 19.975090741774274
+   },
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 9.764275059,
+    "min_secs": 7.707944844,
+    "max_secs": 10.307454329,
+    "rows": 1000000,
+    "rows_per_sec": 102414.15711433413,
+    "path": "storage_read",
+    "streams": [
+     4
+    ],
+    "logical_mb_per_sec": 21.982792342802234
+   }
+  },
+  "scan_arrow": {
+   "official": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 9.276321608,
+    "min_secs": 7.336382401,
+    "max_secs": 9.712965741,
+    "rows": 1000000,
+    "rows_per_sec": 107801.35082181597,
+    "path": "storage_read_raw_client_plus_arrow_ipc",
+    "streams": [
+     4
+    ],
+    "logical_mb_per_sec": 23.139132090341384
+   },
+   "python": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 9.9176567589966,
+    "min_secs": 9.766545223006688,
+    "max_secs": 10.578547047996835,
+    "rows": 1000000,
+    "rows_per_sec": 100830.26911501755,
+    "path": "storage_read",
+    "streams": [
+     1
+    ],
+    "logical_mb_per_sec": 21.6428170702004
+   },
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 9.344206164,
+    "min_secs": 7.51580561,
+    "max_secs": 9.72228005,
+    "rows": 1000000,
+    "rows_per_sec": 107018.18671902326,
+    "path": "storage_read",
+    "streams": [
+     4
+    ],
+    "logical_mb_per_sec": 22.971029024055255
+   }
+  },
+  "write": {
+   "official": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 32.715019637,
+    "min_secs": 30.785736384,
+    "max_secs": 33.363000939,
+    "rows": 1000000,
+    "rows_per_sec": 30566.999839701184,
+    "path": "storage_write_default_stream_arrow",
+    "streams": [],
+    "mb_sent_per_run": 221.429184,
+    "sent_mb_per_sec": 6.768425831833164
+   },
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 29.957492009,
+    "min_secs": 25.185679283,
+    "max_secs": 30.267420798,
+    "rows": 1000000,
+    "rows_per_sec": 33380.63145271221,
+    "path": "storage_write_default_stream_proto",
+    "streams": [],
+    "mb_sent_per_run": 180.45663,
+    "sent_mb_per_sec": 6.023756259228449
+   }
+  },
+  "decode": {
+   "ours": {
+    "runs": 5,
+    "contended_runs": 0,
+    "median_secs": 0.648626391,
+    "min_secs": 0.641682756,
+    "max_secs": 0.650993691,
+    "rows": 1000000,
+    "rows_per_sec": 1541719.5690392437,
+    "path": "in_memory_arrow_to_struct_single_thread",
+    "streams": [],
+    "logical_mb_per_sec": 330.9239864093041
+   }
+  }
+ },
+ "gate": {
+  "measured_runs": 110,
+  "warmup_runs": 22,
+  "discarded_attempts": [
+   {
+    "scenario": "scan_rows",
+    "client": "official",
+    "run": 0,
+    "violations": [
+     "2.1.289 (65794) at 26.4%"
+    ]
+   },
+   {
+    "scenario": "scan_rows",
+    "client": "ours",
+    "run": 3,
+    "violations": [
+     "2.1.289 (65794) at 28.4%"
+    ]
+   },
+   {
+    "scenario": "scan_rows",
+    "client": "official",
+    "run": 5,
+    "violations": [
+     "2.1.289 (65794) at 39.4%"
+    ]
+   },
+   {
+    "scenario": "write",
+    "client": "official",
+    "run": 0,
+    "violations": [
+     "2.1.289 (65794) at 38.4%"
+    ]
+   }
+  ],
+  "contended_runs": 0,
+  "max_preflight_loadavg1": 0.94,
+  "max_preflight_foreign_cores": 0.35,
+  "max_during_foreign_cores": 0.52,
+  "max_preflight_idle_net_bytes_per_sec": 301706,
+  "waited_for_quiet_secs": 90
+ },
+ "probe_query_rpc": {
+  "note": "Attribution probe for small-query latency, run after the main run on the same machine (load 0.12-0.14). Raw JobService.Query over the gRPC channel of the bigquery crate, SELECT 1 AS x, europe-north2, cache off, 1 warm-up round then 8 rounds interleaving the four arms. Seconds.",
+  "run1": {
+   "grpc_arrow_required": {
+    "median": 0.189,
+    "min": 0.155,
+    "max": 0.201
+   },
+   "grpc_json_required": {
+    "median": 0.147,
+    "min": 0.132,
+    "max": 0.177
+   },
+   "grpc_arrow_optional": {
+    "median": 0.102,
+    "min": 0.081,
+    "max": 0.124
+   },
+   "grpc_json_optional": {
+    "median": 0.086,
+    "min": 0.071,
+    "max": 0.092
+   }
+  },
+  "run2": {
+   "grpc_arrow_required": {
+    "median": 0.178,
+    "min": 0.143,
+    "max": 0.27
+   },
+   "grpc_json_required": {
+    "median": 0.153,
+    "min": 0.134,
+    "max": 0.249
+   },
+   "grpc_arrow_optional": {
+    "median": 0.082,
+    "min": 0.073,
+    "max": 0.126
+   },
+   "grpc_json_optional": {
+    "median": 0.085,
+    "min": 0.074,
+    "max": 0.085
+   }
+  }
+ },
+ "us_side_note": {
+  "label": "US side note, not headline numbers",
+  "note": "Single ungated smoke runs of the bigquery crate only, dataset in US, queries without explicit location, 2026-10-04 21:3x, before the switch to europe-north2. Seconds.",
+  "ours": {
+   "query_const": 0.629,
+   "query_1k": 0.537,
+   "query_200k_rows": 3.448,
+   "query_200k_arrow": 2.862,
+   "scan_rows": 8.22,
+   "scan_arrow": 9.797,
+   "decode": 0.65,
+   "write": 30.383
+  }
+ },
+ "query_rerun_short_query_mode": {
+  "run_label": "p20261004_225830",
+  "dataset": "bench_compare_20261004_225830",
+  "location": "europe-north2",
+  "started": "2026-10-04T22:58:30+0200",
+  "finished": "2026-10-04T23:20:14+0200",
+  "versions": {
+   "repo_commit": "f1cf3e1eb1d0ebe0096de6c2d20764e0a57b1131",
+   "repo_dirty": false,
+   "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+   "cargo_lock": {
+    "arrow-array": [
+     "60.0.0"
+    ],
+    "arrow-ipc": [
+     "60.0.0"
+    ],
+    "bigquery": [
+     "0.1.0"
+    ],
+    "gcloud-sdk": [
+     "0.32.4"
+    ],
+    "google-cloud-auth": [
+     "1.17.0"
+    ],
+    "google-cloud-bigquery": [
+     "0.18.0"
+    ],
+    "google-cloud-bigquery-v2": [
+     "1.0.0"
+    ],
+    "google-cloud-gax": [
+     "1.15.0"
+    ],
+    "google-cloud-gax-internal": [
+     "0.7.20"
+    ],
+    "hyper": [
+     "1.11.1"
+    ],
+    "reqwest": [
+     "0.13.5"
+    ],
+    "tonic": [
+     "0.14.6"
+    ]
+   }
+  },
+  "network": {
+   "baseline": {
+    "bigquery.googleapis.com": {
+     "address": [
+      "142.251.38.106  STREAM bigquery.googleapis.com"
+     ],
+     "runs": [
+      {
+       "tcp_connect": 0.010249,
+       "tls_done": 0.028467
+      },
+      {
+       "tcp_connect": 0.009429,
+       "tls_done": 0.028283
+      },
+      {
+       "tcp_connect": 0.010131,
+       "tls_done": 0.030001
+      },
+      {
+       "tcp_connect": 0.009691,
+       "tls_done": 0.029189
+      },
+      {
+       "tcp_connect": 0.009914,
+       "tls_done": 0.029523
+      }
+     ]
+    },
+    "bigquerystorage.googleapis.com": {
+     "address": [
+      "172.217.119.4   STREAM bigquerystorage.googleapis.com"
+     ],
+     "runs": [
+      {
+       "tcp_connect": 0.009271,
+       "tls_done": 0.033919
+      },
+      {
+       "tcp_connect": 0.009589,
+       "tls_done": 0.037783
+      },
+      {
+       "tcp_connect": 0.010333,
+       "tls_done": 0.030552
+      },
+      {
+       "tcp_connect": 0.009793,
+       "tls_done": 0.030001
+      },
+      {
+       "tcp_connect": 0.009745,
+       "tls_done": 0.029718
+      }
+     ]
+    }
+   },
+   "datasets_get": {
+    "call": "datasets.get (gRPC)",
+    "secs": [
+     0.178200609,
+     0.089898135,
+     0.109619702,
+     0.099129103,
+     0.100230472,
+     0.085589008,
+     0.114857913,
+     0.09730515,
+     0.088187318,
+     0.100463795,
+     0.118567406
+    ]
+   }
+  },
+  "clients": {
+   "ours": {
+    "client": "ours",
+    "crate": "bigquery",
+    "job_creation": "optional (default)",
+    "settings": "defaults: Storage Read max_stream_count = available parallelism, LZ4; writes: default stream, max_request_bytes 19 MB, 8 requests in flight",
+    "storage_read_max_streams_default": 16
+   },
+   "ours_required": {
+    "client": "ours_required",
+    "crate": "bigquery",
+    "job_creation": "required",
+    "settings": "defaults: Storage Read max_stream_count = available parallelism, LZ4; writes: default stream, max_request_bytes 19 MB, 8 requests in flight",
+    "storage_read_max_streams_default": 16
+   },
+   "official": {
+    "client": "official",
+    "crate": "google-cloud-bigquery",
+    "settings": "client defaults; scans: Storage Read raw client, max_stream_count = 16 (same as the bigquery crate's default), LZ4, one task per stream; writes: Arrow on the default stream, 25000 rows per request, 8 requests in flight (same window as the bigquery crate's default)"
+   },
+   "python": {
+    "client": "python",
+    "python": "3.14.7",
+    "packages": {
+     "google-cloud-bigquery": "3.46.1",
+     "google-cloud-bigquery-storage": "2.42.0",
+     "pyarrow": "25.0.1",
+     "pandas": "3.0.6",
+     "grpcio": "1.84.0",
+     "db-dtypes": "1.7.2"
+    },
+    "settings": "client defaults: queries through query_and_wait (jobs.query); Storage Read with max_stream_count 0 (BigQuery decides), LZ4, one thread per stream"
+   },
+   "bq": {
+    "client": "bq",
+    "version": "This is BigQuery CLI 2.1.39",
+    "path": "/home/abdulla/tmp/bq-sdk/google-cloud-sdk/bin/bq",
+    "settings": "bq query --nouse_legacy_sql --nouse_cache --format=json, output read in full; time measured around the process"
+   }
+  },
+  "not_applicable": {},
+  "billing": [
+   {
+    "bytes_billed": 0,
+    "bytes_processed": 0,
+    "client": "bq",
+    "jobs": 13
+   },
+   {
+    "bytes_billed": 0,
+    "bytes_processed": 0,
+    "client": "official",
+    "jobs": 19
+   },
+   {
+    "bytes_billed": 0,
+    "bytes_processed": 0,
+    "client": "ours",
+    "jobs": 40
+   },
+   {
+    "bytes_billed": 0,
+    "bytes_processed": 0,
+    "client": "python",
+    "jobs": 20
+   }
+  ],
+  "teardown": {
+   "deleted": "bench_compare_20261004_225830",
+   "write_tables": {
+    "write_official": {
+     "logical_bytes": 0,
+     "rows": 0
+    },
+    "write_ours": {
+     "logical_bytes": 0,
+     "rows": 0
+    }
+   }
+  },
+  "summary": {
+   "query_const": {
+    "ours_required": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.166744954,
+     "min_secs": 0.159640024,
+     "max_secs": 0.256475406,
+     "rows": 1,
+     "rows_per_sec": 5.997182979222268,
+     "path": "inline",
+     "streams": []
+    },
+    "official": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.09649328,
+     "min_secs": 0.085919266,
+     "max_secs": 0.110264494,
+     "rows": 1,
+     "rows_per_sec": 10.363415980884886,
+     "path": "rest_json_pages",
+     "streams": []
+    },
+    "python": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.17331544199987547,
+     "min_secs": 0.14355835699825548,
+     "max_secs": 0.27170209500036435,
+     "rows": 1,
+     "rows_per_sec": 5.769826326269984,
+     "path": "rest_json_pages",
+     "streams": []
+    },
+    "bq": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 2.353804776998004,
+     "min_secs": 2.3254504290016484,
+     "max_secs": 2.475617379997857,
+     "rows": 1,
+     "rows_per_sec": 0.42484406938598374,
+     "path": "bq_cli_rest",
+     "streams": []
+    },
+    "ours": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.095754057,
+     "min_secs": 0.088668768,
+     "max_secs": 0.114656527,
+     "rows": 1,
+     "rows_per_sec": 10.443421734078589,
+     "path": "inline",
+     "streams": []
+    }
+   },
+   "query_1k": {
+    "ours_required": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.202820866,
+     "min_secs": 0.176661619,
+     "max_secs": 0.206757426,
+     "rows": 1000,
+     "rows_per_sec": 4930.459176720013,
+     "path": "inline",
+     "streams": []
+    },
+    "official": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.133687532,
+     "min_secs": 0.117182122,
+     "max_secs": 0.137019421,
+     "rows": 1000,
+     "rows_per_sec": 7480.129111815752,
+     "path": "rest_json_pages",
+     "streams": []
+    },
+    "python": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.21319811300054425,
+     "min_secs": 0.19471865300147329,
+     "max_secs": 0.284122932003811,
+     "rows": 1000,
+     "rows_per_sec": 4690.473034334254,
+     "path": "rest_json_pages",
+     "streams": []
+    },
+    "bq": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 2.391931067002588,
+     "min_secs": 2.3382432099970174,
+     "max_secs": 2.4018705089983996,
+     "rows": 1000,
+     "rows_per_sec": 418.0722487346321,
+     "path": "bq_cli_rest",
+     "streams": []
+    },
+    "ours": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 0.130276761,
+     "min_secs": 0.110289436,
+     "max_secs": 0.145185911,
+     "rows": 1000,
+     "rows_per_sec": 7675.966091911051,
+     "path": "inline",
+     "streams": []
+    }
+   },
+   "query_200k_rows": {
+    "ours_required": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 1.279241491,
+     "min_secs": 1.09985832,
+     "max_secs": 1.564223054,
+     "rows": 200000,
+     "rows_per_sec": 156342.6463315049,
+     "path": "storage_read",
+     "streams": [
+      1
+     ]
+    },
+    "official": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 3.861949826,
+     "min_secs": 3.617204868,
+     "max_secs": 4.088097626,
+     "rows": 200000,
+     "rows_per_sec": 51787.3118530774,
+     "path": "rest_json_pages",
+     "streams": []
+    },
+    "python": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 4.704221958993003,
+     "min_secs": 4.566743278002832,
+     "max_secs": 5.00403551600175,
+     "rows": 200000,
+     "rows_per_sec": 42515.00072560617,
+     "path": "rest_json_pages",
+     "streams": []
+    },
+    "ours": {
+     "runs": 5,
+     "contended_runs": 0,
+     "median_secs": 1.293038267,
+     "min_secs": 1.245942048,
+     "max_secs": 1.483727421,
+     "rows": 200000,
+     "rows_per_sec": 154674.46331965362,
+     "path": "storage_read",
+     "streams": [
+      1
+     ]
+    }
+   }
+  },
+  "note": "Query scenarios re-run at f1cf3e1 (short query mode, JOB_CREATION_OPTIONAL by default); ours_required is the same binary with .job_creation_required(). The query tables of the main run above are from 55ff654, before the change.",
+  "gate": {
+   "measured_runs": 70,
+   "discarded_attempts": [
+    {
+     "scenario": "query_const",
+     "client": "bq",
+     "run": 3,
+     "violations": [
+      "2.1.289 (65794) at 67.8%"
+     ]
+    },
+    {
+     "scenario": "query_200k_rows",
+     "client": "python",
+     "run": 2,
+     "violations": [
+      "cargo (1292448) at 35.9%",
+      "compiler running: cargo,cc,collect2,rust-lld,rustc",
+      "compiler running: cargo,rustc",
+      "foreign CPU 1.84 cores",
+      "foreign CPU 14.78 cores",
+      "foreign CPU 15.22 cores",
+      "rustc (1292856) at 75.2%",
+      "rustc (1293265) at 96.3%"
+     ]
+    },
+    {
+     "scenario": "query_200k_rows",
+     "client": "official",
+     "run": 5,
+     "violations": [
+      "compiler running: cargo,rustc",
+      "rustc (1308406) at 54.9%"
+     ]
+    },
+    {
+     "scenario": "query_200k_rows",
+     "client": "python",
+     "run": 5,
+     "violations": [
+      "2.1.289 (65794) at 30.9%",
+      "compiler running: cargo,rustc",
+      "foreign CPU 2.87 cores"
+     ]
+    }
+   ],
+   "contended_runs": 0,
+   "max_preflight_loadavg1": 1.41,
+   "max_preflight_foreign_cores": 0.88,
+   "max_during_foreign_cores": 0.6,
+   "waited_for_quiet_secs": 810
+  }
+ }
+}

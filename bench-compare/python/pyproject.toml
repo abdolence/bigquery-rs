@@ -1,0 +1,15 @@
+[project]
+name = "bench-compare-python"
+version = "0.0.0"
+description = "The Python contender and the orchestrator of the BigQuery client benchmarks"
+requires-python = ">=3.12"
+dependencies = [
+    "google-cloud-bigquery[bqstorage,pandas]",
+    "google-cloud-bigquery-storage",
+    "pyarrow",
+    "pandas",
+    "db-dtypes",
+]
+
+[tool.uv]
+package = false

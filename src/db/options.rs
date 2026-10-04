@@ -41,8 +41,7 @@ pub struct BigQueryDbOptions {
 
     /// Overrides [`BIGQUERY_API_URL`].
     ///
-    /// The client connects to the URL's scheme, host and port; a path, query or fragment is not
-    /// used. Client construction refuses a scheme other than `http` or `https`, or no host.
+    /// Client construction refuses a scheme other than `http` or `https`, or no host.
     pub bigquery_api_url: Option<Url>,
 
     /// Overrides [`BIGQUERY_STORAGE_API_URL`], under the same rules as `bigquery_api_url`.

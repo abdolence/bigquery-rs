@@ -2,7 +2,7 @@ use crate::{
     BigQueryDatasetRef, BigQueryFieldType, BigQueryReadOptions, BigQueryStatementType,
     BigQueryTableSchema,
 };
-use crate::{BigQueryJobId, BigQueryLabels, BigQueryLocation, BigQueryRequestId};
+use crate::{BigQueryJobId, BigQueryLabels, BigQueryLocation, BigQueryQueryId, BigQueryRequestId};
 use gcloud_sdk::google::cloud::bigquery::v2::QueryParameter;
 use rsb_derive::Builder;
 use std::time::Duration;
@@ -47,6 +47,23 @@ pub struct BigQueryQueryParams {
     /// How a result read through the Storage Read API opens its session.
     #[default = "BigQueryReadOptions::new()"]
     pub read_options: BigQueryReadOptions,
+    /// Whether BigQuery must run the query as a job. Defaults to
+    /// [`Optional`](BigQueryJobCreation::Optional).
+    #[default = "BigQueryJobCreation::Optional"]
+    pub job_creation: BigQueryJobCreation,
+}
+
+/// Whether a query runs as a BigQuery job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BigQueryJobCreation {
+    /// BigQuery decides, and answers a short query whose result fits in the response without
+    /// creating a job: it reports a [`BigQueryQueryId`] and no job. A query that runs long, a
+    /// result too large for the response, and some statements still create one.
+    #[default]
+    Optional,
+    /// Every query creates a job, so that the outcome always names one for the job calls to
+    /// read or cancel.
+    Required,
 }
 
 /// The type of a query parameter, for a value whose type cannot be inferred.
@@ -80,8 +97,10 @@ impl BigQueryParamType {
 /// What a statement did, as the `Query` response reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigQueryQueryOutcome {
-    /// The job that ran the statement.
+    /// The job that ran the statement, `None` when BigQuery ran it without one.
     pub job: Option<BigQueryJobRef>,
+    /// The ID BigQuery gave the statement, when it reported one.
+    pub query_id: Option<BigQueryQueryId>,
     /// The kind of statement.
     pub statement_type: Option<BigQueryStatementType>,
     /// Rows a DML statement changed.
@@ -100,7 +119,7 @@ pub struct BigQueryQueryOutcome {
     pub cache_hit: Option<bool>,
 }
 
-/// What a query's job used, from the responses the query already received; the
+/// What a query used, from the responses the query already received; the
 /// `_with_stats` terminals return it with the rows.
 ///
 /// A figure BigQuery did not report is `None`. A result answered whole in the first `Query`
@@ -108,8 +127,10 @@ pub struct BigQueryQueryOutcome {
 /// job's statistics, which the query reads before it streams rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BigQueryJobStats {
-    /// The job that ran the query.
+    /// The job that ran the query, `None` when BigQuery ran it without one.
     pub job: Option<BigQueryJobRef>,
+    /// The ID BigQuery gave the query, when it reported one.
+    pub query_id: Option<BigQueryQueryId>,
     /// The kind of statement.
     pub statement_type: Option<BigQueryStatementType>,
     /// Rows in the result.
@@ -132,6 +153,7 @@ impl From<BigQueryJobStats> for BigQueryQueryOutcome {
     fn from(stats: BigQueryJobStats) -> Self {
         Self {
             job: stats.job,
+            query_id: stats.query_id,
             statement_type: stats.statement_type,
             num_dml_affected_rows: stats.num_dml_affected_rows,
             dml_stats: stats.dml_stats,

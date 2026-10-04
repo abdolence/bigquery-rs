@@ -1,4 +1,4 @@
-//! The identifiers of a job and of a `Query` call.
+//! The identifiers of a job, of a job-less query and of a `Query` call.
 
 use crate::errors::BigQueryError;
 use crate::BigQueryResult;
@@ -93,6 +93,32 @@ impl FromStr for BigQueryJobId {
 impl PartialEq<&str> for BigQueryJobId {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other
+    }
+}
+
+/// The ID BigQuery reports for a query it answered, with or without a job.
+///
+/// A query that ran without a job is listed in the `INFORMATION_SCHEMA.JOBS` views with this
+/// ID as its `job_id`, labels included, but the job calls such as `GetJob` refuse it, since it
+/// is not a valid job ID. When BigQuery did create a job, it reported the job's ID here.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BigQueryQueryId(String);
+
+impl BigQueryQueryId {
+    /// A query ID BigQuery returned.
+    pub(crate) fn reported(id: String) -> Self {
+        Self(id)
+    }
+
+    /// The ID.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for BigQueryQueryId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

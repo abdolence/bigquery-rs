@@ -33,7 +33,7 @@ tls-webpki-roots = ["gcloud-sdk/tls-webpki-roots"]
 
 [dependencies]
 tracing = "0.1"
-gcloud-sdk = { version = "0.32.3", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
+gcloud-sdk = { version = "0.32.4", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
 hyper = { version = "1" }
 rsb_derive = "0.5"
 tokio = { version = "1", features = ["time", "sync", "rt"] }
@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Installs a default rustls crypto provider for the tests, see the crypto provider section of the book.
 rustls = "0.23"
 # The integration tests build raw requests for the clients this crate hands out.
-gcloud-sdk = { version = "0.32.3", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
+gcloud-sdk = { version = "0.32.4", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
 proptest = "1"
 # Decodes the write path's protobuf rows against the descriptor the crate built for them.
 prost-reflect = "0.16"

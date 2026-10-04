@@ -4,20 +4,25 @@
 //! complete and whole in that first response is decoded from its inline Arrow. Anything else
 //! is read from the job's destination table through the Storage Read API, since
 //! `GetQueryResults` has no Arrow form and is used only to wait for the job.
+//!
+//! Job creation is optional unless the caller requires it, so a short query is answered
+//! without a job. Whenever the first response leaves anything for a later call, BigQuery has
+//! created a job for it, and that job is what the rest of the route reads.
 
 use crate::errors::{BigQueryError, BigQueryErrorPublicGenericDetails, BigQuerySystemError};
 use crate::query::jobs::{get_job, wait_for_job};
 use crate::query::params::parameter_mode;
 use crate::read::ArrowIpcDecoder;
 use crate::{
-    BigQueryDb, BigQueryDryRunResult, BigQueryJobRef, BigQueryJobStats, BigQueryLocation,
-    BigQueryQueryOutcome, BigQueryQueryParams, BigQueryReadCompression, BigQueryResult,
-    BigQueryStatementType, BigQueryTableRef, BigQueryTableSchema,
+    BigQueryDb, BigQueryDryRunResult, BigQueryJobCreation, BigQueryJobRef, BigQueryJobStats,
+    BigQueryLocation, BigQueryQueryId, BigQueryQueryOutcome, BigQueryQueryParams,
+    BigQueryReadCompression, BigQueryResult, BigQueryStatementType, BigQueryTableRef,
+    BigQueryTableSchema,
 };
 use arrow_array::RecordBatch;
 use gcloud_sdk::google::cloud::bigquery::v2::arrow_serialization_options::CompressionCodec;
 use gcloud_sdk::google::cloud::bigquery::v2::query_request::{
-    QueryResultsFormat, ResultsFormatSerializationOptions,
+    JobCreationMode, QueryResultsFormat, ResultsFormatSerializationOptions,
 };
 use gcloud_sdk::google::cloud::bigquery::v2::query_response::{Results, ResultsSchema};
 use gcloud_sdk::google::cloud::bigquery::v2::{
@@ -26,6 +31,7 @@ use gcloud_sdk::google::cloud::bigquery::v2::{
 };
 use gcloud_sdk::tonic::metadata::MetadataMap;
 use rand::RngExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::field::Empty;
 use tracing::Span;
@@ -39,6 +45,7 @@ pub(crate) fn query_span(params: &BigQueryQueryParams) -> Span {
         "BigQuery Query",
         "/bigquery/sql_len" = params.sql.len(),
         "/bigquery/job_id" = Empty,
+        "/bigquery/query_id" = Empty,
         "/bigquery/location" = Empty,
         "/bigquery/statement_type" = Empty,
         "/bigquery/bytes_processed" = Empty,
@@ -49,6 +56,15 @@ pub(crate) fn query_span(params: &BigQueryQueryParams) -> Span {
         "/bigquery/total_rows" = Empty,
         "/bigquery/route" = Empty,
     )
+}
+
+impl From<BigQueryJobCreation> for JobCreationMode {
+    fn from(mode: BigQueryJobCreation) -> Self {
+        match mode {
+            BigQueryJobCreation::Optional => Self::JobCreationOptional,
+            BigQueryJobCreation::Required => Self::JobCreationRequired,
+        }
+    }
 }
 
 /// The figures of the `Query` response; a figure it leaves out is filled later from the
@@ -64,6 +80,7 @@ impl From<&QueryResponse> for BigQueryJobStats {
         });
         Self {
             job,
+            query_id: non_empty(response.query_id.clone()).map(BigQueryQueryId::reported),
             statement_type: non_empty(response.statement_type.clone()).map(Into::into),
             total_rows: response.total_rows,
             total_bytes_processed: response.total_bytes_processed,
@@ -109,8 +126,22 @@ impl BigQueryJobStats {
         self.total_slot_ms = self.total_slot_ms.or(statistics.total_slot_ms);
     }
 
+    /// The figures of the first `Query` response, recorded on the query's span. A query that
+    /// ran without a job has its location only in the response, not in a job reference.
+    fn first_response(response: &QueryResponse, span: &Span) -> Self {
+        let stats = Self::from(response);
+        stats.record(span);
+        if stats.job.is_none() && !response.location.is_empty() {
+            span.record("/bigquery/location", response.location.as_str());
+        }
+        stats
+    }
+
     /// Records the figures known so far on the query's span.
     fn record(&self, span: &Span) {
+        if let Some(query_id) = &self.query_id {
+            span.record("/bigquery/query_id", query_id.as_str());
+        }
         if let Some(job) = &self.job {
             span.record("/bigquery/job_id", job.job_id.as_str());
             if let Some(location) = &job.location {
@@ -241,6 +272,7 @@ fn query_request(
             }),
             labels: params.labels.clone().into_iter().collect(),
             maximum_bytes_billed: params.maximum_bytes_billed,
+            job_creation_mode: JobCreationMode::from(params.job_creation).into(),
             request_id: params
                 .request_id
                 .as_ref()
@@ -260,6 +292,10 @@ fn query_request(
 }
 
 /// Sends `Query`. Its retries are safe because every attempt repeats one `request_id`.
+///
+/// A retry requires a job whatever the first attempt asked for: BigQuery answers a repeated
+/// `request_id` with the job the first attempt created only in that mode, and with
+/// `AlreadyExists` for that job in optional mode.
 async fn post_query(
     db: &BigQueryDb,
     params: &BigQueryQueryParams,
@@ -267,10 +303,22 @@ async fn post_query(
     span: &Span,
 ) -> BigQueryResult<QueryResponse> {
     let request = query_request(db, params, purpose)?;
-    db.retry(span, "run a query", &request, &MetadataMap::new(), |r| {
-        let mut client = db.job_client();
-        async move { client.query(r).await }
-    })
+    let retrying = AtomicBool::new(false);
+    db.retry(
+        span,
+        "run a query",
+        &request,
+        &MetadataMap::new(),
+        |mut r| {
+            if retrying.swap(true, Ordering::Relaxed) {
+                if let Some(query) = r.get_mut().query_request.as_mut() {
+                    query.job_creation_mode = JobCreationMode::JobCreationRequired.into();
+                }
+            }
+            let mut client = db.job_client();
+            async move { client.query(r).await }
+        },
+    )
     .await
 }
 
@@ -278,10 +326,14 @@ fn timeout_ms(params: &BigQueryQueryParams) -> BigQueryResult<u32> {
     millis_u32("timeout", params.timeout.unwrap_or(DEFAULT_TIMEOUT))
 }
 
+/// BigQuery creates a job for any query it cannot answer whole in the first response, so a
+/// response that leaves rows or the job's completion to a later call names that job.
 fn missing_job() -> BigQueryError {
     system_error(
         "NO_JOB_REFERENCE",
-        "BigQuery answered an unfinished query without a job reference to wait on".into(),
+        "BigQuery answered a query that is unfinished or only partly inline without a job \
+         reference to read the rest from"
+            .into(),
     )
 }
 
@@ -308,8 +360,7 @@ pub(crate) async fn query_rows(
     span: &Span,
 ) -> BigQueryResult<(Rows, BigQueryJobStats)> {
     let response = post_query(db, params, Purpose::Rows, span).await?;
-    let mut stats = BigQueryJobStats::from(&response);
-    stats.record(span);
+    let mut stats = BigQueryJobStats::first_response(&response, span);
     if response.job_complete == Some(true) {
         if response.page_token.is_empty() {
             let batch = inline_batch(&response)?;
@@ -380,8 +431,7 @@ pub(crate) async fn execute(
     span: &Span,
 ) -> BigQueryResult<BigQueryQueryOutcome> {
     let response = post_query(db, params, Purpose::Execute, span).await?;
-    let mut stats = BigQueryJobStats::from(&response);
-    stats.record(span);
+    let mut stats = BigQueryJobStats::first_response(&response, span);
     if response.job_complete == Some(true) {
         return Ok(stats.into());
     }

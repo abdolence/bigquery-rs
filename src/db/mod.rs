@@ -142,11 +142,12 @@ impl BigQueryDb {
         token_source_type: TokenSourceType,
     ) -> BigQueryResult<Self> {
         table_ref::check_project_id("google_project_id", &options.google_project_id)?;
-        let api_url = grpc_origin("bigquery_api_url", &options.effective_bigquery_api_url())?;
-        let storage_api_url = grpc_origin(
-            "bigquery_storage_api_url",
-            &options.effective_bigquery_storage_api_url(),
-        )?;
+        let (api, storage) = (
+            options.effective_bigquery_api_url(),
+            options.effective_bigquery_storage_api_url(),
+        );
+        let api_url = grpc_endpoint("bigquery_api_url", &api)?;
+        let storage_api_url = grpc_endpoint("bigquery_storage_api_url", &storage)?;
 
         info!(
             google_project_id = options.google_project_id,
@@ -268,16 +269,12 @@ impl std::fmt::Debug for BigQueryDb {
     }
 }
 
-/// The `scheme://host[:port]` that a channel to `url` connects to, with `field` naming the option
-/// in the error.
-///
-/// gcloud-sdk takes the TLS server name from this text with the `https://` cut off, so it must
-/// carry no path, not even the `/` that [`Url`] adds to every `http` and `https` URL.
+/// `url` as the gRPC channel takes it, with `field` naming the option in the error.
 ///
 /// # Errors
 /// [`BigQueryError::InvalidParametersError`] if the scheme is not `http` or `https`, or the URL
 /// has no host.
-fn grpc_origin(field: &'static str, url: &url::Url) -> BigQueryResult<String> {
+fn grpc_endpoint<'u>(field: &'static str, url: &'u url::Url) -> BigQueryResult<&'u str> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(BigQueryError::invalid_parameters(
             field,
@@ -290,7 +287,7 @@ fn grpc_origin(field: &'static str, url: &url::Url) -> BigQueryResult<String> {
             format!("must name a host, was \"{url}\""),
         ));
     }
-    Ok(url.origin().ascii_serialization())
+    Ok(url.as_str())
 }
 
 #[cfg(test)]
@@ -320,22 +317,6 @@ mod tests {
                 Ok(_) => panic!("{field}: expected invalid parameters, got a client"),
             }
         }
-    }
-
-    #[test]
-    fn a_channel_connects_to_the_origin_without_a_path() -> BigQueryResult<()> {
-        let options = BigQueryDbOptions::new("p".into());
-        assert_eq!(
-            grpc_origin("f", &options.effective_bigquery_api_url())?,
-            BIGQUERY_API_URL
-        );
-        assert_eq!(
-            grpc_origin("f", &options.effective_bigquery_storage_api_url())?,
-            BIGQUERY_STORAGE_API_URL
-        );
-        let local = url::Url::parse("http://127.0.0.1:9050/some/path?q=1").expect("a URL");
-        assert_eq!(grpc_origin("f", &local)?, "http://127.0.0.1:9050");
-        Ok(())
     }
 
     #[tokio::test]
