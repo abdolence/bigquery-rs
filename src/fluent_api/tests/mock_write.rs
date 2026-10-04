@@ -40,6 +40,7 @@ fn summary(rows: usize) -> BigQueryWriteSummary {
         rows_written: rows as u64,
         rows_failed: 0,
         batches: 1,
+        bytes_sent: 0,
         stream: None,
         commit_time: None,
     }

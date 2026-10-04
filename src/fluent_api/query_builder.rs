@@ -1,7 +1,8 @@
 use crate::query::{infer_param, struct_params, typed_param, ParamFailure, ParamLabel};
 use crate::{
-    BigQueryDatasetRef, BigQueryDryRunResult, BigQueryParamType, BigQueryQueryOutcome,
-    BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions, BigQueryResult,
+    BigQueryDatasetRef, BigQueryDryRunResult, BigQueryJobStats, BigQueryParamType,
+    BigQueryQueryOutcome, BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions,
+    BigQueryResult,
 };
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
@@ -287,6 +288,27 @@ where
     pub async fn query(self) -> BigQueryResult<Vec<T>> {
         let (db, params) = self.checked()?;
         db.query_obj(params).await
+    }
+
+    /// Reads every row into a `Vec`, as [`query`](Self::query), with what the job used: bytes
+    /// processed and billed, slot milliseconds, whether the cache answered.
+    pub async fn query_with_stats(self) -> BigQueryResult<(Vec<T>, BigQueryJobStats)> {
+        let (db, params) = self.checked()?;
+        db.query_obj_with_stats(params).await
+    }
+
+    /// Streams the rows, as [`stream_query_with_errors`](Self::stream_query_with_errors), with
+    /// what the job used.
+    ///
+    /// The stats are returned beside the stream rather than at its end: the query waits for
+    /// its job to finish before the first row streams, so every figure BigQuery reports is
+    /// known by then, from the `Query` response or from the job a large result is read from.
+    /// What reading the rows cost is on the read's span instead.
+    pub async fn stream_query_with_stats<'b>(
+        self,
+    ) -> BigQueryResult<(BoxStream<'b, BigQueryResult<T>>, BigQueryJobStats)> {
+        let (db, params) = self.checked()?;
+        db.stream_query_obj_with_stats(params).await
     }
 
     /// Streams the rows. A row that fails to decode is logged at `error!` and skipped. A read

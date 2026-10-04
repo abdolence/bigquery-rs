@@ -36,7 +36,22 @@ fn read_span(params: &BigQueryReadParams) -> tracing::Span {
         "BigQuery Read",
         "/bigquery/table" = %params.table,
         "/bigquery/streams" = Empty,
+        "/bigquery/estimated_bytes_scanned" = Empty,
+        "/bigquery/estimated_rows" = Empty,
+        "/bigquery/rows_read" = Empty,
+        "/bigquery/bytes_read" = Empty,
+        "/bigquery/throttle_percent" = Empty,
     )
+}
+
+/// Records what the session reported when it opened on the read's span.
+fn record_session(span: &tracing::Span, session: &session::OpenedSession) {
+    span.record("/bigquery/streams", session.streams.len());
+    span.record(
+        "/bigquery/estimated_bytes_scanned",
+        session.estimated_bytes_scanned,
+    );
+    span.record("/bigquery/estimated_rows", session.estimated_rows);
 }
 
 /// Reads `params.table` as the record batches BigQuery sends, after IPC decode and
@@ -47,7 +62,7 @@ pub(crate) async fn read_table_batches<'b>(
 ) -> BigQueryResult<BoxStream<'b, BigQueryResult<RecordBatch>>> {
     let span = read_span(&params);
     let session = open_session(db, &params, Projection::All, &span).await?;
-    span.record("/bigquery/streams", session.streams.len());
+    record_session(&span, &session);
     Ok(stream::start_streams(db, session, &span, |batch, _| batch).into_batches())
 }
 
@@ -67,7 +82,7 @@ where
         None => Projection::All,
     };
     let session = open_session(db, &params, projection, &span).await?;
-    span.record("/bigquery/streams", session.streams.len());
+    record_session(&span, &session);
     Ok(
         stream::start_streams(db, session, &span, |batch, first_row| {
             decode_rows::<T>(&batch, first_row)

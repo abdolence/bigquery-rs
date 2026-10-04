@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::fake::spans::CapturedSpans;
 use crate::db::fake::FakeBigQuery;
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::{
@@ -833,4 +834,88 @@ async fn drop_without_finish_warns() {
         logged.contains("WARN") && logged.contains("dropped without finish()"),
         "{logged}"
     );
+}
+
+#[tokio::test]
+async fn write_span_and_summary_record_what_was_sent() {
+    let (spans, _guard) = CapturedSpans::capture();
+    let sent_bytes = Arc::new(AtomicUsize::new(0));
+    let counted = sent_bytes.clone();
+    let fake = FakeBigQuery::start(move |call| {
+        let counted = counted.clone();
+        async move {
+            let Some(mut call) = answer_unary(call, schema(&[])).await else {
+                return;
+            };
+            let mut failed_once = false;
+            while let Some(request) = call.next_request::<AppendRowsRequest>().await {
+                counted.fetch_add(request.encoded_len(), Ordering::SeqCst);
+                if ids(&request) == [1] && !failed_once {
+                    failed_once = true;
+                    call.send(&in_band(Code::Internal, None, "try again"));
+                } else {
+                    call.send(&ack(None));
+                }
+            }
+            call.finish();
+        }
+    })
+    .await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
+        .await
+        .expect("the writer opens");
+    for id in 0..3 {
+        within(writer.write(&row(id)))
+            .await
+            .expect("the row is written");
+    }
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    let bytes_sent = sent_bytes.load(Ordering::SeqCst);
+    assert!(bytes_sent > 0);
+    assert_eq!(summary.bytes_sent, bytes_sent as u64);
+    assert_eq!(
+        spans.only("BigQuery streaming write"),
+        crate::db::fake::spans::bigquery_fields(&[
+            ("table", "ds.t"),
+            ("write_mode", "Default"),
+            ("rows_appended", "3"),
+            ("bytes_sent", &bytes_sent.to_string()),
+            ("appends", "4"),
+            ("retries", "1"),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn dropped_writer_records_what_was_sent() {
+    let (spans, _guard) = CapturedSpans::capture();
+    let fake = FakeBigQuery::start(|call| async move {
+        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+            return;
+        };
+        while let Some(_request) = call.next_request::<AppendRowsRequest>().await {
+            call.send(&ack(None));
+        }
+        call.finish();
+    })
+    .await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_streaming_writer::<Row>(DS.table(T))
+        .await
+        .expect("the writer opens");
+    within(writer.write(&row(0)))
+        .await
+        .expect("the row is written");
+    within(writer.flush())
+        .await
+        .expect("the row is acknowledged");
+    drop(writer);
+    let fields = spans
+        .wait_for("BigQuery streaming write", "/bigquery/appends")
+        .await;
+    assert_eq!(fields["/bigquery/appends"], "1");
+    assert_eq!(fields["/bigquery/rows_appended"], "1");
 }

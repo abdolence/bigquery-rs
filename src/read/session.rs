@@ -24,10 +24,13 @@ use tracing::{warn, Span};
 /// know, including for about 30 seconds after the column was added or renamed.
 const SELECTED_FIELDS_DO_NOT_EXIST: &str = "selected fields do not exist";
 
-/// An opened session: the Arrow schema message every stream starts from, and the streams.
+/// An opened session: the Arrow schema message every stream starts from, the streams, and
+/// BigQuery's estimates of what reading them all scans.
 pub(crate) struct OpenedSession {
     pub schema: Vec<u8>,
     pub streams: Vec<String>,
+    pub estimated_bytes_scanned: i64,
+    pub estimated_rows: i64,
 }
 
 /// How the columns of a session are chosen.
@@ -229,5 +232,7 @@ async fn create(
     Ok(OpenedSession {
         schema,
         streams: session.streams.into_iter().map(|s| s.name).collect(),
+        estimated_bytes_scanned: session.estimated_total_bytes_scanned,
+        estimated_rows: session.estimated_row_count,
     })
 }

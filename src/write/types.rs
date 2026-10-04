@@ -87,6 +87,8 @@ pub struct BigQueryWriteSummary {
     pub rows_failed: u64,
     /// Batches sent.
     pub batches: u64,
+    /// Bytes of every `AppendRows` request sent, resent ones included, before gRPC framing.
+    pub bytes_sent: u64,
     /// The write stream's name; `None` for the default stream.
     pub stream: Option<String>,
     /// When a pending stream was committed.

@@ -31,6 +31,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tracing::field::Empty;
 use tracing::{debug_span, warn, Span};
 
 /// The schema a write stream reports, in the crate's vocabulary.
@@ -248,6 +249,10 @@ impl WriterCore {
             "BigQuery streaming write",
             "/bigquery/table" = %table,
             "/bigquery/write_mode" = ?options.mode,
+            "/bigquery/rows_appended" = Empty,
+            "/bigquery/bytes_sent" = Empty,
+            "/bigquery/appends" = Empty,
+            "/bigquery/retries" = Empty,
         );
         let stream = match options.mode {
             BigQueryWriteMode::Default => {

@@ -1,4 +1,7 @@
-use crate::{BigQueryDryRunResult, BigQueryQueryOutcome, BigQueryQueryParams, BigQueryResult};
+use crate::{
+    BigQueryDryRunResult, BigQueryJobStats, BigQueryQueryOutcome, BigQueryQueryParams,
+    BigQueryResult,
+};
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -25,6 +28,25 @@ pub trait BigQueryQuerySupport {
         &self,
         params: BigQueryQueryParams,
     ) -> BigQueryResult<BoxStream<'b, BigQueryResult<T>>>
+    where
+        T: DeserializeOwned + Send + 'static;
+
+    /// Collects the result rows into a `Vec`, failing on the first error, with what the job
+    /// used.
+    async fn query_obj_with_stats<T>(
+        &self,
+        params: BigQueryQueryParams,
+    ) -> BigQueryResult<(Vec<T>, BigQueryJobStats)>
+    where
+        T: DeserializeOwned + Send + 'static;
+
+    /// Streams the result rows, yielding every failure as an `Err` item, with what the job
+    /// used. The job has finished before the first row streams, so the stats are complete
+    /// when this returns.
+    async fn stream_query_obj_with_stats<'b, T>(
+        &self,
+        params: BigQueryQueryParams,
+    ) -> BigQueryResult<(BoxStream<'b, BigQueryResult<T>>, BigQueryJobStats)>
     where
         T: DeserializeOwned + Send + 'static;
 

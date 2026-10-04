@@ -89,8 +89,56 @@ pub struct BigQueryQueryOutcome {
     pub total_rows: Option<u64>,
     /// Bytes the statement processed.
     pub total_bytes_processed: Option<i64>,
+    /// Bytes billed for the statement, after BigQuery's rounding and minimums.
+    pub total_bytes_billed: Option<i64>,
+    /// Slot milliseconds the job used.
+    pub total_slot_ms: Option<i64>,
     /// Whether the result came from the query cache.
     pub cache_hit: Option<bool>,
+}
+
+/// What a query's job used, from the responses the query already received; the
+/// `_with_stats` terminals return it with the rows.
+///
+/// A figure BigQuery did not report is `None`. A result answered whole in the first `Query`
+/// response carries that response's figures; any other result also has the figures of the
+/// job's statistics, which the query reads before it streams rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BigQueryJobStats {
+    /// The job that ran the query.
+    pub job: Option<BigQueryJobRef>,
+    /// `SELECT`, `INSERT`, `CREATE_TABLE`, and so on.
+    pub statement_type: Option<String>,
+    /// Rows in the result.
+    pub total_rows: Option<u64>,
+    /// Bytes the query processed.
+    pub total_bytes_processed: Option<i64>,
+    /// Bytes billed for the query, after BigQuery's rounding and minimums.
+    pub total_bytes_billed: Option<i64>,
+    /// Slot milliseconds the job used.
+    pub total_slot_ms: Option<i64>,
+    /// Whether the result came from the query cache.
+    pub cache_hit: Option<bool>,
+    /// Rows a DML statement changed.
+    pub num_dml_affected_rows: Option<i64>,
+    /// Rows a DML statement inserted, updated and deleted.
+    pub dml_stats: Option<BigQueryDmlStats>,
+}
+
+impl From<BigQueryJobStats> for BigQueryQueryOutcome {
+    fn from(stats: BigQueryJobStats) -> Self {
+        Self {
+            job: stats.job,
+            statement_type: stats.statement_type,
+            num_dml_affected_rows: stats.num_dml_affected_rows,
+            dml_stats: stats.dml_stats,
+            total_rows: stats.total_rows,
+            total_bytes_processed: stats.total_bytes_processed,
+            total_bytes_billed: stats.total_bytes_billed,
+            total_slot_ms: stats.total_slot_ms,
+            cache_hit: stats.cache_hit,
+        }
+    }
 }
 
 /// The rows a DML statement changed, by kind.

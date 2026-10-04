@@ -3,8 +3,8 @@
 
 use super::mockdb::MockDatabase;
 use crate::{
-    BigQueryDryRunResult, BigQueryQueryOutcome, BigQueryQueryParams, BigQueryQuerySupport,
-    BigQueryResult,
+    BigQueryDryRunResult, BigQueryJobStats, BigQueryQueryOutcome, BigQueryQueryParams,
+    BigQueryQuerySupport, BigQueryResult,
 };
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
@@ -58,6 +58,31 @@ impl BigQueryQuerySupport for MockDatabase {
         Ok(futures::stream::empty().boxed())
     }
 
+    async fn query_obj_with_stats<T>(
+        &self,
+        params: BigQueryQueryParams,
+    ) -> BigQueryResult<(Vec<T>, BigQueryJobStats)>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        record("query_obj_with_stats", params);
+        Ok((Vec::new(), BigQueryJobStats::default()))
+    }
+
+    async fn stream_query_obj_with_stats<'b, T>(
+        &self,
+        params: BigQueryQueryParams,
+    ) -> BigQueryResult<(BoxStream<'b, BigQueryResult<T>>, BigQueryJobStats)>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        record("stream_query_obj_with_stats", params);
+        Ok((
+            futures::stream::empty().boxed(),
+            BigQueryJobStats::default(),
+        ))
+    }
+
     async fn query_record_batches<'b>(
         &self,
         params: BigQueryQueryParams,
@@ -78,6 +103,8 @@ impl BigQueryQuerySupport for MockDatabase {
             dml_stats: None,
             total_rows: None,
             total_bytes_processed: None,
+            total_bytes_billed: None,
+            total_slot_ms: None,
             cache_hit: None,
         })
     }

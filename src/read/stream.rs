@@ -8,8 +8,9 @@ use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::read_rows_response::Rows;
-use gcloud_sdk::google::cloud::bigquery::storage::v1::ReadRowsRequest;
+use gcloud_sdk::google::cloud::bigquery::storage::v1::{ReadRowsRequest, ReadRowsResponse};
 use gcloud_sdk::tonic::Status;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -25,10 +26,54 @@ enum StreamMessage<M> {
     Failed(BigQueryError),
 }
 
-/// The read streams of one session, running. Dropping it cancels every stream task.
+/// What every stream of one read has received so far.
+#[derive(Default)]
+struct ReadTotals {
+    rows: AtomicI64,
+    /// Summed only over the responses that report their size.
+    bytes: AtomicI64,
+    bytes_reported: AtomicBool,
+    /// The highest throttling any response reported.
+    throttle_percent: AtomicI32,
+    throttle_reported: AtomicBool,
+}
+
+impl ReadTotals {
+    fn add(&self, response: &ReadRowsResponse) {
+        self.rows.fetch_add(response.row_count, Ordering::Relaxed);
+        if let Some(bytes) = response.uncompressed_byte_size {
+            self.bytes.fetch_add(bytes, Ordering::Relaxed);
+            self.bytes_reported.store(true, Ordering::Relaxed);
+        }
+        if let Some(throttle) = &response.throttle_state {
+            self.throttle_percent
+                .fetch_max(throttle.throttle_percent, Ordering::Relaxed);
+            self.throttle_reported.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn record(&self, span: &Span) {
+        span.record("/bigquery/rows_read", self.rows.load(Ordering::Relaxed));
+        if self.bytes_reported.load(Ordering::Relaxed) {
+            span.record("/bigquery/bytes_read", self.bytes.load(Ordering::Relaxed));
+        }
+        if self.throttle_reported.load(Ordering::Relaxed) {
+            span.record(
+                "/bigquery/throttle_percent",
+                self.throttle_percent.load(Ordering::Relaxed),
+            );
+        }
+    }
+}
+
+/// The read streams of one session, running. Dropping it cancels every stream task and
+/// records what they received on the read's span, so a read that ends, fails or is abandoned
+/// reports its totals the same way.
 pub(crate) struct RunningStreams<M> {
     rx: mpsc::Receiver<StreamMessage<M>>,
     tasks: JoinSet<()>,
+    span: Span,
+    totals: Arc<ReadTotals>,
 }
 
 /// Starts one task per stream of `session`. Each task decodes its batches with `on_batch`,
@@ -47,6 +92,7 @@ where
 {
     let (tx, rx) = mpsc::channel((2 * session.streams.len()).max(1));
     let schema: Arc<[u8]> = session.schema.into();
+    let totals = Arc::new(ReadTotals::default());
     let mut tasks = JoinSet::new();
     for stream in session.streams {
         let stream_task = StreamTask {
@@ -54,6 +100,7 @@ where
             stream,
             schema: schema.clone(),
             span: span.clone(),
+            totals: totals.clone(),
         };
         let (tx, on_batch) = (tx.clone(), on_batch.clone());
         tasks.spawn(async move {
@@ -62,7 +109,12 @@ where
             }
         });
     }
-    RunningStreams { rx, tasks }
+    RunningStreams {
+        rx,
+        tasks,
+        span: span.clone(),
+        totals,
+    }
 }
 
 impl RunningStreams<RecordBatch> {
@@ -104,6 +156,7 @@ impl<T: Send + 'static> RunningStreams<Vec<BigQueryResult<T>>> {
 impl<M> Drop for RunningStreams<M> {
     fn drop(&mut self) {
         self.tasks.abort_all();
+        self.totals.record(&self.span);
     }
 }
 
@@ -112,6 +165,7 @@ struct StreamTask {
     stream: String,
     schema: Arc<[u8]>,
     span: Span,
+    totals: Arc<ReadTotals>,
 }
 
 impl StreamTask {
@@ -143,6 +197,7 @@ impl StreamTask {
                     loop {
                         match responses.message().await {
                             Ok(Some(response)) => {
+                                self.totals.add(&response);
                                 let rows = match response.rows {
                                     Some(Rows::ArrowRecordBatch(rows)) => rows,
                                     Some(Rows::AvroRows(_)) => {

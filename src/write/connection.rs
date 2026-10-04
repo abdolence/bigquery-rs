@@ -240,6 +240,11 @@ pub(crate) struct ConnectionTask {
     rows_written: u64,
     rows_failed: u64,
     batches: u64,
+    /// `AppendRows` requests sent, resends included, and their encoded bytes.
+    appends: u64,
+    bytes_sent: u64,
+    /// Requests that sent a batch again.
+    retries: u64,
     first_error: Option<BigQueryError>,
     fatal: Option<BigQueryError>,
     flush_waiters: Vec<oneshot::Sender<BigQueryResult<()>>>,
@@ -274,6 +279,9 @@ impl ConnectionTask {
             rows_written: 0,
             rows_failed: 0,
             batches: 0,
+            appends: 0,
+            bytes_sent: 0,
+            retries: 0,
             first_error: None,
             fatal: None,
             flush_waiters: Vec::new(),
@@ -406,6 +414,7 @@ impl ConnectionTask {
                 batch.rows.clone(),
             );
             batch.attempts += 1;
+            let bytes = request.encoded_len() as u64;
             let sent = match self.conn.as_mut() {
                 Some(conn) => conn.requests.unbounded_send(request).is_ok(),
                 None => {
@@ -418,6 +427,11 @@ impl ConnectionTask {
                 self.on_stream_error(Status::unavailable("the AppendRows request stream closed"))
                     .await;
                 continue;
+            }
+            self.appends += 1;
+            self.bytes_sent += bytes;
+            if batch.attempts > 1 {
+                self.retries += 1;
             }
             if let Some(conn) = self.conn.as_mut() {
                 conn.plan = Some(batch.plan.clone());
@@ -746,6 +760,7 @@ impl ConnectionTask {
             rows_written: self.rows_written,
             rows_failed: self.rows_failed,
             batches: self.batches,
+            bytes_sent: self.bytes_sent,
             stream: self
                 .uses_offsets()
                 .then(|| self.settings.target.write_stream.clone()),
@@ -822,6 +837,18 @@ impl ConnectionTask {
                 })
             }
         }
+    }
+}
+
+/// Records what the task sent on the writer's span when it ends: after `finish()` or
+/// `finalize()`, when the writer is dropped, or when the task fails.
+impl Drop for ConnectionTask {
+    fn drop(&mut self) {
+        let span = &self.settings.span;
+        span.record("/bigquery/rows_appended", self.rows_written);
+        span.record("/bigquery/bytes_sent", self.bytes_sent);
+        span.record("/bigquery/appends", self.appends);
+        span.record("/bigquery/retries", self.retries);
     }
 }
 

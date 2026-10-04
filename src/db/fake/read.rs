@@ -178,12 +178,14 @@ pub(crate) fn send_batches(call: &mut FakeCall, batches: &[(Vec<u8>, i64)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fake::spans::{bigquery_fields, CapturedSpans};
     use crate::db::fake::FakeBigQuery;
     use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
     use crate::{BigQueryDatasetId, BigQueryResult, BigQueryTableId};
     use arrow_array::{ArrayRef, Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use futures::StreamExt;
+    use gcloud_sdk::google::cloud::bigquery::storage::v1::ThrottleState;
     use gcloud_sdk::tonic::Code;
     use serde::Deserialize;
     use std::collections::BTreeSet;
@@ -681,6 +683,127 @@ mod tests {
             .await;
         assert!(batches.is_empty(), "{batches:?}");
         assert_eq!(fake.calls(), ["CreateReadSession []"]);
+        Ok(())
+    }
+
+    /// A fake whose session estimates 4096 bytes and 3 rows over two streams, `s0` sending
+    /// `[1, 2]` then `[3]` at 10% throttling and `s1` sending `[4]` at 25%, each response
+    /// reporting 100 uncompressed bytes per row.
+    async fn serve_with_figures() -> FakeBigQuery {
+        let table = Arc::new(FakeReadTable::new(vec![
+            vec![people(&[1, 2]), people(&[3])],
+            vec![people(&[4])],
+        ]));
+        FakeBigQuery::start(move |mut call: FakeCall| {
+            let table = table.clone();
+            async move {
+                match call.method() {
+                    "CreateReadSession" => {
+                        let request = session_request(&mut call).await;
+                        let (schema, _) = table.encode(requested_compression(&request));
+                        call.reply(&ReadSession {
+                            name: "session".into(),
+                            streams: ["s0", "s1"]
+                                .map(|name| ReadStream { name: name.into() })
+                                .to_vec(),
+                            schema: Some(read_session::Schema::ArrowSchema(ArrowSchema {
+                                serialized_schema: schema,
+                            })),
+                            estimated_total_bytes_scanned: 4096,
+                            estimated_row_count: 3,
+                            ..Default::default()
+                        });
+                    }
+                    "ReadRows" => {
+                        let request = read_rows_request(&mut call).await;
+                        let index: usize = request.read_stream[1..].parse().expect("s<n>");
+                        let (_, streams) = table.encode(CompressionCodec::CompressionUnspecified);
+                        for (bytes, batch) in streams[index].iter().zip(&table.streams[index]) {
+                            let rows = batch.num_rows() as i64;
+                            call.send(&ReadRowsResponse {
+                                row_count: rows,
+                                uncompressed_byte_size: Some(100 * rows),
+                                throttle_state: Some(ThrottleState {
+                                    throttle_percent: [10, 25][index],
+                                }),
+                                rows: Some(read_rows_response::Rows::ArrowRecordBatch(
+                                    ArrowRecordBatch {
+                                        serialized_record_batch: bytes.clone(),
+                                        ..Default::default()
+                                    },
+                                )),
+                                ..Default::default()
+                            });
+                        }
+                        call.finish();
+                    }
+                    other => panic!("unexpected call {other}"),
+                }
+            }
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn read_span_records_the_session_estimates_and_what_was_read() -> BigQueryResult<()> {
+        let (spans, _guard) = CapturedSpans::capture();
+        let fake = serve_with_figures().await;
+        let batches = fake
+            .db
+            .fluent()
+            .select()
+            .from(DS.table(T))
+            .record_batches()
+            .await?;
+        let batches: Vec<RecordBatch> =
+            tokio::time::timeout(Duration::from_secs(20), batches.collect::<Vec<_>>())
+                .await
+                .expect("the merged stream ends")
+                .into_iter()
+                .collect::<BigQueryResult<_>>()?;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
+        assert_eq!(
+            spans.only("BigQuery Read"),
+            bigquery_fields(&[
+                ("table", "ds.t"),
+                ("streams", "2"),
+                ("estimated_bytes_scanned", "4096"),
+                ("estimated_rows", "3"),
+                ("rows_read", "4"),
+                ("bytes_read", "400"),
+                ("throttle_percent", "25"),
+            ])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_dropped_early_records_what_it_read() -> BigQueryResult<()> {
+        let (spans, _guard) = CapturedSpans::capture();
+        let fake = serve_with_figures().await;
+        let mut batches = fake
+            .db
+            .fluent()
+            .select()
+            .from(DS.table(T))
+            .record_batches()
+            .await?;
+        let first = tokio::time::timeout(Duration::from_secs(20), batches.next())
+            .await
+            .expect("a first batch arrives")
+            .expect("the stream has a batch")?;
+        drop(batches);
+        let fields = spans.only("BigQuery Read");
+        let rows_read: usize = fields
+            .get("/bigquery/rows_read")
+            .expect("rows_read is recorded on drop")
+            .parse()
+            .expect("rows_read is a count");
+        assert!(
+            (first.num_rows()..=4).contains(&rows_read),
+            "{rows_read} rows read after a first batch of {}",
+            first.num_rows()
+        );
         Ok(())
     }
 }

@@ -10,8 +10,9 @@ use crate::query::jobs::{get_job, wait_for_job};
 use crate::query::params::parameter_mode;
 use crate::read::ArrowIpcDecoder;
 use crate::{
-    BigQueryDb, BigQueryDryRunResult, BigQueryJobRef, BigQueryQueryOutcome, BigQueryQueryParams,
-    BigQueryReadCompression, BigQueryResult, BigQueryTableRef, BigQueryTableSchema,
+    BigQueryDb, BigQueryDryRunResult, BigQueryJobRef, BigQueryJobStats, BigQueryQueryOutcome,
+    BigQueryQueryParams, BigQueryReadCompression, BigQueryResult, BigQueryTableRef,
+    BigQueryTableSchema,
 };
 use arrow_array::RecordBatch;
 use gcloud_sdk::google::cloud::bigquery::v2::arrow_serialization_options::CompressionCodec;
@@ -20,8 +21,8 @@ use gcloud_sdk::google::cloud::bigquery::v2::query_request::{
 };
 use gcloud_sdk::google::cloud::bigquery::v2::query_response::{Results, ResultsSchema};
 use gcloud_sdk::google::cloud::bigquery::v2::{
-    ArrowSerializationOptions, DataFormatOptions, DatasetReference, Job, PostQueryRequest,
-    QueryRequest, QueryResponse,
+    ArrowSerializationOptions, DataFormatOptions, DatasetReference, GetQueryResultsResponse, Job,
+    PostQueryRequest, QueryRequest, QueryResponse,
 };
 use gcloud_sdk::tonic::metadata::MetadataMap;
 use rand::RngExt;
@@ -38,9 +39,106 @@ pub(crate) fn query_span(params: &BigQueryQueryParams) -> Span {
         "BigQuery Query",
         "/bigquery/sql_len" = params.sql.len(),
         "/bigquery/job_id" = Empty,
-        "/bigquery/route" = Empty,
+        "/bigquery/location" = Empty,
+        "/bigquery/statement_type" = Empty,
+        "/bigquery/bytes_processed" = Empty,
+        "/bigquery/bytes_billed" = Empty,
+        "/bigquery/slot_ms" = Empty,
+        "/bigquery/cache_hit" = Empty,
+        "/bigquery/dml_rows" = Empty,
         "/bigquery/total_rows" = Empty,
+        "/bigquery/route" = Empty,
     )
+}
+
+/// The figures of the `Query` response; a figure it leaves out is filled later from the
+/// responses the query goes on to receive.
+impl From<&QueryResponse> for BigQueryJobStats {
+    fn from(response: &QueryResponse) -> Self {
+        let job = response.job_reference.clone().map(|reference| {
+            let mut job = BigQueryJobRef::from(reference);
+            if job.location.is_none() {
+                job.location = non_empty(response.location.clone());
+            }
+            job
+        });
+        Self {
+            job,
+            statement_type: non_empty(response.statement_type.clone()),
+            total_rows: response.total_rows,
+            total_bytes_processed: response.total_bytes_processed,
+            total_bytes_billed: response.total_bytes_billed,
+            total_slot_ms: response.total_slot_ms,
+            cache_hit: response.cache_hit,
+            num_dml_affected_rows: response.num_dml_affected_rows,
+            dml_stats: response.dml_stats.map(Into::into),
+        }
+    }
+}
+
+impl BigQueryJobStats {
+    /// Fills the figures still missing from the `GetQueryResults` that saw the job complete.
+    fn merge_results(&mut self, results: &GetQueryResultsResponse) {
+        self.total_rows = self.total_rows.or(results.total_rows);
+        self.total_bytes_processed = self.total_bytes_processed.or(results.total_bytes_processed);
+        self.cache_hit = self.cache_hit.or(results.cache_hit);
+        self.num_dml_affected_rows = self.num_dml_affected_rows.or(results.num_dml_affected_rows);
+    }
+
+    /// Fills the figures still missing from the finished job's statistics, the query
+    /// statistics before the job-wide ones.
+    fn merge_job(&mut self, job: &Job) {
+        let Some(statistics) = &job.statistics else {
+            return;
+        };
+        if let Some(query) = &statistics.query {
+            self.statement_type = self
+                .statement_type
+                .take()
+                .or_else(|| non_empty(query.statement_type.clone()));
+            self.total_bytes_processed = self.total_bytes_processed.or(query.total_bytes_processed);
+            self.total_bytes_billed = self.total_bytes_billed.or(query.total_bytes_billed);
+            self.total_slot_ms = self.total_slot_ms.or(query.total_slot_ms);
+            self.cache_hit = self.cache_hit.or(query.cache_hit);
+            self.num_dml_affected_rows = self.num_dml_affected_rows.or(query.num_dml_affected_rows);
+            self.dml_stats = self.dml_stats.or(query.dml_stats.map(Into::into));
+        }
+        self.total_bytes_processed = self
+            .total_bytes_processed
+            .or(statistics.total_bytes_processed);
+        self.total_slot_ms = self.total_slot_ms.or(statistics.total_slot_ms);
+    }
+
+    /// Records the figures known so far on the query's span.
+    fn record(&self, span: &Span) {
+        if let Some(job) = &self.job {
+            span.record("/bigquery/job_id", job.job_id.as_str());
+            if let Some(location) = &job.location {
+                span.record("/bigquery/location", location.as_str());
+            }
+        }
+        if let Some(statement_type) = &self.statement_type {
+            span.record("/bigquery/statement_type", statement_type.as_str());
+        }
+        if let Some(bytes) = self.total_bytes_processed {
+            span.record("/bigquery/bytes_processed", bytes);
+        }
+        if let Some(bytes) = self.total_bytes_billed {
+            span.record("/bigquery/bytes_billed", bytes);
+        }
+        if let Some(slot_ms) = self.total_slot_ms {
+            span.record("/bigquery/slot_ms", slot_ms);
+        }
+        if let Some(cache_hit) = self.cache_hit {
+            span.record("/bigquery/cache_hit", cache_hit);
+        }
+        if let Some(rows) = self.num_dml_affected_rows {
+            span.record("/bigquery/dml_rows", rows);
+        }
+        if let Some(rows) = self.total_rows {
+            span.record("/bigquery/total_rows", rows);
+        }
+    }
 }
 
 /// What a terminal call asks of the `Query` request.
@@ -176,16 +274,6 @@ fn timeout_ms(params: &BigQueryQueryParams) -> BigQueryResult<u32> {
     millis_u32("timeout", params.timeout.unwrap_or(DEFAULT_TIMEOUT))
 }
 
-/// The job of a `Query` response, located where BigQuery said it ran.
-fn response_job(response: &QueryResponse, span: &Span) -> Option<BigQueryJobRef> {
-    let mut job = BigQueryJobRef::from(response.job_reference.clone()?);
-    if job.location.is_none() {
-        job.location = non_empty(response.location.clone());
-    }
-    span.record("/bigquery/job_id", job.job_id.as_str());
-    Some(job)
-}
-
 fn missing_job() -> BigQueryError {
     system_error(
         "NO_JOB_REFERENCE",
@@ -209,18 +297,16 @@ fn inline_batch(response: &QueryResponse) -> BigQueryResult<Option<RecordBatch>>
         .map(Some)
 }
 
-/// Runs the query and finds its rows.
+/// Runs the query and finds its rows, with the figures of every response it received.
 pub(crate) async fn query_rows(
     db: &BigQueryDb,
     params: &BigQueryQueryParams,
     span: &Span,
-) -> BigQueryResult<Rows> {
+) -> BigQueryResult<(Rows, BigQueryJobStats)> {
     let response = post_query(db, params, Purpose::Rows, span).await?;
-    let job = response_job(&response, span);
+    let mut stats = BigQueryJobStats::from(&response);
+    stats.record(span);
     if response.job_complete == Some(true) {
-        if let Some(total) = response.total_rows {
-            span.record("/bigquery/total_rows", total);
-        }
         if response.page_token.is_empty() {
             let batch = inline_batch(&response)?;
             let inline_rows = batch.as_ref().map_or(0, |b| b.num_rows() as u64);
@@ -228,15 +314,18 @@ pub(crate) async fn query_rows(
             // whole result only when it holds that many rows.
             if response.total_rows.is_none_or(|total| total == inline_rows) {
                 span.record("/bigquery/route", "inline");
-                return Ok(Rows::Inline(batch));
+                return Ok((Rows::Inline(batch), stats));
             }
         }
     } else {
-        let job = job.as_ref().ok_or_else(missing_job)?;
-        wait_for_job(db, job, timeout_ms(params)?, span).await?;
+        let job = stats.job.as_ref().ok_or_else(missing_job)?;
+        let results = wait_for_job(db, job, timeout_ms(params)?, span).await?;
+        stats.merge_results(&results);
     }
-    let job = job.ok_or_else(missing_job)?;
+    let job = stats.job.clone().ok_or_else(missing_job)?;
     let details = get_job(db, &job, span).await?;
+    stats.merge_job(&details);
+    stats.record(span);
     let destination = details
         .configuration
         .as_ref()
@@ -254,7 +343,7 @@ pub(crate) async fn query_rows(
                     ),
                 )
             })?;
-            Ok(Rows::Table(table))
+            Ok((Rows::Table(table), stats))
         }
         None if statement_type_of(&details).as_deref() == Some("SELECT") => Err(system_error(
             "NO_DESTINATION_TABLE",
@@ -265,7 +354,7 @@ pub(crate) async fn query_rows(
         )),
         None => {
             span.record("/bigquery/route", "none");
-            Ok(Rows::None)
+            Ok((Rows::None, stats))
         }
     }
 }
@@ -284,35 +373,18 @@ pub(crate) async fn execute(
     span: &Span,
 ) -> BigQueryResult<BigQueryQueryOutcome> {
     let response = post_query(db, params, Purpose::Execute, span).await?;
-    let job = response_job(&response, span);
+    let mut stats = BigQueryJobStats::from(&response);
+    stats.record(span);
     if response.job_complete == Some(true) {
-        return Ok(BigQueryQueryOutcome {
-            job,
-            statement_type: non_empty(response.statement_type),
-            num_dml_affected_rows: response.num_dml_affected_rows,
-            dml_stats: response.dml_stats.map(Into::into),
-            total_rows: response.total_rows,
-            total_bytes_processed: response.total_bytes_processed,
-            cache_hit: response.cache_hit,
-        });
+        return Ok(stats.into());
     }
-    let job = job.ok_or_else(missing_job)?;
+    let job = stats.job.clone().ok_or_else(missing_job)?;
     let results = wait_for_job(db, &job, timeout_ms(params)?, span).await?;
+    stats.merge_results(&results);
     let details = get_job(db, &job, span).await?;
-    let statistics = details.statistics.and_then(|s| s.query).unwrap_or_default();
-    Ok(BigQueryQueryOutcome {
-        job: Some(job),
-        statement_type: non_empty(statistics.statement_type),
-        num_dml_affected_rows: results
-            .num_dml_affected_rows
-            .or(statistics.num_dml_affected_rows),
-        dml_stats: statistics.dml_stats.map(Into::into),
-        total_rows: results.total_rows,
-        total_bytes_processed: results
-            .total_bytes_processed
-            .or(statistics.total_bytes_processed),
-        cache_hit: results.cache_hit.or(statistics.cache_hit),
-    })
+    stats.merge_job(&details);
+    stats.record(span);
+    Ok(stats.into())
 }
 
 /// Validates the statement and reports its cost without running it.

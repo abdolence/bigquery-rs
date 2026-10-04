@@ -8,6 +8,7 @@
 mod admin;
 mod query;
 mod read;
+pub(crate) mod spans;
 mod table;
 mod write;
 

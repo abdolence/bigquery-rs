@@ -131,10 +131,11 @@ mod tests {
     use crate::db::fake::read::{
         get_table, open_session, read_rows_request, send_batches, session_request, FakeReadTable,
     };
+    use crate::db::fake::spans::{bigquery_fields, CapturedSpans};
     use crate::db::fake::FakeBigQuery;
     use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
     use crate::{
-        BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobRef,
+        BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobRef, BigQueryJobStats,
         BigQueryQueryOutcome, BigQueryResult,
     };
     use arrow_array::{ArrayRef, Int64Array, StringArray};
@@ -561,6 +562,8 @@ mod tests {
                     ..Default::default()
                 }),
                 total_bytes_processed: Some(33),
+                total_bytes_billed: Some(10_485_760),
+                total_slot_ms: Some(12),
                 cache_hit: Some(false),
                 ..Default::default()
             });
@@ -584,6 +587,8 @@ mod tests {
                 }),
                 total_rows: None,
                 total_bytes_processed: Some(33),
+                total_bytes_billed: Some(10_485_760),
+                total_slot_ms: Some(12),
                 cache_hit: Some(false),
             }
         );
@@ -650,6 +655,232 @@ mod tests {
                 "GetQueryResults job1 at US max_results=Some(0)",
                 "GetJob job1 at US"
             ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inline_result_records_the_response_figures() -> BigQueryResult<()> {
+        let (spans, _guard) = CapturedSpans::capture();
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            query_request(&mut call).await;
+            let mut response = inline_response(&people(&[1, 2]), 2);
+            response.location = "US".into();
+            response.total_bytes_processed = Some(100);
+            response.total_bytes_billed = Some(10_485_760);
+            response.total_slot_ms = Some(7);
+            response.cache_hit = Some(false);
+            call.reply(&response);
+        })
+        .await;
+        let (rows, stats) = fake
+            .db
+            .fluent()
+            .query("SELECT 1")
+            .obj::<Person>()
+            .query_with_stats()
+            .await?;
+        assert_eq!(rows, [person(1), person(2)]);
+        assert_eq!(
+            stats,
+            BigQueryJobStats {
+                job: Some(job_reference().into()),
+                statement_type: Some("SELECT".into()),
+                total_rows: Some(2),
+                total_bytes_processed: Some(100),
+                total_bytes_billed: Some(10_485_760),
+                total_slot_ms: Some(7),
+                cache_hit: Some(false),
+                num_dml_affected_rows: None,
+                dml_stats: None,
+            }
+        );
+        assert_eq!(
+            spans.only("BigQuery Query"),
+            bigquery_fields(&[
+                ("sql_len", "8"),
+                ("job_id", "job1"),
+                ("location", "US"),
+                ("statement_type", "SELECT"),
+                ("bytes_processed", "100"),
+                ("bytes_billed", "10485760"),
+                ("slot_ms", "7"),
+                ("cache_hit", "false"),
+                ("total_rows", "2"),
+                ("route", "inline"),
+            ])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_read_result_takes_the_figures_of_its_job() -> BigQueryResult<()> {
+        let (spans, _guard) = CapturedSpans::capture();
+        let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1, 2, 3])]]));
+        let fake = FakeBigQuery::start(move |mut call: FakeCall| {
+            let table = table.clone();
+            async move {
+                match call.method() {
+                    "Query" => {
+                        query_request(&mut call).await;
+                        let mut response = inline_response(&people(&[1]), 3);
+                        response.page_token = "page-2".into();
+                        response.total_bytes_processed = Some(500);
+                        call.reply(&response);
+                    }
+                    "GetJob" => {
+                        get_job_request(&mut call).await;
+                        let mut job = done_job("_anon", "anon1");
+                        job.statistics = Some(JobStatistics {
+                            total_bytes_processed: Some(500),
+                            total_slot_ms: Some(40),
+                            query: Some(JobStatistics2 {
+                                statement_type: "SELECT".into(),
+                                total_bytes_processed: Some(500),
+                                total_bytes_billed: Some(10_485_760),
+                                total_slot_ms: Some(40),
+                                cache_hit: Some(false),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        });
+                        call.reply(&job);
+                    }
+                    _ => storage_read(call, &table).await,
+                }
+            }
+        })
+        .await;
+        let (rows, stats) = fake
+            .db
+            .fluent()
+            .query("SELECT big")
+            .obj::<Person>()
+            .stream_query_with_stats()
+            .await?;
+        assert_eq!(
+            stats,
+            BigQueryJobStats {
+                job: Some(job_reference().into()),
+                statement_type: Some("SELECT".into()),
+                total_rows: Some(3),
+                total_bytes_processed: Some(500),
+                total_bytes_billed: Some(10_485_760),
+                total_slot_ms: Some(40),
+                cache_hit: Some(false),
+                num_dml_affected_rows: None,
+                dml_stats: None,
+            }
+        );
+        let mut rows: Vec<Person> =
+            tokio::time::timeout(Duration::from_secs(20), rows.try_collect())
+                .await
+                .expect("the rows end")?;
+        rows.sort();
+        assert_eq!(rows, [person(1), person(2), person(3)]);
+        assert_eq!(
+            spans.only("BigQuery Query"),
+            bigquery_fields(&[
+                ("sql_len", "10"),
+                ("job_id", "job1"),
+                ("location", "US"),
+                ("statement_type", "SELECT"),
+                ("bytes_processed", "500"),
+                ("bytes_billed", "10485760"),
+                ("slot_ms", "40"),
+                ("cache_hit", "false"),
+                ("total_rows", "3"),
+                ("route", "storage_read"),
+            ])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn polled_statement_records_the_figures_of_its_results_and_job() -> BigQueryResult<()> {
+        let (spans, _guard) = CapturedSpans::capture();
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            match call.method() {
+                "Query" => {
+                    query_request(&mut call).await;
+                    call.reply(&incomplete_response());
+                }
+                "GetQueryResults" => {
+                    query_results_request(&mut call).await;
+                    call.reply(&GetQueryResultsResponse {
+                        job_reference: Some(job_reference()),
+                        job_complete: Some(true),
+                        num_dml_affected_rows: Some(3),
+                        total_bytes_processed: Some(77),
+                        cache_hit: Some(false),
+                        ..Default::default()
+                    });
+                }
+                "GetJob" => {
+                    get_job_request(&mut call).await;
+                    let mut job = done_job("ds", "t");
+                    job.configuration = None;
+                    job.statistics = Some(JobStatistics {
+                        total_slot_ms: Some(9),
+                        query: Some(JobStatistics2 {
+                            statement_type: "INSERT".into(),
+                            total_bytes_billed: Some(10_485_760),
+                            total_slot_ms: Some(9),
+                            num_dml_affected_rows: Some(3),
+                            dml_stats: Some(DmlStats {
+                                inserted_row_count: Some(3),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                    call.reply(&job);
+                }
+                other => panic!("unexpected call {other}"),
+            }
+        })
+        .await;
+        let (rows, stats) = fake
+            .db
+            .fluent()
+            .query("INSERT t")
+            .obj::<Person>()
+            .query_with_stats()
+            .await?;
+        assert_eq!(rows, []);
+        assert_eq!(
+            stats,
+            BigQueryJobStats {
+                job: Some(job_reference().into()),
+                statement_type: Some("INSERT".into()),
+                total_rows: None,
+                total_bytes_processed: Some(77),
+                total_bytes_billed: Some(10_485_760),
+                total_slot_ms: Some(9),
+                cache_hit: Some(false),
+                num_dml_affected_rows: Some(3),
+                dml_stats: Some(BigQueryDmlStats {
+                    inserted: 3,
+                    updated: 0,
+                    deleted: 0,
+                }),
+            }
+        );
+        assert_eq!(
+            spans.only("BigQuery Query"),
+            bigquery_fields(&[
+                ("sql_len", "8"),
+                ("job_id", "job1"),
+                ("location", "US"),
+                ("statement_type", "INSERT"),
+                ("bytes_processed", "77"),
+                ("bytes_billed", "10485760"),
+                ("slot_ms", "9"),
+                ("cache_hit", "false"),
+                ("dml_rows", "3"),
+                ("route", "none"),
+            ])
         );
         Ok(())
     }

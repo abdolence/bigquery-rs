@@ -198,6 +198,57 @@ async fn result_over_the_inline_limit_is_read_through_storage_read() -> TestResu
 }
 
 #[tokio::test]
+async fn stats_report_what_a_query_job_used() -> TestResult {
+    live("stats_report_what_a_query_job_used", false, async |l| {
+        #[derive(Deserialize)]
+        struct Row {
+            x: i64,
+        }
+        // Generated rows read no table, so they process and bill 0 bytes; the cache is off
+        // so that the job runs and uses slots.
+        let sql = "SELECT x FROM UNNEST(GENERATE_ARRAY(1, 1000)) AS x";
+        let (rows, inline): (Vec<Row>, _) =
+            l.db.fluent()
+                .query(sql)
+                .label(RUN_LABEL, l.run.as_str())
+                .use_query_cache(false)
+                .obj::<Row>()
+                .query_with_stats()
+                .await?;
+        eprintln!("LIVE stats inline: {inline:?}");
+        assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
+        assert!(inline.job.is_some(), "{inline:?}");
+        assert_eq!(inline.statement_type.as_deref(), Some("SELECT"));
+        assert_eq!(inline.total_rows, Some(1000));
+        assert_eq!(inline.total_bytes_processed, Some(0));
+        assert_eq!(inline.total_bytes_billed, Some(0));
+        assert_eq!(inline.cache_hit, Some(false));
+        assert!(inline.total_slot_ms.is_some(), "{inline:?}");
+
+        let (rows, read) =
+            l.db.fluent()
+                .query(sql)
+                .label(RUN_LABEL, l.run.as_str())
+                .use_query_cache(false)
+                .inline_rows_limit(10)
+                .obj::<Row>()
+                .stream_query_with_stats()
+                .await?;
+        let rows: Vec<Row> = rows.try_collect().await?;
+        eprintln!("LIVE stats storage read: {read:?}");
+        assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
+        assert_eq!(read.statement_type.as_deref(), Some("SELECT"));
+        assert_eq!(read.total_rows, Some(1000));
+        assert_eq!(read.total_bytes_processed, Some(0));
+        assert_eq!(read.total_bytes_billed, Some(0));
+        assert_eq!(read.cache_hit, Some(false));
+        assert!(read.total_slot_ms.is_some(), "{read:?}");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
     live(
         "dml_counts_labels_and_dry_run_on_a_scratch_table",
