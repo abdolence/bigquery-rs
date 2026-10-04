@@ -1,6 +1,5 @@
-//! One test per row of the probe's "Confirmed diff classes" table
-//! (`docs/schema-probe-2026-10.md`), plus the normalisation, rename, recreate and request-body
-//! rules the plan depends on.
+//! One test per class of change BigQuery was measured to accept or refuse, plus the
+//! normalisation, rename, recreate and request-body rules the plan depends on.
 
 use super::*;
 use crate::schema::declaration::BigQueryTableDeclarationDraft;
@@ -34,7 +33,7 @@ fn rec(name: &str, fields: Vec<v2::TableFieldSchema>) -> v2::TableFieldSchema {
     }
 }
 
-/// The probe's `t_patch` table: `id INT64 REQUIRED, name STRING REQUIRED, rec RECORD{a INT64},
+/// A table of `id INT64 REQUIRED, name STRING REQUIRED, rec RECORD{a INT64},
 /// n INT64, s STRING`, in the legacy type names and with the empty mode `GetTable` returns for
 /// DDL-created columns on `n`.
 fn base_fields() -> Vec<v2::TableFieldSchema> {
@@ -83,7 +82,7 @@ fn declare(
 
 fn plan_against(declaration: &BigQueryTableDeclaration, table: v2::Table) -> BigQueryTablePlan {
     let live = LiveTable::try_from(table).expect("a table the crate models");
-    plan_table(declaration, table_ref(), Some(&live))
+    declaration.plan(table_ref(), Some(&live))
 }
 
 fn plan(columns: Vec<BigQuerySchemaColumn>, table: v2::Table) -> BigQueryTablePlan {
@@ -259,16 +258,19 @@ fn add_column_with_default_is_added_first_and_defaulted_by_a_second_patch() {
         },
     );
 
-    let first = patch_body(&raw(base_fields()), &plan.changes).expect("a first patch");
+    let first = plan
+        .patch_body(&raw(base_fields()))
+        .expect("a body that fits the request")
+        .expect("a first patch");
     let first_fields = &first.schema.as_ref().expect("a schema").fields;
     let c_def = first_fields.last().expect("the added column");
     assert_eq!(c_def.name, "c_def");
     assert_eq!(
         c_def.default_value_expression, None,
-        "1h: rejected in one step"
+        "BigQuery refuses a column and its default in one step"
     );
 
-    let second = defaults_body(&first, &plan.changes).expect("a second patch");
+    let second = plan.defaults_body(&first).expect("a second patch");
     let second_fields = &second.schema.as_ref().expect("a schema").fields;
     assert_eq!(second_fields.len(), first_fields.len());
     assert_eq!(
@@ -292,8 +294,11 @@ fn set_default_on_existing_column_is_a_patch() {
             to: "'dflt'".into(),
         },
     );
-    assert_eq!(defaults_body(&raw(base_fields()), &plan.changes), None);
-    let body = patch_body(&raw(base_fields()), &plan.changes).expect("a patch");
+    assert_eq!(plan.defaults_body(&raw(base_fields())), None);
+    let body = plan
+        .patch_body(&raw(base_fields()))
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(
         body.schema.expect("a schema").fields[4]
             .default_value_expression
@@ -313,7 +318,10 @@ fn relax_required_to_nullable_is_a_patch() {
             path: "name".into(),
         },
     );
-    let body = patch_body(&raw(base_fields()), &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&raw(base_fields()))
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(body.schema.expect("a schema").fields[1].mode, "NULLABLE");
 }
 
@@ -336,10 +344,17 @@ fn column_description_patch_carries_every_column_and_its_description() {
             to: "s-desc".into(),
         },
     );
-    let body = patch_body(&raw(fields.clone()), &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&raw(fields.clone()))
+        .expect("a body that fits the request")
+        .expect("a patch");
     let mut expected = fields;
     expected[4].description = Some("s-desc".into());
-    assert_eq!(body.schema.expect("a schema").fields, expected, "2k, 3c");
+    assert_eq!(
+        body.schema.expect("a schema").fields,
+        expected,
+        "the whole schema, with every column and description"
+    );
 }
 
 #[test]
@@ -355,9 +370,12 @@ fn table_description_is_a_patch_without_a_schema() {
             to: "Orders".into(),
         },
     );
-    let body = patch_body(&raw(base_fields()), &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&raw(base_fields()))
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(body.description.as_deref(), Some("Orders"));
-    assert_eq!(body.schema, None, "1f: a body with only the description");
+    assert_eq!(body.schema, None, "a body with only the description");
 }
 
 #[test]
@@ -388,7 +406,10 @@ fn add_or_change_label_is_a_patch_of_that_label_only() {
         ],
         "{plan}"
     );
-    let body = patch_body(&table, &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&table)
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(body.labels.len(), 2);
 }
 
@@ -413,12 +434,17 @@ fn remove_label_is_an_update_with_prune_and_withheld_without() {
 
     let pruned = plan_against(&declare(base_columns(), |d| d.prune = true), table.clone());
     assert_only_change(&pruned, removal);
-    assert_eq!(patch_body(&table, &pruned.changes), None);
-    let body = update_body(&table, &pruned.changes).expect("an update");
+    assert_eq!(
+        pruned
+            .patch_body(&table)
+            .expect("a body that fits the request"),
+        None
+    );
+    let body = pruned.update_body(&table).expect("an update");
     assert!(body.labels.is_empty());
     assert_eq!(
         body.schema, table.schema,
-        "3g: Update starts from the whole body"
+        "Update clears what its body leaves out"
     );
     assert_eq!(body.etag, "e0");
 }
@@ -432,11 +458,28 @@ fn table_expiration_is_a_patch() {
     );
     assert_only_change(
         &plan,
-        BigQuerySchemaChange::SetExpiration {
-            from: None,
-            to: at.as_millisecond(),
-        },
+        BigQuerySchemaChange::SetExpiration { from: None, to: at },
     );
+}
+
+#[test]
+fn expirations_finer_than_a_millisecond_match_the_table() {
+    let mut table = raw(base_fields());
+    partitioned(&mut table);
+    table.expiration_time = Some(1_900_000_000_123);
+    if let Some(partitioning) = table.time_partitioning.as_mut() {
+        partitioning.expiration_ms = Some(86_400_000);
+    }
+    let at = jiff::Timestamp::from_nanosecond(1_900_000_000_123_456_789).expect("a timestamp");
+    let plan = plan_against(
+        &declare(with(base_columns(), C.field("ts").timestamp()), |d| {
+            d.partitioning = Some(day_on_ts());
+            d.partition_expiration = Some(std::time::Duration::from_nanos(86_400_000_999_999));
+            d.expiration = Some(at);
+        }),
+        table,
+    );
+    assert_eq!(plan.changes, []);
 }
 
 fn partitioned(table: &mut v2::Table) {
@@ -475,10 +518,13 @@ fn partition_expiration_is_a_patch_restating_the_partitioning() {
         &plan,
         BigQuerySchemaChange::SetPartitionExpiration {
             from: None,
-            to: 86_400_000,
+            to: std::time::Duration::from_secs(86_400),
         },
     );
-    let body = patch_body(&table, &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&table)
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(
         body.time_partitioning,
         Some(v2::TimePartitioning {
@@ -486,7 +532,7 @@ fn partition_expiration_is_a_patch_restating_the_partitioning() {
             expiration_ms: Some(86_400_000),
             field: Some("ts".into()),
         }),
-        "2j: same type and field"
+        "the same type and field"
     );
 }
 
@@ -509,7 +555,10 @@ fn add_or_change_clustering_is_a_patch() {
             to: vec!["n".into(), "s".into()],
         },
     );
-    let body = patch_body(&table, &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&table)
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(body.clustering.expect("clustering").fields, ["n", "s"]);
 }
 
@@ -526,8 +575,8 @@ fn remove_clustering_is_an_update_with_prune() {
             from: vec!["s".into()],
         },
     );
-    let body = update_body(&table, &plan.changes).expect("an update");
-    assert_eq!(body.clustering, None, "1m': Patch rejects an empty list");
+    let body = plan.update_body(&table).expect("an update");
+    assert_eq!(body.clustering, None, "Patch rejects an empty list");
 }
 
 #[test]
@@ -552,7 +601,10 @@ fn add_primary_key_is_a_patch_keeping_foreign_keys() {
             to: vec!["id".into()],
         },
     );
-    let body = patch_body(&table, &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&table)
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(
         body.table_constraints,
         Some(v2::TableConstraints {
@@ -580,14 +632,16 @@ fn remove_primary_key_is_a_patch_with_prune() {
             from: vec!["id".into()],
         },
     );
-    let body = patch_body(&table, &plan.changes).expect("a patch");
+    let body = plan
+        .patch_body(&table)
+        .expect("a body that fits the request")
+        .expect("a patch");
     assert_eq!(
         body.table_constraints,
         Some(v2::TableConstraints {
             primary_key: None,
             foreign_keys: Vec::new()
-        }),
-        "1o"
+        })
     );
 }
 
@@ -611,7 +665,12 @@ fn drop_column_is_ddl_with_prune_and_withheld_without() {
     assert!(kept.changes.is_empty());
     let pruned = plan_against(&declare(columns, |d| d.prune = true), raw(base_fields()));
     assert_only_change(&pruned, drop);
-    assert_eq!(patch_body(&raw(base_fields()), &pruned.changes), None, "2k");
+    assert_eq!(
+        pruned
+            .patch_body(&raw(base_fields()))
+            .expect("a body that fits the request"),
+        None
+    );
 }
 
 #[test]
@@ -661,9 +720,10 @@ fn widening_is_ddl_with_allow_widening_and_withheld_without() {
     );
     assert_only_change(&widened, widen);
     assert_eq!(
-        patch_body(&raw(base_fields()), &widened.changes),
-        None,
-        "2b"
+        widened
+            .patch_body(&raw(base_fields()))
+            .expect("a body that fits the request"),
+        None
     );
 }
 
@@ -700,7 +760,12 @@ fn rename_is_ddl_and_a_no_op_once_done() {
             to: "s2".into(),
         },
     );
-    assert_eq!(patch_body(&raw(base_fields()), &rename.changes), None, "2f");
+    assert_eq!(
+        rename
+            .patch_body(&raw(base_fields()))
+            .expect("a body that fits the request"),
+        None
+    );
 
     let mut renamed = base_fields();
     renamed[4].name = "s2".into();
@@ -907,7 +972,7 @@ fn a_missing_table_is_created_as_declared() {
         d.description = Some("Orders".into());
         d.labels = [("team".to_string(), "shop".to_string())].into();
     });
-    let plan = plan_table(&declaration, table_ref(), None);
+    let plan = declaration.plan(table_ref(), None);
     let target = plan.create.expect("a create");
     assert_eq!(target.columns.len(), 5);
     assert_eq!(target.columns[2].name, "rec");
@@ -971,11 +1036,7 @@ fn dangerous_recreate_with_a_partitioning_change_drops_and_creates() {
         table,
     );
     let recreate = plan.recreate.as_ref().expect("a recreate");
-    assert_eq!(
-        recreate.method,
-        BigQueryRecreateMethod::DropAndCreate,
-        "1A2"
-    );
+    assert_eq!(recreate.method, BigQueryRecreateMethod::DropAndCreate);
     assert!(recreate.dangerous);
     assert_eq!(recreate.num_rows, Some(3));
     assert_eq!(recreate.target.partitioning, Some(month));

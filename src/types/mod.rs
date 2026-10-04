@@ -5,27 +5,16 @@
 //! The crate-private items here are what the codecs call; the public items are the wrappers,
 //! the `with` modules and the schema types.
 
-// The codecs, the query parameters and the schema operations are the callers of most
-// crate-private items here, and they land after this module.
-#[allow(dead_code)]
 pub(crate) mod civil;
-#[allow(dead_code)]
 pub(crate) mod decimal;
-#[allow(dead_code)]
 pub(crate) mod error;
-#[allow(dead_code)]
 pub(crate) mod interval;
-#[allow(dead_code)]
 pub(crate) mod json;
-#[allow(dead_code)]
 pub(crate) mod kind;
-#[allow(dead_code)]
 pub(crate) mod range;
 pub(crate) mod schema;
-#[allow(dead_code)]
 pub(crate) mod temporal;
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) mod testkit;
 
 pub use decimal::{serialize_as_decimal, serialize_as_optional_decimal, BigQueryDecimal};

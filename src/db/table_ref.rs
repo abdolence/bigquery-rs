@@ -80,6 +80,11 @@ impl BigQueryDatasetRef {
         self.project.as_deref()
     }
 
+    /// The project that owns the dataset, `default_project_id` when none is named.
+    pub(crate) fn project_or<'a>(&'a self, default_project_id: &'a str) -> &'a str {
+        self.project.as_deref().unwrap_or(default_project_id)
+    }
+
     /// The dataset ID.
     pub fn dataset(&self) -> &BigQueryDatasetId {
         &self.dataset
@@ -186,6 +191,11 @@ impl BigQueryTableRef {
         self.project.as_deref()
     }
 
+    /// The project that owns the dataset, `default_project_id` when none is named.
+    pub(crate) fn project_or<'a>(&'a self, default_project_id: &'a str) -> &'a str {
+        self.project.as_deref().unwrap_or(default_project_id)
+    }
+
     /// The dataset ID.
     pub fn dataset(&self) -> &BigQueryDatasetId {
         &self.dataset
@@ -201,11 +211,29 @@ impl BigQueryTableRef {
     pub(crate) fn table_path(&self, default_project_id: &str) -> String {
         format!(
             "projects/{}/datasets/{}/tables/{}",
-            self.project.as_deref().unwrap_or(default_project_id),
+            self.project_or(default_project_id),
             self.dataset,
             self.table
         )
     }
+
+    /// The three IDs the v2 table requests take, with `default_project_id` for an unset
+    /// project.
+    pub(crate) fn ids(&self, default_project_id: &str) -> TableIds {
+        TableIds {
+            project: self.project_or(default_project_id).to_string(),
+            dataset: self.dataset.to_string(),
+            table: self.table.to_string(),
+        }
+    }
+}
+
+/// The project, dataset and table IDs of a table with its project resolved, as the v2 requests
+/// take them.
+pub(crate) struct TableIds {
+    pub project: String,
+    pub dataset: String,
+    pub table: String,
 }
 
 /// A table the v2 API names, such as a query job's destination table.

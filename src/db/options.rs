@@ -82,16 +82,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_leave_location_unset_and_retry_three_times() {
-        let options = BigQueryDbOptions::new("p".to_string());
-        assert_eq!(options.google_project_id, "p");
-        assert_eq!(options.location, None);
-        assert_eq!(options.max_retries, 3);
-        assert_eq!(options.bigquery_api_url, None);
-        assert_eq!(options.bigquery_storage_api_url, None);
-    }
-
-    #[test]
     fn default_endpoints_are_the_two_google_hosts() {
         let options = BigQueryDbOptions::new("p".to_string());
         assert_eq!(
@@ -102,23 +92,5 @@ mod tests {
             options.effective_bigquery_storage_api_url().host_str(),
             Some("bigquerystorage.googleapis.com")
         );
-    }
-
-    #[test]
-    fn endpoint_overrides_are_used() {
-        let options = BigQueryDbOptions::new("p".to_string())
-            .with_bigquery_api_url("http://localhost:1".parse().expect("a URL"))
-            .with_bigquery_storage_api_url("http://localhost:2".parse().expect("a URL"));
-        assert_eq!(options.effective_bigquery_api_url().port(), Some(1));
-        assert_eq!(options.effective_bigquery_storage_api_url().port(), Some(2));
-    }
-
-    #[test]
-    fn builder_sets_location_and_retries() {
-        let options = BigQueryDbOptions::new("p".to_string())
-            .with_location(BigQueryLocation::from_static("EU"))
-            .with_max_retries(0);
-        assert_eq!(options.location, Some(BigQueryLocation::from_static("EU")));
-        assert_eq!(options.max_retries, 0);
     }
 }

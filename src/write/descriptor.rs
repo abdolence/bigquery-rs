@@ -1,6 +1,6 @@
 //! A table schema compiled for writing: the proto2 descriptor Storage Write is sent in
-//! `writer_schema`, and per field the precomputed key bytes and the wire form the probe
-//! confirmed for its BigQuery type.
+//! `writer_schema`, and per field the precomputed key bytes and the wire form Storage Write
+//! accepts for its BigQuery type.
 
 use crate::types::kind::BqKind;
 use crate::{
@@ -103,41 +103,47 @@ pub(crate) struct WritePlan {
     pub(crate) cdc: Option<CdcKeys>,
 }
 
-/// The proto type each BigQuery type is written as. Every one of these was accepted by the
-/// probe's encoding matrix; none of the five rejected forms (FLOAT64 or BOOL as a string,
-/// TIMESTAMP as a double or as text ending in `+00`) is used.
-fn proto_type(kind: BqKind) -> ProtoType {
-    match kind {
-        BqKind::Int64 | BqKind::Time | BqKind::DateTime | BqKind::Timestamp => ProtoType::Int64,
-        BqKind::Float64 => ProtoType::Double,
-        BqKind::Bool => ProtoType::Bool,
-        BqKind::Date => ProtoType::Int32,
-        BqKind::Bytes | BqKind::Numeric | BqKind::BigNumeric => ProtoType::Bytes,
-        BqKind::String | BqKind::Geography | BqKind::Json | BqKind::Interval => ProtoType::String,
-        BqKind::Struct | BqKind::Range => ProtoType::Message,
+impl BqKind {
+    /// The proto type each BigQuery type is written as. Storage Write refuses FLOAT64 or BOOL as
+    /// a string and TIMESTAMP as a double or as text ending in `+00`, so none of those forms is
+    /// used.
+    fn proto_type(self) -> ProtoType {
+        match self {
+            BqKind::Int64 | BqKind::Time | BqKind::DateTime | BqKind::Timestamp => ProtoType::Int64,
+            BqKind::Float64 => ProtoType::Double,
+            BqKind::Bool => ProtoType::Bool,
+            BqKind::Date => ProtoType::Int32,
+            BqKind::Bytes | BqKind::Numeric | BqKind::BigNumeric => ProtoType::Bytes,
+            BqKind::String | BqKind::Geography | BqKind::Json | BqKind::Interval => {
+                ProtoType::String
+            }
+            BqKind::Struct | BqKind::Range => ProtoType::Message,
+        }
+    }
+
+    fn wire_type(self) -> u8 {
+        match self.proto_type() {
+            ProtoType::Int64 | ProtoType::Int32 | ProtoType::Bool => 0,
+            ProtoType::Double => 1,
+            _ => 2,
+        }
     }
 }
 
-fn wire_type(kind: BqKind) -> u8 {
-    match proto_type(kind) {
-        ProtoType::Int64 | ProtoType::Int32 | ProtoType::Bool => 0,
-        ProtoType::Double => 1,
-        _ => 2,
-    }
-}
-
-fn range_element_field(name: &str, element: BigQueryRangeElementType) -> BigQueryFieldSchema {
-    let field_type = match element {
-        BigQueryRangeElementType::Date => BigQueryFieldType::Date,
-        BigQueryRangeElementType::DateTime => BigQueryFieldType::DateTime,
-        BigQueryRangeElementType::Timestamp => BigQueryFieldType::Timestamp,
-    };
-    BigQueryFieldSchema {
-        name: name.to_string(),
-        field_type,
-        mode: BigQueryFieldMode::Nullable,
-        description: None,
-        default_value_expression: None,
+impl BigQueryRangeElementType {
+    fn field_named(self, name: &str) -> BigQueryFieldSchema {
+        let field_type = match self {
+            BigQueryRangeElementType::Date => BigQueryFieldType::Date,
+            BigQueryRangeElementType::DateTime => BigQueryFieldType::DateTime,
+            BigQueryRangeElementType::Timestamp => BigQueryFieldType::Timestamp,
+        };
+        BigQueryFieldSchema {
+            name: name.to_string(),
+            field_type,
+            mode: BigQueryFieldMode::Nullable,
+            description: None,
+            default_value_expression: None,
+        }
     }
 }
 
@@ -177,14 +183,14 @@ impl Compiler {
                     }
                     .into(),
                 ),
-                r#type: Some(proto_type(kind).into()),
+                r#type: Some(kind.proto_type().into()),
                 ..Default::default()
             };
             let children = match &field.field_type {
                 BigQueryFieldType::Struct(children) => Some(children.clone()),
                 BigQueryFieldType::Range(element) => Some(vec![
-                    range_element_field("start", *element),
-                    range_element_field("end", *element),
+                    element.field_named("start"),
+                    element.field_named("end"),
                 ]),
                 _ => None,
             };
@@ -212,7 +218,7 @@ impl Compiler {
                 kind,
                 required,
                 repeated: field.mode == BigQueryFieldMode::Repeated,
-                key: Key::new(number, wire_type(kind)),
+                key: Key::new(number, kind.wire_type()),
                 packed_key: Key::new(number, 2),
                 sub,
             });

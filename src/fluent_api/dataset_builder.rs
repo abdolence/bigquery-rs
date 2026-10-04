@@ -9,6 +9,7 @@ use crate::{
 };
 use crate::{BigQueryLabels, BigQueryLocation};
 use futures::stream::BoxStream;
+use std::time::Duration;
 
 /// One dataset, from [`BigQuerySchemaBuilder::dataset`](crate::BigQuerySchemaBuilder::dataset).
 /// End it with one of its calls.
@@ -108,6 +109,14 @@ impl BigQueryDatasetCreateBuilder<'_> {
         self
     }
 
+    /// How long after its creation BigQuery deletes a table created in the dataset, unless the
+    /// table sets its own expiration.
+    #[inline]
+    pub fn default_table_expiration(mut self, expiration: Duration) -> Self {
+        self.settings.default_table_expiration = Some(expiration);
+        self
+    }
+
     /// The labels. Each call replaces the labels of a previous one.
     #[inline]
     pub fn labels(mut self, labels: impl Into<BigQueryLabels>) -> Self {
@@ -120,6 +129,8 @@ impl BigQueryDatasetCreateBuilder<'_> {
     /// # Errors
     /// [`DataConflictError`](crate::errors::BigQueryError::DataConflictError) for a dataset that
     /// already exists. A retry after a lost response reports the dataset it created this way.
+    /// [`InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError) for a
+    /// default table expiration beyond `i64` milliseconds.
     pub async fn execute(self) -> BigQueryResult<BigQueryDataset> {
         self.db.create_dataset(&self.dataset, self.settings).await
     }

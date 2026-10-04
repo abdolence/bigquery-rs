@@ -203,165 +203,173 @@ impl Ours {
     }
 
     async fn run(&mut self, request: &Request) -> anyhow::Result<Outcome> {
-        use scenario::*;
-        match request.scenario.as_str() {
-            QUERY_CONST => self.typed_query::<SmallRow>(SQL_CONST.to_string()).await,
-            QUERY_1K => self.typed_query::<Row1k>(sql_1k()).await,
-            QUERY_200K_ROWS => self.typed_query::<Row200k>(sql_200k()).await,
-            QUERY_200K_ARROW => {
-                self.spans.take();
-                let (secs, rows) = timed(async || {
-                    let mut stream = self.query(sql_200k()).record_batches().await?;
-                    let mut rows = 0u64;
-                    while let Some(batch) = stream.try_next().await? {
-                        rows += batch.num_rows() as u64;
-                    }
-                    Ok(rows)
-                })
-                .await?;
-                let (path, streams) = self.spans.take();
-                Ok(Outcome {
-                    secs,
-                    rows,
-                    path,
-                    streams,
-                    ..Default::default()
-                })
+        match request.scenario {
+            Scenario::QueryConst => self.typed_query::<SmallRow>(SQL_CONST.to_string()).await,
+            Scenario::Query1k => self.typed_query::<Row1k>(sql_1k()).await,
+            Scenario::Query200kRows => self.typed_query::<Row200k>(sql_200k()).await,
+            Scenario::Query200kArrow => self.query_200k_arrow().await,
+            Scenario::ScanRows => self.scan_rows().await,
+            Scenario::ScanArrow => self.scan_arrow().await,
+            Scenario::Write => self.write().await,
+            Scenario::Decode => self.decode().await,
+        }
+    }
+
+    async fn query_200k_arrow(&self) -> anyhow::Result<Outcome> {
+        self.spans.take();
+        let (secs, rows) = timed(async || {
+            let mut stream = self.query(sql_200k()).record_batches().await?;
+            let mut rows = 0u64;
+            while let Some(batch) = stream.try_next().await? {
+                rows += batch.num_rows() as u64;
             }
-            SCAN_ROWS => {
-                let table = self.table(SCAN_TABLE)?;
-                self.spans.take();
-                let (secs, rows) = timed(async || {
-                    let mut stream = self
-                        .db
-                        .fluent()
-                        .select()
-                        .from(table)
-                        .obj::<ScanRow>()
-                        .stream_query_with_errors()
-                        .await?;
-                    let mut rows = 0u64;
-                    while let Some(row) = stream.try_next().await? {
+            Ok(rows)
+        })
+        .await?;
+        let (path, streams) = self.spans.take();
+        Ok(Outcome {
+            secs,
+            rows,
+            path,
+            streams,
+            ..Default::default()
+        })
+    }
+
+    async fn scan_rows(&self) -> anyhow::Result<Outcome> {
+        let table = self.table(SCAN_TABLE)?;
+        self.spans.take();
+        let (secs, rows) = timed(async || {
+            let mut stream = self
+                .db
+                .fluent()
+                .select()
+                .from(table)
+                .obj::<ScanRow>()
+                .stream_query_with_errors()
+                .await?;
+            let mut rows = 0u64;
+            while let Some(row) = stream.try_next().await? {
+                std::hint::black_box(&row);
+                rows += 1;
+            }
+            Ok(rows)
+        })
+        .await?;
+        let (_, streams) = self.spans.take();
+        Ok(Outcome {
+            secs,
+            rows,
+            path: Some("storage_read".into()),
+            streams,
+            ..Default::default()
+        })
+    }
+
+    async fn scan_arrow(&self) -> anyhow::Result<Outcome> {
+        let table = self.table(SCAN_TABLE)?;
+        self.spans.take();
+        let (secs, (rows, bytes)) = timed(async || {
+            let mut stream = self
+                .db
+                .fluent()
+                .select()
+                .from(table)
+                .record_batches()
+                .await?;
+            let (mut rows, mut bytes) = (0u64, 0u64);
+            while let Some(batch) = stream.try_next().await? {
+                rows += batch.num_rows() as u64;
+                bytes += batch.get_array_memory_size() as u64;
+            }
+            Ok((rows, bytes))
+        })
+        .await?;
+        let (_, streams) = self.spans.take();
+        let mut extra = serde_json::Map::new();
+        extra.insert("arrow_memory_bytes".into(), bytes.into());
+        Ok(Outcome {
+            secs,
+            rows,
+            path: Some("storage_read".into()),
+            streams,
+            extra,
+            ..Default::default()
+        })
+    }
+
+    async fn write(&mut self) -> anyhow::Result<Outcome> {
+        if self.write_rows.is_none() {
+            self.write_rows = Some(write_rows().into_iter().map(ScanRow::from).collect());
+        }
+        let rows = self.write_rows.as_ref().expect("generated above");
+        let table = self.table("write_ours")?;
+        let (secs, summary) = timed(async || {
+            Ok(self
+                .db
+                .fluent()
+                .insert()
+                .into(table)
+                .objects(rows)
+                .execute()
+                .await?)
+        })
+        .await?;
+        anyhow::ensure!(
+            summary.rows_written == rows.len() as u64 && summary.rows_failed == 0,
+            "{summary:?}"
+        );
+        let mut extra = serde_json::Map::new();
+        extra.insert("requests".into(), summary.batches.into());
+        Ok(Outcome {
+            secs,
+            rows: summary.rows_written,
+            bytes: Some(summary.bytes_sent),
+            path: Some("storage_write_default_stream_proto".into()),
+            extra,
+            ..Default::default()
+        })
+    }
+
+    async fn decode(&mut self) -> anyhow::Result<Outcome> {
+        if self.decode_batches.is_none() {
+            let table = self.table(SCAN_TABLE)?;
+            let batches: Vec<RecordBatch> = self
+                .db
+                .fluent()
+                .select()
+                .from(table)
+                .record_batches()
+                .await?
+                .try_collect()
+                .await?;
+            self.decode_batches = Some(batches);
+        }
+        let batches = self.decode_batches.as_ref().expect("read above");
+        let (secs, rows) = timed(async || {
+            let mut rows = 0u64;
+            let mut failed = None;
+            for batch in batches {
+                __bench_decode_each(batch, |row: BigQueryResult<ScanRow>| match row {
+                    Ok(row) => {
                         std::hint::black_box(&row);
                         rows += 1;
                     }
-                    Ok(rows)
-                })
-                .await?;
-                let (_, streams) = self.spans.take();
-                Ok(Outcome {
-                    secs,
-                    rows,
-                    path: Some("storage_read".into()),
-                    streams,
-                    ..Default::default()
-                })
+                    Err(err) => failed = Some(err),
+                });
             }
-            SCAN_ARROW => {
-                let table = self.table(SCAN_TABLE)?;
-                self.spans.take();
-                let (secs, (rows, bytes)) = timed(async || {
-                    let mut stream = self
-                        .db
-                        .fluent()
-                        .select()
-                        .from(table)
-                        .record_batches()
-                        .await?;
-                    let (mut rows, mut bytes) = (0u64, 0u64);
-                    while let Some(batch) = stream.try_next().await? {
-                        rows += batch.num_rows() as u64;
-                        bytes += batch.get_array_memory_size() as u64;
-                    }
-                    Ok((rows, bytes))
-                })
-                .await?;
-                let (_, streams) = self.spans.take();
-                let mut extra = serde_json::Map::new();
-                extra.insert("arrow_memory_bytes".into(), bytes.into());
-                Ok(Outcome {
-                    secs,
-                    rows,
-                    path: Some("storage_read".into()),
-                    streams,
-                    extra,
-                    ..Default::default()
-                })
+            match failed {
+                Some(err) => Err(err.into()),
+                None => Ok(rows),
             }
-            WRITE => {
-                if self.write_rows.is_none() {
-                    self.write_rows = Some(write_rows().into_iter().map(ScanRow::from).collect());
-                }
-                let rows = self.write_rows.as_ref().expect("generated above");
-                let table = self.table("write_ours")?;
-                let (secs, summary) = timed(async || {
-                    Ok(self
-                        .db
-                        .fluent()
-                        .insert()
-                        .into(table)
-                        .objects(rows)
-                        .execute()
-                        .await?)
-                })
-                .await?;
-                anyhow::ensure!(
-                    summary.rows_written == rows.len() as u64 && summary.rows_failed == 0,
-                    "{summary:?}"
-                );
-                let mut extra = serde_json::Map::new();
-                extra.insert("requests".into(), summary.batches.into());
-                Ok(Outcome {
-                    secs,
-                    rows: summary.rows_written,
-                    bytes: Some(summary.bytes_sent),
-                    path: Some("storage_write_default_stream_proto".into()),
-                    extra,
-                    ..Default::default()
-                })
-            }
-            DECODE => {
-                if self.decode_batches.is_none() {
-                    let table = self.table(SCAN_TABLE)?;
-                    let batches: Vec<RecordBatch> = self
-                        .db
-                        .fluent()
-                        .select()
-                        .from(table)
-                        .record_batches()
-                        .await?
-                        .try_collect()
-                        .await?;
-                    self.decode_batches = Some(batches);
-                }
-                let batches = self.decode_batches.as_ref().expect("read above");
-                let (secs, rows) = timed(async || {
-                    let mut rows = 0u64;
-                    let mut failed = None;
-                    for batch in batches {
-                        __bench_decode_each(batch, |row: BigQueryResult<ScanRow>| match row {
-                            Ok(row) => {
-                                std::hint::black_box(&row);
-                                rows += 1;
-                            }
-                            Err(err) => failed = Some(err),
-                        });
-                    }
-                    match failed {
-                        Some(err) => Err(err.into()),
-                        None => Ok(rows),
-                    }
-                })
-                .await?;
-                Ok(Outcome {
-                    secs,
-                    rows,
-                    path: Some("in_memory_arrow_to_struct_single_thread".into()),
-                    ..Default::default()
-                })
-            }
-            other => anyhow::bail!("n/a: no such scenario for this client: {other}"),
-        }
+        })
+        .await?;
+        Ok(Outcome {
+            secs,
+            rows,
+            path: Some("in_memory_arrow_to_struct_single_thread".into()),
+            ..Default::default()
+        })
     }
 
     async fn setup(&self) -> anyhow::Result<serde_json::Value> {

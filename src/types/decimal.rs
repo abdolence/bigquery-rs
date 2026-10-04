@@ -12,10 +12,6 @@ pub(crate) const BIGNUMERIC_SCALE: u32 = 38;
 
 pub(crate) const TAG_DECIMAL: &str = "BigQueryDecimal";
 
-fn out_of_range(message: String) -> CodecError {
-    CodecError::new(BigQueryCodecErrorKind::OutOfRange, message)
-}
-
 /// Writes the magnitude `digits` with the point `scale` digits from the right and trailing
 /// fractional zeros removed.
 fn place_point(neg: bool, digits: &[u8], scale: usize, out: &mut String) {
@@ -93,7 +89,7 @@ fn parse_decimal(s: &str, scale: u32) -> Result<i256, CodecError> {
         return Err(bad());
     }
     if frac.len() > scale as usize {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "decimal `{s}` has more than {scale} fractional digits"
         )));
     }
@@ -110,13 +106,13 @@ fn parse_decimal(s: &str, scale: u32) -> Result<i256, CodecError> {
         acc = acc
             .checked_mul(ten)
             .and_then(|a| a.checked_sub(d))
-            .ok_or_else(|| out_of_range(format!("decimal `{s}` is out of range")))?;
+            .ok_or_else(|| CodecError::out_of_range(format!("decimal `{s}` is out of range")))?;
     }
     if neg {
         Ok(acc)
     } else {
         acc.checked_neg()
-            .ok_or_else(|| out_of_range(format!("decimal `{s}` is out of range")))
+            .ok_or_else(|| CodecError::out_of_range(format!("decimal `{s}` is out of range")))
     }
 }
 
@@ -125,7 +121,7 @@ pub(crate) fn parse_numeric(s: &str) -> Result<i256, CodecError> {
     let v = parse_decimal(s, NUMERIC_SCALE)?;
     let lim = i256::from_i128(10i128.pow(38));
     if v >= lim || v <= lim.wrapping_neg() {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "NUMERIC `{s}` has more than 29 integer digits"
         )));
     }
@@ -140,7 +136,7 @@ pub(crate) fn parse_bignumeric(s: &str) -> Result<i256, CodecError> {
 /// The decimal nearest to `x`, rounded at `scale`; `OutOfRange` for NaN and infinities.
 pub(crate) fn decimal_from_f64(x: f64, scale: u32) -> Result<i256, CodecError> {
     if !x.is_finite() {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "{x} has no NUMERIC or BIGNUMERIC value"
         )));
     }
@@ -154,29 +150,6 @@ pub(crate) fn decimal_from_f64(x: f64, scale: u32) -> Result<i256, CodecError> {
         }
     }
     parse_decimal(&s, scale)
-}
-
-/// The integer an unscaled value at `scale` stands for; `OutOfRange` when it has a fractional
-/// part or does not fit `i64`.
-pub(crate) fn decimal_to_i64_exact(v: i256, scale: u32) -> Result<i64, CodecError> {
-    let divisor = i256::from_i128(10)
-        .checked_pow(scale)
-        .ok_or_else(|| out_of_range(format!("scale {scale} is too large")))?;
-    let text = || {
-        let mut out = String::new();
-        fmt_decimal_i256(v, scale, &mut out);
-        out
-    };
-    if v.checked_rem(divisor) != Some(i256::ZERO) {
-        return Err(out_of_range(format!(
-            "{} has a fractional part and cannot be an integer",
-            text()
-        )));
-    }
-    v.checked_div(divisor)
-        .and_then(|whole| whole.to_i128())
-        .and_then(|whole| i64::try_from(whole).ok())
-        .ok_or_else(|| out_of_range(format!("{} does not fit in i64", text())))
 }
 
 /// NUMERIC and BIGNUMERIC Storage Write bytes, as Google's `BigDecimalByteStringEncoder` writes
@@ -198,7 +171,8 @@ pub(crate) fn decimal_le_bytes(v: i256) -> ([u8; 32], usize) {
 }
 
 /// The inverse of [`decimal_le_bytes`]: little-endian two's complement of up to 32 bytes,
-/// sign-extended. Bytes beyond 32 are ignored.
+/// sign-extended. Bytes beyond 32 are ignored. The tests read written bytes back with it.
+#[cfg(test)]
 pub(crate) fn decimal_from_le_bytes(bytes: &[u8]) -> i256 {
     let negative = bytes.last().is_some_and(|b| b & 0x80 != 0);
     let mut buf = if negative { [0xff; 32] } else { [0; 32] };

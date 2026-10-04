@@ -660,6 +660,105 @@ mod tests {
         Ok(())
     }
 
+    fn is_unexpected_response(err: &BigQueryError) -> bool {
+        matches!(err, BigQueryError::SystemError(e) if e.public.code == "UNEXPECTED_RESPONSE")
+    }
+
+    #[tokio::test]
+    async fn a_sample_percentage_is_left_for_bigquery_to_check() {
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            let request = session_request(&mut call).await;
+            let sample = request
+                .read_session
+                .and_then(|s| s.read_options)
+                .and_then(|o| o.sample_percentage);
+            assert_eq!(sample, Some(150.0));
+            call.fail(
+                Code::InvalidArgument,
+                "sample_percentage must be in (0, 100]",
+            );
+        })
+        .await;
+        let result = fake
+            .db
+            .fluent()
+            .select()
+            .from(DS.table(T))
+            .sample_percentage(150.0)
+            .record_batches()
+            .await;
+        match result {
+            Err(err) => assert!(err.has_code(Code::InvalidArgument), "{err:?}"),
+            Ok(_) => panic!("BigQuery refused the session"),
+        }
+        assert_eq!(fake.calls(), ["CreateReadSession []"]);
+    }
+
+    #[tokio::test]
+    async fn an_avro_session_is_an_unexpected_response() {
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            session_request(&mut call).await;
+            call.reply(&ReadSession {
+                schema: Some(read_session::Schema::AvroSchema(Default::default())),
+                ..Default::default()
+            });
+        })
+        .await;
+        let result = fake
+            .db
+            .fluent()
+            .select()
+            .from(DS.table(T))
+            .record_batches()
+            .await;
+        match result {
+            Err(err) => assert!(is_unexpected_response(&err), "{err:?}"),
+            Ok(_) => panic!("an Avro session must be refused"),
+        }
+    }
+
+    #[tokio::test]
+    async fn avro_rows_are_an_unexpected_response() -> BigQueryResult<()> {
+        let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1])]]));
+        let fake = FakeBigQuery::start(move |mut call: FakeCall| {
+            let table = table.clone();
+            async move {
+                match call.method() {
+                    "CreateReadSession" => {
+                        let request = session_request(&mut call).await;
+                        open_session(call, &request, &table);
+                    }
+                    "ReadRows" => {
+                        read_rows_request(&mut call).await;
+                        call.send(&ReadRowsResponse {
+                            row_count: 1,
+                            rows: Some(read_rows_response::Rows::AvroRows(Default::default())),
+                            ..Default::default()
+                        });
+                        call.finish();
+                    }
+                    other => panic!("unexpected call {other}"),
+                }
+            }
+        })
+        .await;
+        let items = fake
+            .db
+            .fluent()
+            .select()
+            .from(DS.table(T))
+            .record_batches()
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        let err = items
+            .into_iter()
+            .find_map(Result::err)
+            .expect("Avro rows must end the stream with an error");
+        assert!(is_unexpected_response(&err), "{err:?}");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn empty_session_is_an_empty_stream() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {

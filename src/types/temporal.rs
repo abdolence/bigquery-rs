@@ -467,11 +467,13 @@ pub mod serialize_as_optional_datetime {
 /// change their form when it is `false`.
 struct IntCapture;
 
-fn not_an_integer(what: &str) -> CodecError {
-    CodecError::new(
-        BigQueryCodecErrorKind::TypeMismatch,
-        format!("expected an integer form of a temporal value, got {what}"),
-    )
+impl IntCapture {
+    /// The error for a serde form, described by `what`, that is not an integer.
+    fn not_an_integer(what: &str) -> CodecError {
+        CodecError::type_mismatch(format!(
+            "expected an integer form of a temporal value, got {what}"
+        ))
+    }
 }
 
 impl Serializer for IntCapture {
@@ -527,43 +529,43 @@ impl Serializer for IntCapture {
     }
 
     fn serialize_bool(self, _: bool) -> Result<i64, CodecError> {
-        Err(not_an_integer("a bool"))
+        Err(Self::not_an_integer("a bool"))
     }
 
     fn serialize_f32(self, _: f32) -> Result<i64, CodecError> {
-        Err(not_an_integer("a float"))
+        Err(Self::not_an_integer("a float"))
     }
 
     fn serialize_f64(self, _: f64) -> Result<i64, CodecError> {
-        Err(not_an_integer("a float"))
+        Err(Self::not_an_integer("a float"))
     }
 
     fn serialize_char(self, _: char) -> Result<i64, CodecError> {
-        Err(not_an_integer("a char"))
+        Err(Self::not_an_integer("a char"))
     }
 
     fn serialize_str(self, _: &str) -> Result<i64, CodecError> {
-        Err(not_an_integer("text"))
+        Err(Self::not_an_integer("text"))
     }
 
     fn serialize_bytes(self, _: &[u8]) -> Result<i64, CodecError> {
-        Err(not_an_integer("bytes"))
+        Err(Self::not_an_integer("bytes"))
     }
 
     fn serialize_none(self) -> Result<i64, CodecError> {
-        Err(not_an_integer("None"))
+        Err(Self::not_an_integer("None"))
     }
 
     fn serialize_some<T: Serialize + ?Sized>(self, _: &T) -> Result<i64, CodecError> {
-        Err(not_an_integer("an Option"))
+        Err(Self::not_an_integer("an Option"))
     }
 
     fn serialize_unit(self) -> Result<i64, CodecError> {
-        Err(not_an_integer("unit"))
+        Err(Self::not_an_integer("unit"))
     }
 
     fn serialize_unit_struct(self, _: &'static str) -> Result<i64, CodecError> {
-        Err(not_an_integer("a unit struct"))
+        Err(Self::not_an_integer("a unit struct"))
     }
 
     fn serialize_unit_variant(
@@ -572,7 +574,7 @@ impl Serializer for IntCapture {
         _: u32,
         _: &'static str,
     ) -> Result<i64, CodecError> {
-        Err(not_an_integer("an enum variant"))
+        Err(Self::not_an_integer("an enum variant"))
     }
 
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
@@ -590,15 +592,15 @@ impl Serializer for IntCapture {
         _: &'static str,
         _: &T,
     ) -> Result<i64, CodecError> {
-        Err(not_an_integer("an enum variant"))
+        Err(Self::not_an_integer("an enum variant"))
     }
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, CodecError> {
-        Err(not_an_integer("a sequence"))
+        Err(Self::not_an_integer("a sequence"))
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, CodecError> {
-        Err(not_an_integer("a tuple"))
+        Err(Self::not_an_integer("a tuple"))
     }
 
     fn serialize_tuple_struct(
@@ -606,7 +608,7 @@ impl Serializer for IntCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleStruct, CodecError> {
-        Err(not_an_integer("a tuple struct"))
+        Err(Self::not_an_integer("a tuple struct"))
     }
 
     fn serialize_tuple_variant(
@@ -616,11 +618,11 @@ impl Serializer for IntCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, CodecError> {
-        Err(not_an_integer("an enum variant"))
+        Err(Self::not_an_integer("an enum variant"))
     }
 
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
-        Err(not_an_integer("a map"))
+        Err(Self::not_an_integer("a map"))
     }
 
     fn serialize_struct(
@@ -628,7 +630,7 @@ impl Serializer for IntCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStruct, CodecError> {
-        Err(not_an_integer("a struct"))
+        Err(Self::not_an_integer("a struct"))
     }
 
     fn serialize_struct_variant(
@@ -638,7 +640,7 @@ impl Serializer for IntCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
-        Err(not_an_integer("an enum variant"))
+        Err(Self::not_an_integer("an enum variant"))
     }
 }
 

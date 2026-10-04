@@ -1,7 +1,7 @@
 use crate::errors::BigQueryError;
 use crate::BigQueryDb;
 use crate::BigQueryResult;
-use gcloud_sdk::tonic::metadata::MetadataMap;
+use gcloud_sdk::tonic::metadata::{MetadataMap, MetadataValue};
 use gcloud_sdk::tonic::{Extensions, Request, Response, Status};
 use rand::RngExt;
 use std::future::Future;
@@ -11,17 +11,30 @@ use tracing::{warn, Span};
 impl BigQueryDb {
     /// Sends `message` through `send`, and sends it again after a random [`retry_delay`] while
     /// it fails with a retryable error, up to
-    /// [`max_retries`](crate::BigQueryDbOptions::max_retries) times. Every attempt carries
-    /// `metadata` as request headers (`if-match`, for example). Each retry is logged in `span`
-    /// as "Failed to `action`".
+    /// [`max_retries`](crate::BigQueryDbOptions::max_retries) times. Each retry is logged in
+    /// `span` as "Failed to `action`".
     ///
     /// Only for requests that are safe to send twice: a retried append or DML statement can be
     /// applied twice.
-    #[allow(
-        dead_code,
-        reason = "the read, write, query and schema operations call it"
-    )]
     pub(crate) async fn retry<R, T, F, Fut>(
+        &self,
+        span: &Span,
+        action: &str,
+        message: &R,
+        send: F,
+    ) -> BigQueryResult<T>
+    where
+        R: Clone,
+        F: Fn(Request<R>) -> Fut,
+        Fut: Future<Output = Result<Response<T>, Status>>,
+    {
+        self.retry_with_metadata(span, action, message, &MetadataMap::new(), send)
+            .await
+    }
+
+    /// [`retry`](Self::retry), with every attempt carrying `metadata` as request headers, such
+    /// as the precondition of [`if_match`].
+    pub(crate) async fn retry_with_metadata<R, T, F, Fut>(
         &self,
         span: &Span,
         action: &str,
@@ -40,6 +53,24 @@ impl BigQueryDb {
         .await
         .map(Response::into_inner)
     }
+}
+
+/// The `if-match` header that makes a write apply only while the resource still has `etag`,
+/// which `read_by` returned. A stale one fails with `FAILED_PRECONDITION`, which
+/// [`BigQueryError::on_stale_etag`] reports as a conflict.
+///
+/// # Errors
+/// [`BigQueryError::SystemError`] with the code `UNEXPECTED_RESPONSE` if `etag` is not a valid
+/// header value.
+pub(crate) fn if_match(read_by: &str, etag: &str) -> BigQueryResult<MetadataMap> {
+    let precondition = MetadataValue::try_from(etag).map_err(|_| {
+        BigQueryError::unexpected_response(format!(
+            "{read_by} returned an etag that is not a valid header: {etag:?}"
+        ))
+    })?;
+    let mut metadata = MetadataMap::new();
+    metadata.insert("if-match", precondition);
+    Ok(metadata)
 }
 
 /// Builds a request for `message` carrying `metadata` as its headers. The channel middleware
@@ -98,6 +129,16 @@ pub(crate) fn retry_delay(retries: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_etag_that_is_not_a_header_is_an_unexpected_response() {
+        match if_match("GetDataset", "abc\n") {
+            Err(BigQueryError::SystemError(err)) => {
+                assert_eq!(err.public.code, "UNEXPECTED_RESPONSE", "{err}");
+            }
+            other => panic!("expected an unexpected response, got {other:?}"),
+        }
+    }
     use gcloud_sdk::tonic::metadata::MetadataValue;
     use gcloud_sdk::tonic::Code;
     use std::sync::atomic::{AtomicUsize, Ordering};

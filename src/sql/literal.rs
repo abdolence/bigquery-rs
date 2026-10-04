@@ -160,13 +160,6 @@ impl Display for SqlLiteral {
     }
 }
 
-fn malformed(ty: &str, value: impl std::fmt::Debug) -> CodecError {
-    CodecError::new(
-        BigQueryCodecErrorKind::TypeMismatch,
-        format!("{value:?} is not a {ty} value"),
-    )
-}
-
 /// The literal of a value in the query parameter form the type mapping encodes it to, so that
 /// a literal and a parameter of one value always agree on its type. A scalar without a value
 /// is NULL.
@@ -176,6 +169,9 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
     fn try_from(
         (ty, value): (&QueryParameterType, &QueryParameterValue),
     ) -> Result<Self, Self::Error> {
+        let malformed = |ty: &str, value: &dyn std::fmt::Debug| {
+            CodecError::type_mismatch(format!("{value:?} is not a {ty} value"))
+        };
         let kind = ty.r#type.as_str();
         let text = value.value.as_deref();
         let text_of = |kind: TextLiteralKind| text.map(|t| SqlLiteral::text(kind, t));
@@ -184,7 +180,7 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
                 let element = ty
                     .array_type
                     .as_deref()
-                    .ok_or_else(|| malformed("ARRAY", "an ARRAY type with no element type"))?;
+                    .ok_or_else(|| malformed("ARRAY", &"an ARRAY type with no element type"))?;
                 let items = value
                     .array_values
                     .iter()
@@ -221,7 +217,7 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
                     Some("DATE") => BigQueryRangeElementType::Date,
                     Some("DATETIME") => BigQueryRangeElementType::DateTime,
                     Some("TIMESTAMP") => BigQueryRangeElementType::Timestamp,
-                    other => return Err(malformed("RANGE element", other)),
+                    other => return Err(malformed("RANGE element", &other)),
                 };
                 return Ok(match value.range_value.as_deref() {
                     None => SqlLiteral::null(),
@@ -243,14 +239,14 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
                     base64::engine::general_purpose::STANDARD
                         .decode(t)
                         .map(|b| SqlLiteral::bytes(&b))
-                        .map_err(|_| malformed("BYTES", t))
+                        .map_err(|_| malformed("BYTES", &t))
                 })
                 .transpose()?,
             "INT64" => text
                 .map(|t| {
                     t.parse()
                         .map(SqlLiteral::int64)
-                        .map_err(|_| malformed("INT64", t))
+                        .map_err(|_| malformed("INT64", &t))
                 })
                 .transpose()?,
             "FLOAT64" => text
@@ -258,7 +254,7 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
                     "NaN" => Ok(f64::NAN),
                     "Infinity" => Ok(f64::INFINITY),
                     "-Infinity" => Ok(f64::NEG_INFINITY),
-                    t => t.parse().map_err(|_| malformed("FLOAT64", t)),
+                    t => t.parse().map_err(|_| malformed("FLOAT64", &t)),
                 })
                 .transpose()?
                 .map(SqlLiteral::float64),
@@ -266,7 +262,7 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
                 .map(|t| match t {
                     "true" => Ok(SqlLiteral::bool(true)),
                     "false" => Ok(SqlLiteral::bool(false)),
-                    t => Err(malformed("BOOL", t)),
+                    t => Err(malformed("BOOL", &t)),
                 })
                 .transpose()?,
             "NUMERIC" => text_of(TextLiteralKind::Numeric),

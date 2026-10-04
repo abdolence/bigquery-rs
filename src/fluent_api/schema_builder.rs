@@ -8,8 +8,8 @@ use crate::BigQueryLabels;
 use crate::{
     BigQueryDatasetBuilder, BigQueryDatasetListBuilder, BigQueryDatasetRef, BigQueryDb,
     BigQueryPartitionUnit, BigQueryPartitioning, BigQueryRecreatePolicy, BigQueryResult,
-    BigQuerySchemaColumn, BigQuerySchemaColumnsBuilder, BigQuerySchemaSupport, BigQueryTable,
-    BigQueryTableDeclaration, BigQueryTablePlan, BigQueryTableRef, BigQueryTableSyncReport,
+    BigQuerySchemaColumn, BigQuerySchemaColumnsBuilder, BigQueryTable, BigQueryTableDeclaration,
+    BigQueryTablePlan, BigQueryTableRef, BigQueryTableSyncReport,
 };
 use std::time::Duration;
 
@@ -18,18 +18,12 @@ use std::time::Duration;
 /// Tables are the one kind of schema object it declares so far; datasets have the plain calls
 /// of [`dataset`](Self::dataset) and [`datasets`](Self::datasets).
 #[derive(Clone, Debug)]
-pub struct BigQuerySchemaBuilder<'a, D>
-where
-    D: BigQuerySchemaSupport,
-{
-    db: &'a D,
+pub struct BigQuerySchemaBuilder<'a> {
+    db: &'a BigQueryDb,
 }
 
-impl<'a, D> BigQuerySchemaBuilder<'a, D>
-where
-    D: BigQuerySchemaSupport,
-{
-    pub(crate) fn new(db: &'a D) -> Self {
+impl<'a> BigQuerySchemaBuilder<'a> {
+    pub(crate) fn new(db: &'a BigQueryDb) -> Self {
         Self { db }
     }
 
@@ -38,15 +32,13 @@ where
     /// One statement owns one table: `.prune_undeclared()` never reaches anything outside it.
     /// Several tables need several statements.
     #[inline]
-    pub fn table(self, table: impl Into<BigQueryTableRef>) -> BigQueryTableSchemaBuilder<'a, D> {
+    pub fn table(self, table: impl Into<BigQueryTableRef>) -> BigQueryTableSchemaBuilder<'a> {
         BigQueryTableSchemaBuilder {
             db: self.db,
             draft: BigQueryTableDeclarationDraft::new(table.into()),
         }
     }
-}
 
-impl<'a> BigQuerySchemaBuilder<'a, BigQueryDb> {
     /// Names a dataset for one plain call: create, get, update, delete, or list its tables.
     ///
     /// ```rust,no_run
@@ -107,18 +99,12 @@ impl<'a> BigQuerySchemaBuilder<'a, BigQueryDb> {
 /// following selected fields do not exist` for about 30 seconds after the sync; readers without
 /// `selected_fields` see the change at once.
 #[derive(Clone, Debug)]
-pub struct BigQueryTableSchemaBuilder<'a, D>
-where
-    D: BigQuerySchemaSupport,
-{
-    db: &'a D,
+pub struct BigQueryTableSchemaBuilder<'a> {
+    db: &'a BigQueryDb,
     draft: BigQueryTableDeclarationDraft,
 }
 
-impl<'a, D> BigQueryTableSchemaBuilder<'a, D>
-where
-    D: BigQuerySchemaSupport,
-{
+impl<'a> BigQueryTableSchemaBuilder<'a> {
     /// Declares the columns, in table order. Each call replaces the columns of a previous one.
     ///
     /// ```rust
@@ -344,9 +330,7 @@ where
         let declaration = BigQueryTableDeclaration::try_from(self.draft)?;
         self.db.sync_table_schema(declaration).await
     }
-}
 
-impl BigQueryTableSchemaBuilder<'_, BigQueryDb> {
     /// Reads the table: its schema, sizes and settings. Views and other table-like objects
     /// read as well.
     ///

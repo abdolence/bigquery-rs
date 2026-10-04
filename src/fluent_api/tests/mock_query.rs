@@ -179,14 +179,13 @@ mod tests {
 
         let full = BigQueryQueryParams::new("SELECT @n, @min, @t".into())
             .with_query_parameters(vec![
-                infer_param(ParamLabel::Named("n"), &10).map_err(BigQueryError::from)?,
-                infer_param(ParamLabel::Named("min"), &3i64).map_err(BigQueryError::from)?,
+                infer_param(ParamLabel::Named("n"), &10)?,
+                infer_param(ParamLabel::Named("min"), &3i64)?,
                 typed_param(
                     ParamLabel::Named("t"),
                     &BigQueryFieldType::Timestamp.into(),
                     &None::<jiff::Timestamp>,
-                )
-                .map_err(BigQueryError::from)?,
+                )?,
             ])
             .with_location(BigQueryLocation::from_static("EU"))
             .with_default_dataset(BigQueryDatasetId::from_static("ds").into())
@@ -198,12 +197,8 @@ mod tests {
             .with_request_id(BigQueryRequestId::new("req-1")?)
             .with_inline_rows_limit(500)
             .with_read_options(read_options);
-        let positional =
-            BigQueryQueryParams::new("SELECT ?".into()).with_query_parameters(vec![infer_param(
-                ParamLabel::Positional(0),
-                "x",
-            )
-            .map_err(BigQueryError::from)?]);
+        let positional = BigQueryQueryParams::new("SELECT ?".into())
+            .with_query_parameters(vec![infer_param(ParamLabel::Positional(0), "x")?]);
         assert_eq!(
             take_calls(),
             vec![

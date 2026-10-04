@@ -9,11 +9,13 @@ use crate::{
 use async_trait::async_trait;
 use serde::Serialize;
 
-/// The summary of a finished insert, or the first failed batch's error.
-fn outcome(finished: Finished) -> BigQueryResult<BigQueryWriteSummary> {
-    match finished.first_error {
-        Some(err) => Err(err),
-        None => Ok(finished.summary),
+impl Finished {
+    /// The summary of a finished insert, or the first failed batch's error.
+    fn into_result(self) -> BigQueryResult<BigQueryWriteSummary> {
+        match self.first_error {
+            Some(err) => Err(err),
+            None => Ok(self.summary),
+        }
     }
 }
 
@@ -40,7 +42,7 @@ impl BigQueryWriteSupport for BigQueryDb {
                 return Err(err);
             }
         }
-        outcome(core.finish(FinishKind::Close).await?)
+        (core.finish(FinishKind::Close).await?).into_result()
     }
 
     async fn insert_changes<T, I>(
@@ -71,6 +73,6 @@ impl BigQueryWriteSupport for BigQueryDb {
                 return Err(err);
             }
         }
-        outcome(core.finish(FinishKind::Close).await?)
+        (core.finish(FinishKind::Close).await?).into_result()
     }
 }

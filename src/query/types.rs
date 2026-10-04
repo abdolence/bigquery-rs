@@ -1,3 +1,7 @@
+use crate::db::proto::millis;
+#[cfg(doc)]
+use crate::errors::BigQueryError;
+use crate::BigQueryResult;
 use crate::{
     BigQueryDatasetRef, BigQueryFieldType, BigQueryReadOptions, BigQueryStatementType,
     BigQueryTableSchema,
@@ -40,9 +44,8 @@ pub struct BigQueryQueryParams {
     /// The most rows the first response may carry inline. A result with more is read through
     /// the Storage Read API from the job's destination table.
     ///
-    /// Unset by default, so BigQuery decides: it sent results of up to 364 KB of Arrow inline
-    /// and paged results of 485 KB and more, and below that bound the inline result reached
-    /// its last row about 2.7 times sooner than a Storage Read session.
+    /// Unset by default, so BigQuery decides how much to send inline. A small result reaches
+    /// its last row sooner inline than through a Storage Read session.
     pub inline_rows_limit: Option<u32>,
     /// How a result read through the Storage Read API opens its session.
     #[default = "BigQueryReadOptions::new()"]
@@ -51,6 +54,32 @@ pub struct BigQueryQueryParams {
     /// [`Optional`](BigQueryJobCreation::Optional).
     #[default = "BigQueryJobCreation::Optional"]
     pub job_creation: BigQueryJobCreation,
+}
+
+/// How long `Query` waits for the job by default, BigQuery's own default.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl BigQueryQueryParams {
+    /// The `timeout_ms` that `Query` and `GetQueryResults` take, with BigQuery's default when
+    /// none is set.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for `timeout` if it does not fit in `u32`
+    /// milliseconds.
+    pub(crate) fn timeout_ms(&self) -> BigQueryResult<u32> {
+        millis("timeout", self.timeout.unwrap_or(DEFAULT_TIMEOUT))
+    }
+
+    /// The `job_timeout_ms` of the `Query` request.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for `job_timeout` if it does not fit in `i64`
+    /// milliseconds.
+    pub(crate) fn job_timeout_ms(&self) -> BigQueryResult<Option<i64>> {
+        self.job_timeout
+            .map(|d| millis("job_timeout", d))
+            .transpose()
+    }
 }
 
 /// Whether a query runs as a BigQuery job.
@@ -94,30 +123,9 @@ impl BigQueryParamType {
     }
 }
 
-/// What a statement did, as the `Query` response reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BigQueryQueryOutcome {
-    /// The job that ran the statement, `None` when BigQuery ran it without one.
-    pub job: Option<BigQueryJobRef>,
-    /// The ID BigQuery gave the statement, when it reported one.
-    pub query_id: Option<BigQueryQueryId>,
-    /// The kind of statement.
-    pub statement_type: Option<BigQueryStatementType>,
-    /// Rows a DML statement changed.
-    pub num_dml_affected_rows: Option<i64>,
-    /// Rows a DML statement inserted, updated and deleted.
-    pub dml_stats: Option<BigQueryDmlStats>,
-    /// Rows in the result.
-    pub total_rows: Option<u64>,
-    /// Bytes the statement processed.
-    pub total_bytes_processed: Option<i64>,
-    /// Bytes billed for the statement, after BigQuery's rounding and minimums.
-    pub total_bytes_billed: Option<i64>,
-    /// Slot milliseconds the job used.
-    pub total_slot_ms: Option<i64>,
-    /// Whether the result came from the query cache.
-    pub cache_hit: Option<bool>,
-}
+/// What a statement did, as [`execute`](crate::BigQueryQueryBuilder::execute) reports it: the
+/// same figures a query's [`BigQueryJobStats`] carries.
+pub type BigQueryQueryOutcome = BigQueryJobStats;
 
 /// What a query used, from the responses the query already received; the
 /// `_with_stats` terminals return it with the rows.
@@ -147,23 +155,6 @@ pub struct BigQueryJobStats {
     pub num_dml_affected_rows: Option<i64>,
     /// Rows a DML statement inserted, updated and deleted.
     pub dml_stats: Option<BigQueryDmlStats>,
-}
-
-impl From<BigQueryJobStats> for BigQueryQueryOutcome {
-    fn from(stats: BigQueryJobStats) -> Self {
-        Self {
-            job: stats.job,
-            query_id: stats.query_id,
-            statement_type: stats.statement_type,
-            num_dml_affected_rows: stats.num_dml_affected_rows,
-            dml_stats: stats.dml_stats,
-            total_rows: stats.total_rows,
-            total_bytes_processed: stats.total_bytes_processed,
-            total_bytes_billed: stats.total_bytes_billed,
-            total_slot_ms: stats.total_slot_ms,
-            cache_hit: stats.cache_hit,
-        }
-    }
 }
 
 /// The rows a DML statement changed, by kind.

@@ -46,15 +46,28 @@ fn varint_bytes(mut v: u64, buf: &mut [u8; 10]) -> usize {
     n + 1
 }
 
-fn mismatch(field: &FieldPlan, what: &str) -> CodecError {
-    CodecError::new(
-        BigQueryCodecErrorKind::TypeMismatch,
-        format!("{what} cannot be written to a {} column", field.kind.name()),
-    )
+impl FieldPlan {
+    /// The error for a Rust form, described by `what`, that this field's column cannot take.
+    fn mismatch(&self, what: &str) -> CodecError {
+        CodecError::type_mismatch(format!(
+            "{what} cannot be written to a {} column",
+            self.kind.name()
+        ))
+    }
 }
 
-fn out_of_range(message: String) -> CodecError {
-    CodecError::new(BigQueryCodecErrorKind::OutOfRange, message)
+const NOT_A_ROW: &str = "a row must serialize as a struct or a map";
+const NOT_A_SEQ: &str = "a REPEATED field takes a sequence";
+const NOT_A_KEY: &str = "a map key must be a string";
+
+/// A JSON column's value that `serde_json` could not build.
+impl From<serde_json::Error> for CodecError {
+    fn from(err: serde_json::Error) -> Self {
+        CodecError::new(
+            BigQueryCodecErrorKind::Custom,
+            format!("JSON column: {err}"),
+        )
+    }
 }
 
 /// Per-message cache of (key address, key length, field index) by position.
@@ -217,13 +230,6 @@ macro_rules! reject {
     };
 }
 
-fn not_a_row() -> CodecError {
-    CodecError::new(
-        BigQueryCodecErrorKind::TypeMismatch,
-        "a row must serialize as a struct or a map",
-    )
-}
-
 /// The top-level row: a struct or a map.
 struct RowSer<'r, 'e, 'p> {
     st: &'r mut St<'e>,
@@ -265,7 +271,7 @@ impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
         v.serialize(self)
     }
 
-    reject!(not_a_row();
+    reject!(CodecError::type_mismatch(NOT_A_ROW);
         serialize_bool(bool), serialize_i8(i8), serialize_i16(i16), serialize_i32(i32),
         serialize_i64(i64), serialize_u8(u8), serialize_u16(u16), serialize_u32(u32),
         serialize_u64(u64), serialize_f32(f32), serialize_f64(f64), serialize_char(char),
@@ -281,15 +287,15 @@ impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
         _: &'static str,
         _: &T,
     ) -> Result<(), CodecError> {
-        Err(not_a_row())
+        Err(CodecError::type_mismatch(NOT_A_ROW))
     }
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, CodecError> {
-        Err(not_a_row())
+        Err(CodecError::type_mismatch(NOT_A_ROW))
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, CodecError> {
-        Err(not_a_row())
+        Err(CodecError::type_mismatch(NOT_A_ROW))
     }
 
     fn serialize_tuple_struct(
@@ -297,7 +303,7 @@ impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleStruct, CodecError> {
-        Err(not_a_row())
+        Err(CodecError::type_mismatch(NOT_A_ROW))
     }
 
     fn serialize_tuple_variant(
@@ -307,7 +313,7 @@ impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, CodecError> {
-        Err(not_a_row())
+        Err(CodecError::type_mismatch(NOT_A_ROW))
     }
 
     fn serialize_struct_variant(
@@ -317,18 +323,20 @@ impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
-        Err(not_a_row())
+        Err(CodecError::type_mismatch(NOT_A_ROW))
     }
 }
 
-fn by_name(msg: &MsgPlan, key: &str) -> Result<usize, CodecError> {
-    msg.index_of(key).ok_or_else(|| {
-        CodecError::new(
-            BigQueryCodecErrorKind::UnknownField,
-            "no column of this name in the table schema",
-        )
-        .at_field(key)
-    })
+impl MsgPlan {
+    fn field_index(&self, key: &str) -> Result<usize, CodecError> {
+        self.index_of(key).ok_or_else(|| {
+            CodecError::new(
+                BigQueryCodecErrorKind::UnknownField,
+                "no column of this name in the table schema",
+            )
+            .at_field(key)
+        })
+    }
 }
 
 /// One message: the row, a STRUCT or a RANGE.
@@ -365,7 +373,7 @@ impl<'r, 'e, 'p> MsgSer<'r, 'e, 'p> {
                 return Ok(idx as usize);
             }
         }
-        let idx = by_name(self.msg, key)?;
+        let idx = self.msg.field_index(key)?;
         let entry = (ptr, key.len(), idx as u32);
         match k.cmp(&cache.len()) {
             std::cmp::Ordering::Less => cache[k] = entry,
@@ -439,7 +447,7 @@ impl ser::SerializeMap for MsgSer<'_, '_, '_> {
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), CodecError> {
         let key = key.serialize(KeyCapture)?;
-        self.map_key = Some(by_name(self.msg, &key)?);
+        self.map_key = Some(self.msg.field_index(&key)?);
         Ok(())
     }
 
@@ -453,13 +461,6 @@ impl ser::SerializeMap for MsgSer<'_, '_, '_> {
     fn end(self) -> Result<(), CodecError> {
         self.finish()
     }
-}
-
-fn not_a_seq() -> CodecError {
-    CodecError::new(
-        BigQueryCodecErrorKind::TypeMismatch,
-        "a REPEATED field takes a sequence",
-    )
 }
 
 /// A REPEATED field, which takes a sequence.
@@ -525,7 +526,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         v.serialize(self)
     }
 
-    reject!(not_a_seq();
+    reject!(CodecError::type_mismatch(NOT_A_SEQ);
         serialize_bool(bool), serialize_i8(i8), serialize_i16(i16), serialize_i32(i32),
         serialize_i64(i64), serialize_u8(u8), serialize_u16(u16), serialize_u32(u32),
         serialize_u64(u64), serialize_f32(f32), serialize_f64(f64), serialize_char(char),
@@ -540,7 +541,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: &T,
     ) -> Result<(), CodecError> {
-        Err(not_a_seq())
+        Err(CodecError::type_mismatch(NOT_A_SEQ))
     }
 
     fn serialize_tuple_struct(
@@ -548,7 +549,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleStruct, CodecError> {
-        Err(not_a_seq())
+        Err(CodecError::type_mismatch(NOT_A_SEQ))
     }
 
     fn serialize_tuple_variant(
@@ -558,11 +559,11 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, CodecError> {
-        Err(not_a_seq())
+        Err(CodecError::type_mismatch(NOT_A_SEQ))
     }
 
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
-        Err(not_a_seq())
+        Err(CodecError::type_mismatch(NOT_A_SEQ))
     }
 
     fn serialize_struct(
@@ -570,7 +571,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStruct, CodecError> {
-        Err(not_a_seq())
+        Err(CodecError::type_mismatch(NOT_A_SEQ))
     }
 
     fn serialize_struct_variant(
@@ -580,7 +581,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
-        Err(not_a_seq())
+        Err(CodecError::type_mismatch(NOT_A_SEQ))
     }
 }
 
@@ -640,30 +641,32 @@ impl ser::SerializeTuple for SeqSer<'_, '_, '_> {
     }
 }
 
-/// Whether the integer form of a kind exists: INT64, the temporal kinds and the decimals.
-fn takes_integers(kind: BqKind) -> bool {
-    matches!(
-        kind,
-        BqKind::Int64
-            | BqKind::Date
-            | BqKind::Time
-            | BqKind::DateTime
-            | BqKind::Timestamp
-            | BqKind::Numeric
-            | BqKind::BigNumeric
-    )
-}
-
-/// jiff prints a year below zero with a sign and six digits, which no BigQuery text form has;
-/// it is a date before BigQuery's year 1, not malformed text.
-fn check_signed_year(kind: BqKind, s: &str) -> Result<(), CodecError> {
-    if s.starts_with('-') {
-        return Err(out_of_range(format!(
-            "{} `{s}` is before BigQuery's 0001-01-01",
-            kind.name()
-        )));
+impl BqKind {
+    /// Whether the integer form of a kind exists: INT64, the temporal kinds and the decimals.
+    fn takes_integers(self) -> bool {
+        matches!(
+            self,
+            BqKind::Int64
+                | BqKind::Date
+                | BqKind::Time
+                | BqKind::DateTime
+                | BqKind::Timestamp
+                | BqKind::Numeric
+                | BqKind::BigNumeric
+        )
     }
-    Ok(())
+
+    /// jiff prints a year below zero with a sign and six digits, which no BigQuery text form has;
+    /// it is a date before BigQuery's year 1, not malformed text.
+    fn check_signed_year(self, s: &str) -> Result<(), CodecError> {
+        if s.starts_with('-') {
+            return Err(CodecError::out_of_range(format!(
+                "{} `{s}` is before BigQuery's 0001-01-01",
+                self.name()
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn numeric_in_range(v: i256) -> Result<i256, CodecError> {
@@ -671,7 +674,7 @@ fn numeric_in_range(v: i256) -> Result<i256, CodecError> {
     if v >= limit || v <= limit.wrapping_neg() {
         let mut text = String::new();
         decimal::fmt_decimal_i256(v, NUMERIC_SCALE, &mut text);
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "NUMERIC {text} has more than 29 integer digits"
         )));
     }
@@ -734,13 +737,15 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                     .ok()
                     .filter(|d| (DATE_MIN_DAYS..=DATE_MAX_DAYS).contains(d))
                     .ok_or_else(|| {
-                        out_of_range(format!("DATE of {v} days is outside BigQuery's range"))
+                        CodecError::out_of_range(format!(
+                            "DATE of {v} days is outside BigQuery's range"
+                        ))
                     })?;
                 self.varint_field(i64::from(days) as u64)
             }
             BqKind::Time => {
                 if !(0..MICROS_PER_DAY).contains(&v) {
-                    return Err(out_of_range(format!(
+                    return Err(CodecError::out_of_range(format!(
                         "{v} microseconds is not a time of day"
                     )));
                 }
@@ -748,7 +753,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
             }
             BqKind::DateTime => {
                 if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&v) {
-                    return Err(out_of_range(format!(
+                    return Err(CodecError::out_of_range(format!(
                         "DATETIME of {v} civil microseconds is outside BigQuery's range"
                     )));
                 }
@@ -756,7 +761,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
             }
             BqKind::Timestamp => {
                 if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&v) {
-                    return Err(out_of_range(format!(
+                    return Err(CodecError::out_of_range(format!(
                         "TIMESTAMP of {v} microseconds is outside BigQuery's range"
                     )));
                 }
@@ -771,16 +776,16 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 let half = i256::from_i128(10i128.pow(BIGNUMERIC_SCALE / 2));
                 self.decimal(i256::from_i128(i128::from(v)).wrapping_mul(half.wrapping_mul(half)))
             }
-            _ => Err(mismatch(self.f, "an integer")),
+            _ => Err(self.f.mismatch("an integer")),
         }
     }
 
     fn wide_int(self, v: i128) -> Result<(), CodecError> {
-        if !takes_integers(self.f.kind) {
-            return Err(mismatch(self.f, "an integer"));
+        if !self.f.kind.takes_integers() {
+            return Err(self.f.mismatch("an integer"));
         }
         let v = i64::try_from(v).map_err(|_| {
-            out_of_range(format!(
+            CodecError::out_of_range(format!(
                 "{v} does not fit the INT64 range a {} column takes",
                 self.f.kind.name()
             ))
@@ -793,7 +798,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
         match kind {
             BqKind::String | BqKind::Geography | BqKind::Json => self.len_delim(s.as_bytes()),
             BqKind::Date => {
-                check_signed_year(kind, s)?;
+                kind.check_signed_year(s)?;
                 let days = civil::parse_date(s)?;
                 self.int(i64::from(days))
             }
@@ -802,12 +807,12 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 self.int(micros)
             }
             BqKind::DateTime => {
-                check_signed_year(kind, s)?;
+                kind.check_signed_year(s)?;
                 let micros = civil::parse_datetime(s)?;
                 self.int(micros)
             }
             BqKind::Timestamp => {
-                check_signed_year(kind, s)?;
+                kind.check_signed_year(s)?;
                 let micros = civil::parse_timestamp(s)?;
                 self.int(micros)
             }
@@ -823,13 +828,13 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 let interval = BigQueryInterval::parse_bq(s)?;
                 self.interval(interval)
             }
-            _ => Err(mismatch(self.f, "a string")),
+            _ => Err(self.f.mismatch("a string")),
         }
     }
 
     fn interval(self, interval: BigQueryInterval) -> Result<(), CodecError> {
         if interval.nanos % 1000 != 0 {
-            return Err(out_of_range(format!(
+            return Err(CodecError::out_of_range(format!(
                 "INTERVAL keeps microseconds; {} nanoseconds is not a whole number of them",
                 interval.nanos
             )));
@@ -875,7 +880,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
             .f
             .sub
             .as_deref()
-            .ok_or_else(|| mismatch(self.f, "a struct or a map"))?;
+            .ok_or_else(|| self.f.mismatch("a struct or a map"))?;
         self.key();
         let mark = self.st.begin();
         Ok(MsgSer::new(self.st, sub, Some(mark)))
@@ -895,7 +900,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
 
     fn serialize_bool(self, v: bool) -> Result<(), CodecError> {
         if self.f.kind != BqKind::Bool {
-            return Err(mismatch(self.f, "a bool"));
+            return Err(self.f.mismatch("a bool"));
         }
         self.varint_field(u64::from(v))
     }
@@ -964,7 +969,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
                 let d = decimal::decimal_from_f64(v, BIGNUMERIC_SCALE)?;
                 self.decimal(d)
             }
-            _ => Err(mismatch(self.f, "a float")),
+            _ => Err(self.f.mismatch("a float")),
         }
     }
 
@@ -1001,7 +1006,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
     fn serialize_bytes(self, v: &[u8]) -> Result<(), CodecError> {
         match self.f.kind {
             BqKind::Bytes => self.len_delim(v),
-            _ => Err(mismatch(self.f, "bytes")),
+            _ => Err(self.f.mismatch("bytes")),
         }
     }
 
@@ -1038,7 +1043,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         if let Some(kind) = temporal_tag_kind(name) {
             // The integer has a unit, so it only means something on its own column type.
             if kind != self.f.kind {
-                return Err(mismatch(self.f, name));
+                return Err(self.f.mismatch(name));
             }
             let raw = capture_int(v)?;
             return self.int(raw);
@@ -1049,7 +1054,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
             _ => true,
         };
         if !tagged_kind_matches {
-            return Err(mismatch(self.f, name));
+            return Err(self.f.mismatch(name));
         }
         v.serialize(self)
     }
@@ -1061,7 +1066,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         _: &'static str,
         _: &T,
     ) -> Result<(), CodecError> {
-        Err(mismatch(self.f, "an enum variant with data"))
+        Err(self.f.mismatch("an enum variant with data"))
     }
 
     fn serialize_seq(mut self, _len: Option<usize>) -> Result<Self::SerializeSeq, CodecError> {
@@ -1079,7 +1084,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
                 BigQueryCodecErrorKind::UnsupportedType,
                 "an ARRAY of ARRAY is not a BigQuery column type",
             )),
-            _ => Err(mismatch(self.f, "a sequence")),
+            _ => Err(self.f.mismatch("a sequence")),
         }
     }
 
@@ -1102,7 +1107,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, CodecError> {
-        Err(mismatch(self.f, "an enum variant with data"))
+        Err(self.f.mismatch("an enum variant with data"))
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
@@ -1116,7 +1121,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
     ) -> Result<Self::SerializeStruct, CodecError> {
         if self.f.kind == BqKind::Interval {
             if name != TAG_INTERVAL {
-                return Err(mismatch(self.f, name));
+                return Err(self.f.mismatch(name));
             }
             return Ok(Compound::Interval {
                 v: self,
@@ -1133,15 +1138,8 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
-        Err(mismatch(self.f, "an enum variant with data"))
+        Err(self.f.mismatch("an enum variant with data"))
     }
-}
-
-fn json_error(err: serde_json::Error) -> CodecError {
-    CodecError::new(
-        BigQueryCodecErrorKind::Custom,
-        format!("JSON column: {err}"),
-    )
 }
 
 // `serde_json`'s `Value` serializer, whose compound states own their content, so a JSON
@@ -1159,7 +1157,7 @@ struct JsonSer<'r, 'e, 'p>(ValSer<'r, 'e, 'p>);
 
 impl JsonSer<'_, '_, '_> {
     fn print(self, value: Result<serde_json::Value, serde_json::Error>) -> Result<(), CodecError> {
-        let text = value.map_err(json_error)?.to_string();
+        let text = value.map_err(CodecError::from)?.to_string();
         self.0.text(&text)
     }
 }
@@ -1356,7 +1354,7 @@ impl<'r, 'e, 'p, C> JsonCompound<'r, 'e, 'p, C> {
     ) -> Result<Self, CodecError> {
         Ok(JsonCompound {
             target,
-            inner: inner.map_err(json_error)?,
+            inner: inner.map_err(CodecError::from)?,
         })
     }
 }
@@ -1368,7 +1366,7 @@ impl<C: ser::SerializeSeq<Ok = serde_json::Value, Error = serde_json::Error>> se
     type Error = CodecError;
 
     fn serialize_element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
-        self.inner.serialize_element(v).map_err(json_error)
+        self.inner.serialize_element(v).map_err(CodecError::from)
     }
 
     fn end(self) -> Result<(), CodecError> {
@@ -1383,7 +1381,7 @@ impl<C: ser::SerializeTuple<Ok = serde_json::Value, Error = serde_json::Error>> 
     type Error = CodecError;
 
     fn serialize_element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
-        self.inner.serialize_element(v).map_err(json_error)
+        self.inner.serialize_element(v).map_err(CodecError::from)
     }
 
     fn end(self) -> Result<(), CodecError> {
@@ -1398,7 +1396,7 @@ impl<C: ser::SerializeTupleStruct<Ok = serde_json::Value, Error = serde_json::Er
     type Error = CodecError;
 
     fn serialize_field<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
-        self.inner.serialize_field(v).map_err(json_error)
+        self.inner.serialize_field(v).map_err(CodecError::from)
     }
 
     fn end(self) -> Result<(), CodecError> {
@@ -1413,7 +1411,7 @@ impl<C: ser::SerializeTupleVariant<Ok = serde_json::Value, Error = serde_json::E
     type Error = CodecError;
 
     fn serialize_field<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
-        self.inner.serialize_field(v).map_err(json_error)
+        self.inner.serialize_field(v).map_err(CodecError::from)
     }
 
     fn end(self) -> Result<(), CodecError> {
@@ -1428,11 +1426,11 @@ impl<C: ser::SerializeMap<Ok = serde_json::Value, Error = serde_json::Error>> se
     type Error = CodecError;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), CodecError> {
-        self.inner.serialize_key(key).map_err(json_error)
+        self.inner.serialize_key(key).map_err(CodecError::from)
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
-        self.inner.serialize_value(v).map_err(json_error)
+        self.inner.serialize_value(v).map_err(CodecError::from)
     }
 
     fn end(self) -> Result<(), CodecError> {
@@ -1451,11 +1449,11 @@ impl<C: ser::SerializeStruct<Ok = serde_json::Value, Error = serde_json::Error>>
         key: &'static str,
         v: &T,
     ) -> Result<(), CodecError> {
-        self.inner.serialize_field(key, v).map_err(json_error)
+        self.inner.serialize_field(key, v).map_err(CodecError::from)
     }
 
     fn skip_field(&mut self, key: &'static str) -> Result<(), CodecError> {
-        self.inner.skip_field(key).map_err(json_error)
+        self.inner.skip_field(key).map_err(CodecError::from)
     }
 
     fn end(self) -> Result<(), CodecError> {
@@ -1474,7 +1472,7 @@ impl<C: ser::SerializeStructVariant<Ok = serde_json::Value, Error = serde_json::
         key: &'static str,
         v: &T,
     ) -> Result<(), CodecError> {
-        self.inner.serialize_field(key, v).map_err(json_error)
+        self.inner.serialize_field(key, v).map_err(CodecError::from)
     }
 
     fn end(self) -> Result<(), CodecError> {
@@ -1506,11 +1504,11 @@ impl Compound<'_, '_, '_> {
                 let byte = capture_int(v)
                     .ok()
                     .and_then(|b| u8::try_from(b).ok())
-                    .ok_or_else(|| mismatch(f, "a sequence of anything but u8"))?;
+                    .ok_or_else(|| f.mismatch("a sequence of anything but u8"))?;
                 st.byte(byte);
                 Ok(())
             }
-            Compound::Interval { v, .. } => Err(mismatch(v.f, "a sequence")),
+            Compound::Interval { v, .. } => Err(v.f.mismatch("a sequence")),
             Compound::Msg(_) => Err(CodecError::new(
                 BigQueryCodecErrorKind::TypeMismatch,
                 "a STRUCT takes named fields",
@@ -1527,11 +1525,11 @@ impl Compound<'_, '_, '_> {
             }
             Compound::Interval { v, parts } => {
                 let [Some(months), Some(days), Some(nanos)] = parts else {
-                    return Err(mismatch(v.f, "an INTERVAL without months, days and nanos"));
+                    return Err(v.f.mismatch("an INTERVAL without months, days and nanos"));
                 };
                 let part = |value: i64, name: &str| {
                     i32::try_from(value).map_err(|_| {
-                        out_of_range(format!("INTERVAL {name} {value} is out of range"))
+                        CodecError::out_of_range(format!("INTERVAL {name} {value} is out of range"))
                     })
                 };
                 let interval = BigQueryInterval {
@@ -1610,20 +1608,13 @@ impl ser::SerializeStruct for Compound<'_, '_, '_> {
                 parts[i] = Some(capture_int(v).map_err(|e| e.at_field(key))?);
                 Ok(())
             }
-            Compound::Bytes { f, .. } => Err(mismatch(f, "a struct")),
+            Compound::Bytes { f, .. } => Err(f.mismatch("a struct")),
         }
     }
 
     fn end(self) -> Result<(), CodecError> {
         self.finish()
     }
-}
-
-fn not_a_key() -> CodecError {
-    CodecError::new(
-        BigQueryCodecErrorKind::TypeMismatch,
-        "a map key must be a string",
-    )
 }
 
 /// Captures a map key, which must be a string.
@@ -1648,7 +1639,7 @@ impl ser::Serializer for KeyCapture {
         Ok(v.to_string())
     }
 
-    reject!(not_a_key();
+    reject!(CodecError::type_mismatch(NOT_A_KEY);
         serialize_bool(bool), serialize_i8(i8), serialize_i16(i16), serialize_i32(i32),
         serialize_i64(i64), serialize_u8(u8), serialize_u16(u16), serialize_u32(u32),
         serialize_u64(u64), serialize_f32(f32), serialize_f64(f64), serialize_bytes(&[u8]),
@@ -1675,15 +1666,15 @@ impl ser::Serializer for KeyCapture {
         _: &'static str,
         _: &T,
     ) -> Result<String, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 
     fn serialize_tuple_struct(
@@ -1691,7 +1682,7 @@ impl ser::Serializer for KeyCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleStruct, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 
     fn serialize_tuple_variant(
@@ -1701,11 +1692,11 @@ impl ser::Serializer for KeyCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 
     fn serialize_struct(
@@ -1713,7 +1704,7 @@ impl ser::Serializer for KeyCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStruct, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 
     fn serialize_struct_variant(
@@ -1723,7 +1714,7 @@ impl ser::Serializer for KeyCapture {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
-        Err(not_a_key())
+        Err(CodecError::type_mismatch(NOT_A_KEY))
     }
 }
 

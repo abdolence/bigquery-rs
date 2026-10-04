@@ -53,7 +53,7 @@ fn columns() -> Vec<BigQueryFieldSchema> {
 
 /// The single INT64 cell of `sql`, with the bytes billed.
 async fn count(scratch: &Scratch, sql: &str) -> TestResult<(i64, i64)> {
-    let (rows, billed) = scratch.query(sql).await?;
+    let (rows, billed) = query_rows(scratch, sql).await?;
     let cell = rows
         .first()
         .and_then(|row| row.first().cloned().flatten())
@@ -63,13 +63,13 @@ async fn count(scratch: &Scratch, sql: &str) -> TestResult<(i64, i64)> {
 
 #[tokio::test]
 async fn write_each_mode_then_count() -> TestResult {
-    with_scratch("write_each_mode_then_count", |scratch| async move {
+    with_scratch("write_each_mode_then_count", async |scratch: &Scratch| {
         let mut billed = 0;
         for (table, mode) in [
             ("t_default", BigQueryWriteMode::Default),
             ("t_committed", BigQueryWriteMode::Committed),
         ] {
-            let table_ref = scratch.create_table(table, columns(), None).await?;
+            let table_ref = create_table(scratch, table, columns(), None).await?;
             let options = BigQueryStreamingWriteOptions::new()
                 .with_mode(mode)
                 .with_max_batch_rows(2);
@@ -85,15 +85,15 @@ async fn write_each_mode_then_count() -> TestResult {
                 "{mode:?}"
             );
             let (n, b) = count(
-                &scratch,
-                &format!("SELECT COUNT(*) FROM {}", scratch.table_sql(table)),
+                scratch,
+                &format!("SELECT COUNT(*) FROM {}", table_sql(scratch, table)),
             )
             .await?;
             billed += b;
             assert_eq!(n, 5, "{mode:?}");
         }
 
-        let table_ref = scratch.create_table("t_pending", columns(), None).await?;
+        let table_ref = create_table(scratch, "t_pending", columns(), None).await?;
         let (mut writer, _) = scratch
             .db
             .create_streaming_writer_with_options::<Row>(
@@ -104,12 +104,12 @@ async fn write_each_mode_then_count() -> TestResult {
         writer.write_all(&rows(5)).await?;
         let finalized = writer.finalize().await?;
         assert_eq!(finalized.row_count, 5);
-        let sql = format!("SELECT COUNT(*) FROM {}", scratch.table_sql("t_pending"));
-        let (before, b) = count(&scratch, &sql).await?;
+        let sql = format!("SELECT COUNT(*) FROM {}", table_sql(scratch, "t_pending"));
+        let (before, b) = count(scratch, &sql).await?;
         billed += b;
         assert_eq!(before, 0, "pending rows are invisible before the commit");
         scratch.db.commit_write_streams(vec![finalized]).await?;
-        let (after, b) = count(&scratch, &sql).await?;
+        let (after, b) = count(scratch, &sql).await?;
         billed += b;
         assert_eq!(after, 5, "pending rows are visible after the commit");
         eprintln!("write_each_mode_then_count: 15 rows written, {billed} bytes billed");
@@ -125,8 +125,8 @@ async fn write_each_mode_then_count() -> TestResult {
 async fn committed_resend_writes_no_duplicates() -> TestResult {
     with_scratch(
         "committed_resend_writes_no_duplicates",
-        |scratch| async move {
-            let table = scratch.create_table("t", columns(), None).await?;
+        async |scratch: &Scratch| {
+            let table = create_table(scratch, "t", columns(), None).await?;
             let summary = scratch
                 .db
                 .fluent()
@@ -138,12 +138,14 @@ async fn committed_resend_writes_no_duplicates() -> TestResult {
                 .execute()
                 .await?;
             assert_eq!((summary.rows_written, summary.batches), (10, 5));
-            let (rows, billed) = scratch
-                .query(&format!(
+            let (rows, billed) = query_rows(
+                scratch,
+                &format!(
                     "SELECT COUNT(*), COUNT(DISTINCT id) FROM {}",
-                    scratch.table_sql("t")
-                ))
-                .await?;
+                    table_sql(scratch, "t")
+                ),
+            )
+            .await?;
             assert_eq!(rows, [[Some("10".to_string()), Some("10".to_string())]]);
             eprintln!(
                 "committed_resend_writes_no_duplicates: 10 rows written, {billed} bytes billed"

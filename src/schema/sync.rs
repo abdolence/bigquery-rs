@@ -1,28 +1,25 @@
 //! `.plan()` and `.sync()` against BigQuery: one `GetTable`, the pure plan, then the writes in
 //! the plan's order.
 
-use crate::errors::{BigQueryDataConflictError, BigQueryError, BigQuerySchemaChangeRefusedError};
-use crate::schema::ddl::{
-    create_sql, drop_and_create_sql, drop_sql, rename_sql, snapshot_sql, table_sql, widen_sql,
-};
-use crate::schema::diff::{defaults_body, patch_body, plan_table, update_body};
+use crate::db::if_match;
+use crate::db::proto::millis;
+use crate::db::TableIds;
+use crate::errors::{BigQueryError, BigQuerySchemaChangeRefusedError};
 use crate::schema::live::LiveTable;
 use crate::schema::plan::ChangeStep;
 use crate::{
     BigQueryDatasetRef, BigQueryDb, BigQueryDroppedData, BigQueryPartitioning, BigQueryQueryParams,
     BigQueryQuerySupport, BigQueryRecreate, BigQueryRecreateMethod, BigQueryResult,
-    BigQuerySchemaChange, BigQuerySchemaSupport, BigQueryTableDeclaration, BigQueryTableId,
-    BigQueryTablePlan, BigQueryTableRef, BigQueryTableSyncReport, BigQueryTableTarget,
+    BigQuerySchemaChange, BigQueryTableDeclaration, BigQueryTableId, BigQueryTablePlan,
+    BigQueryTableRef, BigQueryTableSyncReport, BigQueryTableTarget,
 };
-use async_trait::async_trait;
 use gcloud_sdk::google::cloud::bigquery::v2;
-use gcloud_sdk::tonic::metadata::{MetadataMap, MetadataValue};
 use std::time::Duration;
 use tracing::{info, warn, Span};
 
 /// Writes to one table that go out back to back; later ones wait [`PACE`] each. BigQuery's
-/// per-table update limit took 5 DDL statements and 7 or 8 patches in a burst (probe 8a to
-/// 8c), and both count against one quota.
+/// per-table update limit took 5 DDL statements and 7 or 8 patches in a burst, and both count
+/// against one quota.
 const BURST: usize = 5;
 const PACE: Duration = Duration::from_millis(2200);
 
@@ -39,36 +36,21 @@ impl Pacer {
     }
 }
 
-fn schema_span(table: &BigQueryTableRef) -> Span {
-    tracing::debug_span!("BigQuery schema", "/bigquery/table" = %table)
-}
-
-/// The project, dataset and table IDs of a resolved table, as the v2 requests take them.
-struct TableIds {
-    project: String,
-    dataset: String,
-    table: String,
+impl BigQueryTableRef {
+    fn schema_span(&self) -> Span {
+        tracing::debug_span!("BigQuery schema", "/bigquery/table" = %self)
+    }
 }
 
 impl BigQueryDb {
     /// `table` with the client's project filled in.
     fn resolved(&self, table: &BigQueryTableRef) -> BigQueryResult<BigQueryTableRef> {
-        let project = table
-            .project()
-            .unwrap_or(&self.options().google_project_id)
-            .to_string();
+        let project = table.project_or(&self.options().google_project_id);
         Ok(BigQueryDatasetRef::new(project, table.dataset().clone())?.table(table.table().clone()))
     }
 
     fn ids(&self, table: &BigQueryTableRef) -> TableIds {
-        TableIds {
-            project: table
-                .project()
-                .unwrap_or(&self.options().google_project_id)
-                .to_string(),
-            dataset: table.dataset().to_string(),
-            table: table.table().to_string(),
-        }
+        table.ids(&self.options().google_project_id)
     }
 
     async fn get_live_table(
@@ -84,7 +66,7 @@ impl BigQueryDb {
             ..Default::default()
         };
         let result = self
-            .retry(span, "get a table", &request, &MetadataMap::new(), |r| {
+            .retry(span, "get a table", &request, |r| {
                 let mut client = self.table_client();
                 async move { client.get_table(r).await }
             })
@@ -113,16 +95,10 @@ impl BigQueryDb {
                 page_size: 0,
             };
             let page = self
-                .retry(
-                    span,
-                    "list row access policies",
-                    &request,
-                    &MetadataMap::new(),
-                    |r| {
-                        let mut client = self.row_access_policy_client();
-                        async move { client.list_row_access_policies(r).await }
-                    },
-                )
+                .retry(span, "list row access policies", &request, |r| {
+                    let mut client = self.row_access_policy_client();
+                    async move { client.list_row_access_policies(r).await }
+                })
                 .await?;
             policies.extend(
                 page.row_access_policies
@@ -144,7 +120,7 @@ impl BigQueryDb {
     ) -> BigQueryResult<(BigQueryTablePlan, Option<LiveTable>)> {
         let table = self.resolved(&declaration.table)?;
         let live = self.get_live_table(&table, span).await?;
-        let mut plan = plan_table(declaration, table, live.as_ref());
+        let mut plan = declaration.plan(table, live.as_ref());
         if let Some(recreate) = &mut plan.recreate {
             recreate.row_access_policies = self.row_access_policies(&plan.table, span).await?;
         }
@@ -171,46 +147,31 @@ impl BigQueryDb {
             table: Some(body),
             autodetect_schema: false,
         };
-        let mut metadata = MetadataMap::new();
-        let precondition = MetadataValue::try_from(etag).map_err(|_| {
-            BigQueryError::invalid_parameters(
-                "etag",
-                format!("GetTable returned an etag that is not a valid header: {etag:?}"),
-            )
-        })?;
-        metadata.insert("if-match", precondition);
+        let metadata = if_match("GetTable", etag)?;
         let action = if update {
             "update a table"
         } else {
             "patch a table"
         };
-        let result = self
-            .retry(span, action, &request, &metadata, |r| {
-                let mut client = self.table_client();
-                async move {
-                    if update {
-                        client.update_table(r).await
-                    } else {
-                        client.patch_table(r).await
-                    }
+        self.retry_with_metadata(span, action, &request, &metadata, |r| {
+            let mut client = self.table_client();
+            async move {
+                if update {
+                    client.update_table(r).await
+                } else {
+                    client.patch_table(r).await
                 }
-            })
-            .await;
-        match result {
-            Err(BigQueryError::DatabaseError(err)) if err.public.code == "FailedPrecondition" => {
-                Err(BigQueryError::DataConflictError(
-                    BigQueryDataConflictError::new(
-                        err.public,
-                        format!(
-                            "{table} changed since this sync read it (etag {etag}); nothing after \
-                         this write was sent, run the sync again. {}",
-                            err.details
-                        ),
-                    ),
-                ))
             }
-            other => other,
-        }
+        })
+        .await
+        .map_err(|err| {
+            err.on_stale_etag(|| {
+                format!(
+                    "{table} changed since this sync read it (etag {etag}); nothing after this \
+                     write was sent, run the sync again."
+                )
+            })
+        })
     }
 
     async fn run_ddl(&self, sql: String) -> BigQueryResult<()> {
@@ -229,16 +190,13 @@ impl BigQueryDb {
         let request = v2::InsertTableRequest {
             project_id: ids.project.clone(),
             dataset_id: ids.dataset.clone(),
-            table: Some(new_table(
-                v2::TableReference {
-                    project_id: ids.project,
-                    dataset_id: ids.dataset,
-                    table_id: ids.table,
-                },
-                target,
-            )),
+            table: Some(target.insert_body(v2::TableReference {
+                project_id: ids.project,
+                dataset_id: ids.dataset,
+                table_id: ids.table,
+            })?),
         };
-        self.retry(span, "create a table", &request, &MetadataMap::new(), |r| {
+        self.retry(span, "create a table", &request, |r| {
             let mut client = self.table_client();
             async move { client.insert_table(r).await }
         })
@@ -253,31 +211,23 @@ impl BigQueryDb {
         report: &mut BigQueryTableSyncReport,
     ) -> BigQueryResult<()> {
         let project = &self.options().google_project_id;
-        let table_text = table_sql(table, project);
+        let table_ddl = table.ddl(project);
         if recreate.snapshot_first {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
-            let snapshot = BigQueryDatasetRef::new(
-                table.project().unwrap_or(project),
-                table.dataset().clone(),
-            )?
-            .table(BigQueryTableId::new(format!(
-                "{}_snapshot_{now}",
-                table.table()
-            ))?);
-            self.run_ddl(snapshot_sql(&table_sql(&snapshot, project), &table_text))
+            let snapshot =
+                BigQueryDatasetRef::new(table.project_or(project), table.dataset().clone())?.table(
+                    BigQueryTableId::new(format!("{}_snapshot_{now}", table.table()))?,
+                );
+            self.run_ddl(snapshot.ddl(project).snapshot_of(&table_ddl))
                 .await?;
             info!(%table, %snapshot, "Took a snapshot before recreating the table.");
             report.snapshot = Some(snapshot);
         }
         let sql = match recreate.method {
-            BigQueryRecreateMethod::CreateOrReplace => {
-                create_sql(&table_text, &recreate.target, true)?
-            }
-            BigQueryRecreateMethod::DropAndCreate => {
-                drop_and_create_sql(&table_text, &recreate.target)?
-            }
+            BigQueryRecreateMethod::CreateOrReplace => table_ddl.create(&recreate.target, true)?,
+            BigQueryRecreateMethod::DropAndCreate => table_ddl.drop_and_create(&recreate.target)?,
         };
         self.run_ddl(sql).await?;
         if recreate.dangerous {
@@ -308,7 +258,7 @@ impl BigQueryDb {
         let table = &plan.table;
         let mut pacer = Pacer { sent: 0 };
         let mut latest = live.raw;
-        if let Some(body) = patch_body(&latest, &plan.changes) {
+        if let Some(body) = plan.patch_body(&latest)? {
             pacer.next().await;
             latest = self
                 .write_table(table, body, &latest.etag.clone(), false, span)
@@ -321,14 +271,14 @@ impl BigQueryDb {
             );
             info!(%table, "Patched the table.");
         }
-        if let Some(body) = defaults_body(&latest, &plan.changes) {
+        if let Some(body) = plan.defaults_body(&latest) {
             pacer.next().await;
             latest = self
                 .write_table(table, body, &latest.etag.clone(), false, span)
                 .await?;
             info!(%table, "Set the default values of the added columns.");
         }
-        if let Some(body) = update_body(&latest, &plan.changes) {
+        if let Some(body) = plan.update_body(&latest) {
             pacer.next().await;
             self.write_table(table, body, &latest.etag.clone(), true, span)
                 .await?;
@@ -340,16 +290,16 @@ impl BigQueryDb {
             );
             info!(%table, "Removed undeclared labels or clustering.");
         }
-        let table_text = table_sql(table, &self.options().google_project_id);
+        let table_ddl = table.ddl(&self.options().google_project_id);
         for change in &plan.changes {
             let sql = match change {
                 BigQuerySchemaChange::RenameColumn { from, to } => {
-                    rename_sql(&table_text, from, to)
+                    table_ddl.rename_column(from, to)
                 }
                 BigQuerySchemaChange::WidenColumn { column, to, .. } => {
-                    widen_sql(&table_text, column, to)
+                    table_ddl.widen_column(column, to)
                 }
-                BigQuerySchemaChange::DropColumn { column, .. } => drop_sql(&table_text, column),
+                BigQuerySchemaChange::DropColumn { column, .. } => table_ddl.drop_column(column),
                 _ => continue,
             };
             pacer.next().await;
@@ -367,79 +317,86 @@ impl BigQueryDb {
     }
 }
 
-/// The `InsertTable` body for `target` at `reference`.
-fn new_table(reference: v2::TableReference, target: &BigQueryTableTarget) -> v2::Table {
-    let (time_partitioning, range_partitioning) = match &target.partitioning {
-        Some(BigQueryPartitioning::Time { unit, column }) => (
-            Some(v2::TimePartitioning {
-                r#type: unit.name().to_string(),
-                expiration_ms: target.partition_expiration_ms,
-                field: column.clone(),
-            }),
-            None,
-        ),
-        Some(BigQueryPartitioning::Range {
-            column,
-            start,
-            end,
-            interval,
-        }) => (
-            None,
-            Some(v2::RangePartitioning {
-                field: column.clone(),
-                range: Some(v2::range_partitioning::Range {
-                    start: start.to_string(),
-                    end: end.to_string(),
-                    interval: interval.to_string(),
+impl BigQueryTableTarget {
+    /// The `InsertTable` body for this target at `reference`.
+    fn insert_body(&self, reference: v2::TableReference) -> BigQueryResult<v2::Table> {
+        let (time_partitioning, range_partitioning) = match &self.partitioning {
+            Some(BigQueryPartitioning::Time { unit, column }) => (
+                Some(v2::TimePartitioning {
+                    r#type: unit.name().to_string(),
+                    expiration_ms: self
+                        .partition_expiration
+                        .map(|d| millis("partition_expiration", d))
+                        .transpose()?,
+                    field: column.clone(),
                 }),
+                None,
+            ),
+            Some(BigQueryPartitioning::Range {
+                column,
+                start,
+                end,
+                interval,
+            }) => (
+                None,
+                Some(v2::RangePartitioning {
+                    field: column.clone(),
+                    range: Some(v2::range_partitioning::Range {
+                        start: start.to_string(),
+                        end: end.to_string(),
+                        interval: interval.to_string(),
+                    }),
+                }),
+            ),
+            None => (None, None),
+        };
+        Ok(v2::Table {
+            table_reference: Some(reference),
+            description: self.description.clone(),
+            labels: self.labels.clone().into_iter().collect(),
+            schema: Some(v2::TableSchema {
+                fields: self
+                    .columns
+                    .iter()
+                    .map(v2::TableFieldSchema::from)
+                    .collect(),
+                ..Default::default()
             }),
-        ),
-        None => (None, None),
-    };
-    v2::Table {
-        table_reference: Some(reference),
-        description: target.description.clone(),
-        labels: target.labels.clone().into_iter().collect(),
-        schema: Some(v2::TableSchema {
-            fields: target
-                .columns
-                .iter()
-                .map(v2::TableFieldSchema::from)
-                .collect(),
+            time_partitioning,
+            range_partitioning,
+            clustering: (!self.clustering.is_empty()).then(|| v2::Clustering {
+                fields: self.clustering.clone(),
+            }),
+            table_constraints: self.primary_key.as_ref().map(|key| v2::TableConstraints {
+                primary_key: Some(v2::PrimaryKey {
+                    columns: key.clone(),
+                }),
+                foreign_keys: Vec::new(),
+            }),
+            expiration_time: self.expiration.map(|t| t.as_millisecond()),
             ..Default::default()
-        }),
-        time_partitioning,
-        range_partitioning,
-        clustering: (!target.clustering.is_empty()).then(|| v2::Clustering {
-            fields: target.clustering.clone(),
-        }),
-        table_constraints: target.primary_key.as_ref().map(|key| v2::TableConstraints {
-            primary_key: Some(v2::PrimaryKey {
-                columns: key.clone(),
-            }),
-            foreign_keys: Vec::new(),
-        }),
-        expiration_time: target.expiration_ms,
-        ..Default::default()
+        })
     }
 }
 
-#[async_trait]
-impl BigQuerySchemaSupport for BigQueryDb {
-    async fn plan_table_schema(
+impl BigQueryDb {
+    /// Reads the table and reports what [`sync_table_schema`](Self::sync_table_schema) would
+    /// do, writing nothing.
+    pub(crate) async fn plan_table_schema(
         &self,
         declaration: BigQueryTableDeclaration,
     ) -> BigQueryResult<BigQueryTablePlan> {
-        let span = schema_span(&declaration.table);
+        let span = declaration.table.schema_span();
         let (plan, _) = self.planned(&declaration, &span).await?;
         Ok(plan)
     }
 
-    async fn sync_table_schema(
+    /// Reads the table and applies the plan.
+    pub(crate) async fn sync_table_schema(
         &self,
         declaration: BigQueryTableDeclaration,
     ) -> BigQueryResult<BigQueryTableSyncReport> {
-        let span = schema_span(&declaration.table);
+        let span = declaration.table.schema_span();
         let (plan, live) = self.planned(&declaration, &span).await?;
         if plan.refusal.is_some() {
             return Err(BigQueryError::SchemaChangeRefused(Box::new(

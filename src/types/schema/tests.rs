@@ -1,4 +1,5 @@
 use super::*;
+use crate::errors::BigQueryCodecErrorKind;
 use arrow_schema::{DataType, Field, Fields, IntervalUnit, Schema, TimeUnit};
 use std::collections::HashMap;
 use storage::table_field_schema::{Mode as StorageMode, Type as StorageType};

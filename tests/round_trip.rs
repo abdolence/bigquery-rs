@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 mod common;
 mod read_common;
-use common::TestResult;
-use read_common::{with_scratch, with_scratch_prefixed, Scratch};
+use common::{with_scratch, Scratch, TestResult};
+use read_common::run_sql;
 
 #[derive(Deserialize, Debug, PartialEq, Clone)]
 struct Home {
@@ -107,7 +107,8 @@ fn row_literal(r: &Resident) -> String {
 #[tokio::test]
 async fn round_trip_every_type_through_dml() -> TestResult {
     with_scratch("round_trip_every_type_through_dml", async |s: &Scratch| {
-        s.sql(
+        run_sql(
+            s,
             "CREATE TABLE residents (id INT64 NOT NULL, name STRING NOT NULL, born DATE NOT NULL, \
              seen TIMESTAMP NOT NULL, seen_fast TIMESTAMP NOT NULL, wakes TIME NOT NULL, \
              balance NUMERIC NOT NULL, photo BYTES NOT NULL, tags ARRAY<STRING>, \
@@ -116,10 +117,10 @@ async fn round_trip_every_type_through_dml() -> TestResult {
         .await?;
         let expected = residents();
         let values: Vec<String> = expected.iter().map(row_literal).collect();
-        s.sql(&format!(
-            "INSERT INTO residents VALUES {}",
-            values.join(", ")
-        ))
+        run_sql(
+            s,
+            &format!("INSERT INTO residents VALUES {}", values.join(", ")),
+        )
         .await?;
         let mut got: Vec<Resident> =
             s.db.fluent()
@@ -373,16 +374,15 @@ fn every_type_rows() -> Vec<EveryType> {
 
 #[tokio::test]
 async fn round_trip_every_type_and_mode_through_the_writer() -> TestResult {
-    with_scratch_prefixed(
-        "bqp4b",
+    with_scratch(
         "round_trip_every_type_and_mode_through_the_writer",
         async |s: &Scratch| {
-            s.sql(&every_type_table_sql()).await?;
+            run_sql(s, &every_type_table_sql()).await?;
             let expected = every_type_rows();
             let summary =
                 s.db.fluent()
                     .insert()
-                    .into(BigQueryDatasetRef::new(&s.project, s.dataset.clone())?.table(EVERY_TYPE))
+                    .into(s.dataset_ref()?.table(EVERY_TYPE))
                     .objects(&expected)
                     .execute()
                     .await?;

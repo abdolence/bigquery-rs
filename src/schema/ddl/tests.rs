@@ -105,11 +105,11 @@ fn target(columns: Vec<BigQueryFieldSchema>) -> BigQueryTableTarget {
         columns,
         primary_key: None,
         partitioning: None,
-        partition_expiration_ms: None,
+        partition_expiration: None,
         clustering: Vec::new(),
         description: None,
         labels: BigQueryLabels::new(),
-        expiration_ms: None,
+        expiration: None,
     }
 }
 
@@ -144,7 +144,7 @@ fn table_path_quotes_each_part_whatever_the_project_holds() {
         "a backtick project must reach the renderer, or this test checks nothing"
     );
     for (project, table) in accepted {
-        let sql = table_sql(&table, "unused");
+        let sql = table.ddl("unused").to_string();
         assert_eq!(
             tokens(&sql),
             vec![
@@ -159,17 +159,17 @@ fn table_path_quotes_each_part_whatever_the_project_holds() {
     }
     let unset = BigQueryDatasetId::from_static("ds").table(BigQueryTableId::from_static("t"));
     assert_eq!(
-        table_sql(&unset, "client-project"),
+        unset.ddl("client-project").to_string(),
         "`client-project`.`ds`.`t`"
     );
 }
 
 #[test]
 fn hostile_descriptions_and_labels_render_as_single_literals_that_parse_back() {
-    let table = table_sql(&orders(), "p");
-    let plain = skeleton(&create_sql(&table, &hostile_target("plain"), true).expect("DDL"));
+    let table = orders().ddl("p");
+    let plain = skeleton(&table.create(&hostile_target("plain"), true).expect("DDL"));
     for value in injection_corpus() {
-        let sql = create_sql(&table, &hostile_target(&value), true).expect("DDL");
+        let sql = table.create(&hostile_target(&value), true).expect("DDL");
         assert_eq!(skeleton(&sql), plain, "{value:.80?}");
         assert_eq!(
             strings(&sql),
@@ -181,25 +181,25 @@ fn hostile_descriptions_and_labels_render_as_single_literals_that_parse_back() {
 
 #[test]
 fn hostile_column_names_render_as_single_identifiers() {
-    let table = table_sql(&orders(), "p");
+    let table = orders().ddl("p");
     let plain_create = skeleton(
-        &create_sql(
-            &table,
-            &target(vec![column("c", STRING, BigQueryFieldMode::Nullable)]),
-            false,
-        )
-        .expect("DDL"),
+        &table
+            .create(
+                &target(vec![column("c", STRING, BigQueryFieldMode::Nullable)]),
+                false,
+            )
+            .expect("DDL"),
     );
-    let plain_rename = skeleton(&rename_sql(&table, "a", "b"));
-    let plain_widen = skeleton(&widen_sql(&table, "a", &BigQueryFieldType::Numeric(None)));
-    let plain_drop = skeleton(&drop_sql(&table, "a"));
+    let plain_rename = skeleton(&table.rename_column("a", "b"));
+    let plain_widen = skeleton(&table.widen_column("a", &BigQueryFieldType::Numeric(None)));
+    let plain_drop = skeleton(&table.drop_column("a"));
     for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {
-        let create = create_sql(
-            &table,
-            &target(vec![column(&name, STRING, BigQueryFieldMode::Nullable)]),
-            false,
-        )
-        .expect("DDL");
+        let create = table
+            .create(
+                &target(vec![column(&name, STRING, BigQueryFieldMode::Nullable)]),
+                false,
+            )
+            .expect("DDL");
         assert_eq!(skeleton(&create), plain_create, "{name:.80?}");
         assert_eq!(
             idents(&create)[3..],
@@ -207,14 +207,14 @@ fn hostile_column_names_render_as_single_identifiers() {
             "{name:.80?}"
         );
 
-        let rename = rename_sql(&table, &name, &name);
+        let rename = table.rename_column(&name, &name);
         assert_eq!(skeleton(&rename), plain_rename, "{name:.80?}");
         assert_eq!(idents(&rename)[3..], [name.clone(), name.clone()]);
 
-        let widen = widen_sql(&table, &name, &BigQueryFieldType::Numeric(None));
+        let widen = table.widen_column(&name, &BigQueryFieldType::Numeric(None));
         assert_eq!(skeleton(&widen), plain_widen, "{name:.80?}");
 
-        let drop = drop_sql(&table, &name);
+        let drop = table.drop_column(&name);
         assert_eq!(skeleton(&drop), plain_drop, "{name:.80?}");
         assert_eq!(idents(&drop)[3..], *std::slice::from_ref(&name));
     }
@@ -255,13 +255,13 @@ fn create_or_replace_restates_columns_key_partitioning_clustering_and_options() 
         unit: BigQueryPartitionUnit::Day,
         column: Some("ts".into()),
     });
-    target.partition_expiration_ms = Some(86_400_000);
+    target.partition_expiration = Some(std::time::Duration::from_secs(86_400));
     target.clustering = vec!["id".into()];
     target.description = Some("Orders".into());
     target.labels = BigQueryLabels::from([("team", "shop")]);
-    target.expiration_ms = Some(1_900_000_000_000);
+    target.expiration = Some(jiff::Timestamp::from_second(1_900_000_000).expect("a timestamp"));
 
-    let sql = create_sql(&table_sql(&orders(), "p"), &target, true).expect("DDL");
+    let sql = orders().ddl("p").create(&target, true).expect("DDL");
     assert_eq!(
         sql,
         "CREATE OR REPLACE TABLE `p`.`ds`.`t` (\n  \
@@ -285,8 +285,8 @@ fn drop_and_create_is_one_script() {
         BigQueryFieldType::Int64,
         BigQueryFieldMode::Nullable,
     )]);
-    let table = table_sql(&orders(), "p");
-    let sql = drop_and_create_sql(&table, &target).expect("DDL");
+    let table = orders().ddl("p");
+    let sql = table.drop_and_create(&target).expect("DDL");
     assert_eq!(
         sql,
         "DROP TABLE `p`.`ds`.`t`;\nCREATE TABLE `p`.`ds`.`t` (\n  `id` INT64\n);"
@@ -322,7 +322,7 @@ fn partition_expression_follows_the_column_type() {
             "PARTITION BY DATETIME_TRUNC(`c`, YEAR)",
         ),
     ];
-    let table = table_sql(&orders(), "p");
+    let table = orders().ddl("p");
     for (field_type, unit, expected) in cases {
         let mut target = target(vec![column(
             "c",
@@ -333,7 +333,7 @@ fn partition_expression_follows_the_column_type() {
             unit,
             column: Some("c".into()),
         });
-        let sql = create_sql(&table, &target, false).expect("DDL");
+        let sql = table.create(&target, false).expect("DDL");
         assert!(
             sql.contains(&format!("\n{expected}")),
             "{field_type} {unit}: {sql}"
@@ -345,7 +345,7 @@ fn partition_expression_follows_the_column_type() {
         unit: BigQueryPartitionUnit::Day,
         column: None,
     });
-    let sql = create_sql(&table, &ingestion, false).expect("DDL");
+    let sql = table.create(&ingestion, false).expect("DDL");
     assert!(sql.contains("\nPARTITION BY _PARTITIONDATE"), "{sql}");
 
     let mut range = target(vec![column(
@@ -359,7 +359,7 @@ fn partition_expression_follows_the_column_type() {
         end: 100,
         interval: 5,
     });
-    let sql = create_sql(&table, &range, false).expect("DDL");
+    let sql = table.create(&range, false).expect("DDL");
     assert!(
         sql.contains("\nPARTITION BY RANGE_BUCKET(`c`, GENERATE_ARRAY(-10, 100, 5))"),
         "{sql}"
@@ -371,21 +371,20 @@ fn partition_expression_follows_the_column_type() {
         column: Some("c".into()),
     });
     assert!(
-        create_sql(&table, &unknown, false).is_err(),
+        table.create(&unknown, false).is_err(),
         "STRING cannot partition"
     );
 }
 
 #[test]
 fn alter_statements_name_the_table_and_the_column() {
-    let table = table_sql(&orders(), "p");
+    let table = orders().ddl("p");
     assert_eq!(
-        rename_sql(&table, "a", "b"),
+        table.rename_column("a", "b"),
         "ALTER TABLE `p`.`ds`.`t` RENAME COLUMN `a` TO `b`"
     );
     assert_eq!(
-        widen_sql(
-            &table,
+        table.widen_column(
             "s",
             &BigQueryFieldType::String {
                 max_length: Some(20)
@@ -394,11 +393,15 @@ fn alter_statements_name_the_table_and_the_column() {
         "ALTER TABLE `p`.`ds`.`t` ALTER COLUMN `s` SET DATA TYPE STRING(20)"
     );
     assert_eq!(
-        drop_sql(&table, "d"),
+        table.drop_column("d"),
         "ALTER TABLE `p`.`ds`.`t` DROP COLUMN `d`"
     );
     assert_eq!(
-        snapshot_sql("`p`.`ds`.`t_snap`", &table),
+        BigQueryDatasetRef::new("p", BigQueryDatasetId::from_static("ds"))
+            .expect("a project")
+            .table(BigQueryTableId::from_static("t_snap"))
+            .ddl("p")
+            .snapshot_of(&table),
         "CREATE SNAPSHOT TABLE `p`.`ds`.`t_snap` CLONE `p`.`ds`.`t`"
     );
 }
@@ -441,7 +444,7 @@ fn without_comments(sql: &str) -> String {
 
 #[test]
 fn a_default_is_one_parenthesized_operand() {
-    let table = table_sql(&orders(), "p");
+    let table = orders().ddl("p");
     let rendered = |expression: &str, code: &str| {
         let mut c = column("c", BigQueryFieldType::Int64, BigQueryFieldMode::Nullable);
         c.default_value_expression = Some(expression.into());
@@ -449,7 +452,7 @@ fn a_default_is_one_parenthesized_operand() {
             c,
             column("n", BigQueryFieldType::Int64, BigQueryFieldMode::Nullable),
         ]);
-        let sql = create_sql(&table, &target, false).expect("DDL");
+        let sql = table.create(&target, false).expect("DDL");
         let parsed = without_comments(&sql).replacen(code, "E", 1);
         skeleton(&parsed.split_whitespace().collect::<Vec<_>>().join(" "))
     };
@@ -470,7 +473,7 @@ fn a_default_is_one_parenthesized_operand() {
 
 #[test]
 fn a_nested_field_name_stays_one_identifier() {
-    let table = table_sql(&orders(), "p");
+    let table = orders().ddl("p");
     let nested = |name: &str| {
         let inner = column(name, STRING, BigQueryFieldMode::Nullable);
         let outer = column(
@@ -482,17 +485,17 @@ fn a_nested_field_name_stays_one_identifier() {
     };
     let create = |name: &str| {
         let target = target(vec![column("s", nested(name), BigQueryFieldMode::Nullable)]);
-        create_sql(&table, &target, false).expect("DDL")
+        table.create(&target, false).expect("DDL")
     };
     let plain_create = skeleton(&create("c"));
-    let plain_widen = skeleton(&widen_sql(&table, "s", &nested("c")));
+    let plain_widen = skeleton(&table.widen_column("s", &nested("c")));
     for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {
         let segments = ["s".to_string(), name.clone(), name.clone()];
         let create = create(&name);
         assert_eq!(skeleton(&create), plain_create, "{name:.80?}");
         assert_eq!(idents(&create)[3..], segments, "{name:.80?}");
 
-        let widen = widen_sql(&table, "s", &nested(&name));
+        let widen = table.widen_column("s", &nested(&name));
         assert_eq!(skeleton(&widen), plain_widen, "{name:.80?}");
         assert_eq!(idents(&widen)[3..], segments, "{name:.80?}");
     }
@@ -500,7 +503,7 @@ fn a_nested_field_name_stays_one_identifier() {
 
 #[test]
 fn hostile_key_clustering_and_partitioning_columns_render_as_single_identifiers() {
-    let table = table_sql(&orders(), "p");
+    let table = orders().ddl("p");
     // `None` stands for range partitioning on an INT64 column.
     let partitionings = [
         (BigQueryFieldType::Date, Some(BigQueryPartitionUnit::Day)),
@@ -544,7 +547,7 @@ fn hostile_key_clustering_and_partitioning_columns_render_as_single_identifiers(
                     interval: 1,
                 },
             });
-            create_sql(&table, &target, false).expect("DDL")
+            table.create(&target, false).expect("DDL")
         };
         let plain = skeleton(&create("c"));
         for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {

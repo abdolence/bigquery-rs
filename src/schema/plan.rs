@@ -2,10 +2,11 @@
 
 use crate::BigQueryLabels;
 use crate::{
-    BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryPartitioning,
-    BigQueryTableRef,
+    BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryInstant,
+    BigQueryPartitioning, BigQueryTableRef,
 };
 use std::fmt::{self, Display, Formatter};
+use std::time::Duration;
 
 /// One difference between a declaration and the table, and how it is applied.
 ///
@@ -62,19 +63,19 @@ pub enum BigQuerySchemaChange {
         /// The declared value.
         to: String,
     },
-    /// `PatchTable`: the table expiration, in milliseconds since the epoch.
+    /// `PatchTable`: the table expiration.
     SetExpiration {
         /// The expiration the table has.
-        from: Option<i64>,
+        from: Option<BigQueryInstant>,
         /// The declared expiration.
-        to: i64,
+        to: BigQueryInstant,
     },
-    /// `PatchTable`: the partition expiration, in milliseconds.
+    /// `PatchTable`: the partition expiration.
     SetPartitionExpiration {
         /// The expiration the table has.
-        from: Option<i64>,
+        from: Option<Duration>,
         /// The declared expiration.
-        to: i64,
+        to: Duration,
     },
     /// `PatchTable`: clustering added or changed. New data is clustered the new way; existing
     /// data is reclustered by BigQuery in the background.
@@ -214,14 +215,6 @@ impl BigQuerySchemaChange {
     }
 }
 
-fn mode_name(mode: BigQueryFieldMode) -> &'static str {
-    match mode {
-        BigQueryFieldMode::Nullable => "NULLABLE",
-        BigQueryFieldMode::Required => "REQUIRED",
-        BigQueryFieldMode::Repeated => "REPEATED",
-    }
-}
-
 fn opt<T: fmt::Debug>(value: &Option<T>) -> String {
     value
         .as_ref()
@@ -236,10 +229,6 @@ fn list(columns: &[String]) -> String {
     quoted.join(", ")
 }
 
-fn timestamp_ms(ms: i64) -> String {
-    jiff::Timestamp::from_millisecond(ms).map_or_else(|_| format!("{ms} ms"), |t| t.to_string())
-}
-
 impl Display for BigQuerySchemaChange {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         use BigQuerySchemaChange::*;
@@ -248,8 +237,7 @@ impl Display for BigQuerySchemaChange {
                 write!(
                     f,
                     "[patch] add column `{path}` {} {}",
-                    field.field_type,
-                    mode_name(field.mode)
+                    field.field_type, field.mode
                 )?;
                 if let Some(default) = &field.default_value_expression {
                     write!(
@@ -276,14 +264,14 @@ impl Display for BigQuerySchemaChange {
             }
             SetExpiration { from, to } => write!(
                 f,
-                "[patch] table expiration: {} to {}",
-                from.map_or_else(|| "none".to_string(), timestamp_ms),
-                timestamp_ms(*to)
+                "[patch] table expiration: {} to {to}",
+                from.map_or_else(|| "none".to_string(), |t| t.to_string()),
             ),
             SetPartitionExpiration { from, to } => write!(
                 f,
-                "[patch] partition expiration: {} to {to} ms",
-                from.map_or_else(|| "none".to_string(), |ms| format!("{ms} ms"))
+                "[patch] partition expiration: {} to {} ms",
+                from.map_or_else(|| "none".to_string(), |d| format!("{} ms", d.as_millis())),
+                to.as_millis()
             ),
             SetClustering { from, to } => {
                 write!(f, "[patch] clustering: {} to {}", list(from), list(to))
@@ -318,12 +306,9 @@ impl Display for BigQuerySchemaChange {
             ChangeColumnType { path, from, to } => {
                 write!(f, "change the type of `{path}` from {from} to {to}")
             }
-            ChangeColumnMode { path, from, to } => write!(
-                f,
-                "change the mode of `{path}` from {} to {}",
-                mode_name(*from),
-                mode_name(*to)
-            ),
+            ChangeColumnMode { path, from, to } => {
+                write!(f, "change the mode of `{path}` from {} to {}", from, to)
+            }
             AddRequiredColumn { path, field } => write!(
                 f,
                 "add REQUIRED column `{path}` {} to an existing table",
@@ -387,16 +372,16 @@ pub struct BigQueryTableTarget {
     pub primary_key: Option<Vec<String>>,
     /// The partitioning.
     pub partitioning: Option<BigQueryPartitioning>,
-    /// The partition expiration in milliseconds.
-    pub partition_expiration_ms: Option<i64>,
+    /// The partition expiration.
+    pub partition_expiration: Option<Duration>,
     /// The clustering columns, empty for none.
     pub clustering: Vec<String>,
     /// The table description.
     pub description: Option<String>,
     /// The labels.
     pub labels: BigQueryLabels,
-    /// The table expiration, in milliseconds since the epoch.
-    pub expiration_ms: Option<i64>,
+    /// The table expiration.
+    pub expiration: Option<BigQueryInstant>,
 }
 
 impl Display for BigQueryTableTarget {
@@ -404,7 +389,7 @@ impl Display for BigQueryTableTarget {
         let columns: Vec<String> = self
             .columns
             .iter()
-            .map(|c| format!("`{}` {} {}", c.name, c.field_type, mode_name(c.mode)))
+            .map(|c| format!("`{}` {} {}", c.name, c.field_type, c.mode))
             .collect();
         write!(f, "columns {}", columns.join(", "))?;
         if let Some(key) = &self.primary_key {

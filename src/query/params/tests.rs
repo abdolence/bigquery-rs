@@ -37,14 +37,14 @@ fn param(name: &str, t: QueryParameterType, v: QueryParameterValue) -> QueryPara
 }
 
 fn infer<V: Serialize + ?Sized>(value: &V) -> BigQueryResult<QueryParameter> {
-    Ok(infer_param(ParamLabel::Named("p"), value)?)
+    infer_param(ParamLabel::Named("p"), value)
 }
 
 fn typed<V: Serialize + ?Sized>(
     t: impl Into<BigQueryParamType>,
     value: &V,
 ) -> BigQueryResult<QueryParameter> {
-    Ok(typed_param(ParamLabel::Named("p"), &t.into(), value)?)
+    typed_param(ParamLabel::Named("p"), &t.into(), value)
 }
 
 #[derive(Serialize)]
@@ -424,7 +424,7 @@ fn struct_params_send_each_top_level_field() -> BigQueryResult<()> {
         ]
     );
     match struct_params(&5i64) {
-        Err(ParamFailure::Invalid(err)) => assert_eq!(err.public.field, "params"),
+        Err(BigQueryError::InvalidParametersError(err)) => assert_eq!(err.public.field, "params"),
         other => panic!("expected InvalidParametersError, got {other:?}"),
     }
     Ok(())
@@ -433,7 +433,9 @@ fn struct_params_send_each_top_level_field() -> BigQueryResult<()> {
 #[test]
 fn positional_parameter_errors_name_its_position() {
     match infer_param(ParamLabel::Positional(1), &None::<i64>) {
-        Err(ParamFailure::Invalid(err)) => assert_eq!(err.public.field, "positional parameter 2"),
+        Err(BigQueryError::InvalidParametersError(err)) => {
+            assert_eq!(err.public.field, "positional parameter 2")
+        }
         other => panic!("expected InvalidParametersError, got {other:?}"),
     }
 }
@@ -470,7 +472,7 @@ fn parameter_names_must_be_googlesql_identifiers() {
             ),
         ] {
             match result {
-                Err(ParamFailure::Invalid(err)) => {
+                Err(BigQueryError::InvalidParametersError(err)) => {
                     assert!(err.public.error.contains("identifier"), "{name:?}: {err}")
                 }
                 other => panic!("{name:?}: expected InvalidParametersError, got {other:?}"),
@@ -484,7 +486,10 @@ fn parameter_names_must_be_googlesql_identifiers() {
         );
     }
     let map: std::collections::BTreeMap<&str, i64> = [("ok", 1), ("bad name", 2)].into();
-    assert!(matches!(struct_params(&map), Err(ParamFailure::Invalid(_))));
+    assert!(matches!(
+        struct_params(&map),
+        Err(BigQueryError::InvalidParametersError(_))
+    ));
 }
 
 /// A value that serializes as one of the shapes a parameter error describes.

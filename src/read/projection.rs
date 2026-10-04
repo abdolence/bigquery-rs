@@ -31,15 +31,14 @@ struct FieldsProbe<'f> {
     found: &'f Cell<Option<&'static [&'static str]>>,
 }
 
-fn stop() -> CodecError {
-    CodecError::new(BigQueryCodecErrorKind::Custom, "projection probe")
-}
+/// The error a probe ends deserialization with once it has what it came for.
+const STOP: &str = "projection probe";
 
 impl<'de> serde::Deserializer<'de> for FieldsProbe<'_> {
     type Error = CodecError;
 
     fn deserialize_any<V: Visitor<'de>>(self, _v: V) -> Result<V::Value, CodecError> {
-        Err(stop())
+        Err(CodecError::new(BigQueryCodecErrorKind::Custom, STOP))
     }
 
     fn deserialize_struct<V: Visitor<'de>>(
@@ -49,7 +48,7 @@ impl<'de> serde::Deserializer<'de> for FieldsProbe<'_> {
         _v: V,
     ) -> Result<V::Value, CodecError> {
         self.found.set(Some(fields));
-        Err(stop())
+        Err(CodecError::new(BigQueryCodecErrorKind::Custom, STOP))
     }
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(

@@ -125,16 +125,6 @@ fn kind_names_packing_and_field_types() {
             BqKind::Timestamp
         ]
     );
-    let temporal: Vec<BqKind> = ALL.into_iter().filter(|k| k.is_temporal()).collect();
-    assert_eq!(
-        temporal,
-        [
-            BqKind::Date,
-            BqKind::Time,
-            BqKind::DateTime,
-            BqKind::Timestamp
-        ]
-    );
     assert_eq!(
         BqKind::from(&BigQueryFieldType::Numeric(Some(BigQueryDecimalParams {
             precision: 3,

@@ -13,14 +13,10 @@ pub use table::*;
 mod job;
 pub use job::*;
 
-use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-use crate::types::error::CodecError;
-use crate::BigQueryInstant;
 use crate::BigQueryResult;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use std::future::Future;
-use std::time::Duration;
 use tracing::error;
 
 /// Streams every item of a paged listing, fetching each page as the stream reaches it.
@@ -71,33 +67,38 @@ where
         .boxed()
 }
 
-/// A v2 timestamp in milliseconds since the epoch; 0 is unset.
-pub(crate) fn timestamp_ms(field: &str, ms: i64) -> BigQueryResult<Option<BigQueryInstant>> {
-    if ms == 0 {
-        return Ok(None);
+#[cfg(test)]
+mod tests {
+    use crate::errors::BigQueryError;
+    use crate::{BigQueryDataset, BigQueryDatasetSummary, BigQueryJob, BigQueryTable};
+    use crate::{BigQueryResult, BigQueryTableSummary};
+    use gcloud_sdk::google::cloud::bigquery::v2;
+
+    fn assert_unexpected<T: std::fmt::Debug>(what: &str, result: BigQueryResult<T>) {
+        match result {
+            Err(BigQueryError::SystemError(err)) => {
+                assert_eq!(err.public.code, "UNEXPECTED_RESPONSE", "{what}: {err}");
+            }
+            other => panic!("{what}: expected an unexpected response, got {other:?}"),
+        }
     }
-    BigQueryInstant::from_millisecond(ms)
-        .map(Some)
-        .map_err(|err| out_of_range(field, format!("{ms} ms is not a timestamp: {err}")))
-}
 
-/// A v2 duration in milliseconds; unset or 0 is no duration.
-pub(crate) fn duration_ms(field: &str, ms: Option<i64>) -> BigQueryResult<Option<Duration>> {
-    match ms.filter(|ms| *ms != 0) {
-        None => Ok(None),
-        Some(ms) => u64::try_from(ms)
-            .map(|ms| Some(Duration::from_millis(ms)))
-            .map_err(|_| out_of_range(field, format!("{ms} ms is a negative duration"))),
+    #[test]
+    fn a_resource_without_its_reference_is_an_unexpected_response() {
+        assert_unexpected("dataset", BigQueryDataset::try_from(v2::Dataset::default()));
+        assert_unexpected(
+            "listed dataset",
+            BigQueryDatasetSummary::try_from(v2::ListFormatDataset::default()),
+        );
+        assert_unexpected("table", BigQueryTable::try_from(v2::Table::default()));
+        assert_unexpected(
+            "listed table",
+            BigQueryTableSummary::try_from(v2::ListFormatTable::default()),
+        );
+        assert_unexpected("job", BigQueryJob::try_from(v2::Job::default()));
+        assert_unexpected(
+            "listed job",
+            BigQueryJob::try_from(v2::ListFormatJob::default()),
+        );
     }
-}
-
-fn out_of_range(field: &str, message: String) -> BigQueryError {
-    CodecError::new(BigQueryCodecErrorKind::OutOfRange, message)
-        .at_field(field)
-        .into_deserialize()
-}
-
-/// An empty optional string in a v2 message is unset.
-pub(crate) fn non_empty(s: String) -> Option<String> {
-    (!s.is_empty()).then_some(s)
 }

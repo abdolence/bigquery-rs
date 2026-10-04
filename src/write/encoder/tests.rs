@@ -334,7 +334,7 @@ fn descriptor_follows_the_table_schema() {
 }
 
 #[test]
-fn every_type_encodes_to_its_probe_confirmed_wire_form() {
+fn every_type_encodes_to_its_accepted_wire_form() {
     let plan = plan();
     let got = decoded(&plan, &full_row());
     assert_eq!(i64_of(&got, "i"), Some(i64::MIN));

@@ -1,13 +1,10 @@
 //! Streaming writers over the Storage Write API.
 
-use crate::errors::{
-    BigQueryCodecErrorKind, BigQueryError, BigQueryErrorPublicGenericDetails,
-    BigQueryWriteStreamError,
-};
+use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::types::error::CodecError;
 use crate::write::batch::{Batcher, RequestTarget, MAX_REQUEST_BYTES};
 use crate::write::connection::{
-    clone_error, task_ended, Command, ConnectionTask, FinishKind, Finished, Shared, TaskSettings,
+    Command, ConnectionTask, FinishKind, Finished, Shared, TaskSettings, TASK_ENDED,
 };
 use crate::write::descriptor::{relaxes_a_required_field, WritePlan};
 use crate::write::encoder::Encoder;
@@ -24,7 +21,6 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     BatchCommitWriteStreamsRequest, CreateWriteStreamRequest, FinalizeWriteStreamRequest,
     GetWriteStreamRequest, WriteStream, WriteStreamView,
 };
-use gcloud_sdk::tonic::metadata::MetadataMap;
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -35,185 +31,173 @@ use tokio::time::Instant;
 use tracing::field::Empty;
 use tracing::{debug_span, warn, Span};
 
-/// The schema a write stream reports, in the crate's vocabulary.
-pub(crate) fn stream_schema(stream: &WriteStream) -> BigQueryResult<BigQueryTableSchema> {
-    let schema = stream.table_schema.as_ref().ok_or_else(|| {
-        BigQueryError::WriteStreamError(BigQueryWriteStreamError::new(
-            BigQueryErrorPublicGenericDetails::new("NO_TABLE_SCHEMA".into()),
-            stream.name.clone(),
-            "the write stream came back without its table schema".into(),
-        ))
-    })?;
-    BigQueryTableSchema::try_from(schema)
+/// The schema a write stream reports.
+///
+/// # Errors
+/// [`BigQueryError::WriteStreamError`] with code `NO_TABLE_SCHEMA` for a stream that came back
+/// without one, and the errors of the schema conversion.
+impl TryFrom<&WriteStream> for BigQueryTableSchema {
+    type Error = BigQueryError;
+
+    fn try_from(stream: &WriteStream) -> Result<Self, Self::Error> {
+        let schema = stream.table_schema.as_ref().ok_or_else(|| {
+            BigQueryError::write_stream(
+                "NO_TABLE_SCHEMA",
+                stream.name.clone(),
+                "the write stream came back without its table schema",
+            )
+        })?;
+        BigQueryTableSchema::try_from(schema)
+    }
 }
 
-pub(crate) async fn get_write_stream(
-    db: &BigQueryDb,
-    span: &Span,
-    name: &str,
-) -> BigQueryResult<WriteStream> {
-    let request = GetWriteStreamRequest {
-        name: name.to_string(),
-        view: WriteStreamView::Full.into(),
-    };
-    db.retry(
-        span,
-        "get the write stream",
-        &request,
-        &MetadataMap::new(),
-        |request| {
-            let mut client = db.write_client();
+impl BigQueryDb {
+    pub(crate) async fn get_write_stream(
+        &self,
+        span: &Span,
+        name: &str,
+    ) -> BigQueryResult<WriteStream> {
+        let request = GetWriteStreamRequest {
+            name: name.to_string(),
+            view: WriteStreamView::Full.into(),
+        };
+        self.retry(span, "get the write stream", &request, |request| {
+            let mut client = self.write_client();
             async move { client.get_write_stream(request).await }
-        },
-    )
-    .await
-}
+        })
+        .await
+    }
 
-async fn create_write_stream(
-    db: &BigQueryDb,
-    span: &Span,
-    table_path: &str,
-    stream_type: WriteStreamType,
-) -> BigQueryResult<WriteStream> {
-    let request = CreateWriteStreamRequest {
-        parent: table_path.to_string(),
-        write_stream: Some(WriteStream {
-            r#type: stream_type.into(),
-            ..Default::default()
-        }),
-    };
-    db.retry(
-        span,
-        "create a write stream",
-        &request,
-        &MetadataMap::new(),
-        |request| {
-            let mut client = db.write_client();
+    async fn create_write_stream(
+        &self,
+        span: &Span,
+        table_path: &str,
+        stream_type: WriteStreamType,
+    ) -> BigQueryResult<WriteStream> {
+        let request = CreateWriteStreamRequest {
+            parent: table_path.to_string(),
+            write_stream: Some(WriteStream {
+                r#type: stream_type.into(),
+                ..Default::default()
+            }),
+        };
+        self.retry(span, "create a write stream", &request, |request| {
+            let mut client = self.write_client();
             async move { client.create_write_stream(request).await }
-        },
-    )
-    .await
-}
+        })
+        .await
+    }
 
-/// Finalizes a committed or pending stream and returns the rows it holds.
-pub(crate) async fn finalize_write_stream(
-    db: &BigQueryDb,
-    span: &Span,
-    name: &str,
-) -> BigQueryResult<i64> {
-    let request = FinalizeWriteStreamRequest {
-        name: name.to_string(),
-    };
-    let response = db
-        .retry(
-            span,
-            "finalize the write stream",
-            &request,
-            &MetadataMap::new(),
-            |request| {
-                let mut client = db.write_client();
+    /// Finalizes a committed or pending stream and returns the rows it holds.
+    pub(crate) async fn finalize_write_stream(
+        &self,
+        span: &Span,
+        name: &str,
+    ) -> BigQueryResult<i64> {
+        let request = FinalizeWriteStreamRequest {
+            name: name.to_string(),
+        };
+        let response = self
+            .retry(span, "finalize the write stream", &request, |request| {
+                let mut client = self.write_client();
                 async move { client.finalize_write_stream(request).await }
-            },
-        )
-        .await?;
-    Ok(response.row_count)
-}
+            })
+            .await?;
+        Ok(response.row_count)
+    }
 
-/// Commits finalized pending streams of the table at `table_path` together.
-pub(crate) async fn batch_commit(
-    db: &BigQueryDb,
-    span: &Span,
-    table_path: &str,
-    streams: Vec<String>,
-) -> BigQueryResult<BigQueryInstant> {
-    let request = BatchCommitWriteStreamsRequest {
-        parent: table_path.to_string(),
-        write_streams: streams,
-    };
-    let response = db
-        .retry(
-            span,
-            "commit the write streams",
-            &request,
-            &MetadataMap::new(),
-            |request| {
-                let mut client = db.write_client();
+    /// Commits finalized pending streams of the table at `table_path` together.
+    pub(crate) async fn batch_commit(
+        &self,
+        span: &Span,
+        table_path: &str,
+        streams: Vec<String>,
+    ) -> BigQueryResult<BigQueryInstant> {
+        let request = BatchCommitWriteStreamsRequest {
+            parent: table_path.to_string(),
+            write_streams: streams,
+        };
+        let response = self
+            .retry(span, "commit the write streams", &request, |request| {
+                let mut client = self.write_client();
                 async move { client.batch_commit_write_streams(request).await }
-            },
-        )
-        .await?;
-    if let Some(error) = response.stream_errors.first() {
-        let code = gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode::try_from(error.code)
+            })
+            .await?;
+        if let Some(error) = response.stream_errors.first() {
+            let code = gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode::try_from(error.code)
             .map(|code| code.as_str_name().to_string())
             .unwrap_or_else(|_| error.code.to_string());
-        return Err(BigQueryError::WriteStreamError(
-            BigQueryWriteStreamError::new(
-                BigQueryErrorPublicGenericDetails::new(code),
+            return Err(BigQueryError::write_stream(
+                &code,
                 error.entity.clone(),
                 error.error_message.clone(),
-            ),
-        ));
+            ));
+        }
+        let commit_time = response.commit_time.ok_or_else(|| {
+            BigQueryError::write_stream(
+                "NO_COMMIT_TIME",
+                request.write_streams.join(", "),
+                "the commit reported no error and no commit time",
+            )
+        })?;
+        BigQueryInstant::new(commit_time.seconds, commit_time.nanos).map_err(|err| {
+            BigQueryError::write_stream(
+                "INVALID_COMMIT_TIME",
+                request.write_streams.join(", "),
+                format!("the commit time {commit_time:?} is not a timestamp: {err}"),
+            )
+        })
     }
-    let commit_time = response.commit_time.ok_or_else(|| {
-        BigQueryError::WriteStreamError(BigQueryWriteStreamError::new(
-            BigQueryErrorPublicGenericDetails::new("NO_COMMIT_TIME".into()),
-            request.write_streams.join(", "),
-            "the commit reported no error and no commit time".into(),
-        ))
-    })?;
-    BigQueryInstant::new(commit_time.seconds, commit_time.nanos).map_err(|err| {
-        BigQueryError::WriteStreamError(BigQueryWriteStreamError::new(
-            BigQueryErrorPublicGenericDetails::new("INVALID_COMMIT_TIME".into()),
-            request.write_streams.join(", "),
-            format!("the commit time {commit_time:?} is not a timestamp: {err}"),
-        ))
-    })
 }
 
-fn check_options(options: &BigQueryStreamingWriteOptions, cdc: bool) -> BigQueryResult<()> {
-    if options.max_request_bytes == 0 || options.max_request_bytes > MAX_REQUEST_BYTES {
-        return Err(BigQueryError::invalid_parameters(
-            "max_request_bytes",
-            format!(
+impl BigQueryStreamingWriteOptions {
+    fn check(&self, cdc: bool) -> BigQueryResult<()> {
+        if self.max_request_bytes == 0 || self.max_request_bytes > MAX_REQUEST_BYTES {
+            return Err(BigQueryError::invalid_parameters(
+                "max_request_bytes",
+                format!(
                 "{} is outside 1..={MAX_REQUEST_BYTES}; BigQuery ends the whole connection on a \
                  request over about 20 MB",
-                options.max_request_bytes
+                self.max_request_bytes
             ),
-        ));
+            ));
+        }
+        if self.max_batch_rows == Some(0) {
+            return Err(BigQueryError::invalid_parameters(
+                "max_batch_rows",
+                "a batch holds at least one row",
+            ));
+        }
+        if self.max_inflight_requests == 0 {
+            return Err(BigQueryError::invalid_parameters(
+                "max_inflight_requests",
+                "at least one request must be allowed in flight",
+            ));
+        }
+        if cdc && self.mode != BigQueryWriteMode::Default {
+            return Err(BigQueryError::invalid_parameters(
+                "mode",
+                format!(
+                    "CDC writes go through the default stream only, not {:?}",
+                    self.mode
+                ),
+            ));
+        }
+        Ok(())
     }
-    if options.max_batch_rows == Some(0) {
-        return Err(BigQueryError::invalid_parameters(
-            "max_batch_rows",
-            "a batch holds at least one row",
-        ));
-    }
-    if options.max_inflight_requests == 0 {
-        return Err(BigQueryError::invalid_parameters(
-            "max_inflight_requests",
-            "at least one request must be allowed in flight",
-        ));
-    }
-    if cdc && options.mode != BigQueryWriteMode::Default {
-        return Err(BigQueryError::invalid_parameters(
-            "mode",
-            format!(
-                "CDC writes go through the default stream only, not {:?}",
-                options.mode
-            ),
-        ));
-    }
-    Ok(())
 }
 
-/// Whether a failed encode can be caused by a schema the writer has not seen yet: a column
-/// added, or a REQUIRED column relaxed to NULLABLE.
-fn may_be_a_stale_schema(kind: BigQueryCodecErrorKind) -> bool {
-    matches!(
-        kind,
-        BigQueryCodecErrorKind::UnknownField
-            | BigQueryCodecErrorKind::NullForRequired
-            | BigQueryCodecErrorKind::MissingRequiredField
-    )
+impl BigQueryCodecErrorKind {
+    /// Whether a failed encode can be caused by a schema the writer has not seen yet: a column
+    /// added, or a REQUIRED column relaxed to NULLABLE.
+    fn may_be_a_stale_schema(self) -> bool {
+        matches!(
+            self,
+            BigQueryCodecErrorKind::UnknownField
+                | BigQueryCodecErrorKind::NullForRequired
+                | BigQueryCodecErrorKind::MissingRequiredField
+        )
+    }
 }
 
 /// The untyped writer behind [`BigQueryStreamingWriter`] and
@@ -244,7 +228,7 @@ impl WriterCore {
         options: BigQueryStreamingWriteOptions,
         cdc: bool,
     ) -> BigQueryResult<(Self, ResponseStream<'b>)> {
-        check_options(&options, cdc)?;
+        options.check(cdc)?;
         let table_path = table.table_path(&db.options().google_project_id);
         let span = debug_span!(
             "BigQuery streaming write",
@@ -257,16 +241,19 @@ impl WriterCore {
         );
         let stream = match options.mode {
             BigQueryWriteMode::Default => {
-                get_write_stream(db, &span, &format!("{table_path}/streams/_default")).await?
+                db.get_write_stream(&span, &format!("{table_path}/streams/_default"))
+                    .await?
             }
             BigQueryWriteMode::Committed => {
-                create_write_stream(db, &span, &table_path, WriteStreamType::Committed).await?
+                db.create_write_stream(&span, &table_path, WriteStreamType::Committed)
+                    .await?
             }
             BigQueryWriteMode::Pending => {
-                create_write_stream(db, &span, &table_path, WriteStreamType::Pending).await?
+                db.create_write_stream(&span, &table_path, WriteStreamType::Pending)
+                    .await?
             }
         };
-        let schema = stream_schema(&stream)?;
+        let schema = BigQueryTableSchema::try_from(&stream)?;
         let plan = Arc::new(WritePlan::new(&schema, cdc));
         let target = RequestTarget {
             write_stream: stream.name.clone(),
@@ -330,13 +317,15 @@ impl WriterCore {
 
     fn check_failed(&self) -> BigQueryResult<()> {
         match &self.shared.lock().failed {
-            Some(err) => Err(clone_error(err)),
+            Some(err) => Err(err.clone()),
             None => Ok(()),
         }
     }
 
     fn command(&self, command: Command) -> BigQueryResult<()> {
-        self.commands.send(command).map_err(|_| task_ended())
+        self.commands
+            .send(command)
+            .map_err(|_| BigQueryError::system("WRITER_TASK_ENDED", TASK_ENDED))
     }
 
     /// Encodes one row with `encode` and adds it to the open batch. A row that fails because
@@ -354,7 +343,7 @@ impl WriterCore {
         let index = self.shared.lock().batcher.next_row();
         let mut row = Vec::with_capacity(self.row_hint);
         if let Err(err) = encode(&mut self.encoder, &mut row) {
-            if !may_be_a_stale_schema(err.kind()) || !self.refresh_schema().await? {
+            if !(err.kind()).may_be_a_stale_schema() || !self.refresh_schema().await? {
                 return Err(err.with_row(index).into_serialize());
             }
             row.clear();
@@ -374,7 +363,7 @@ impl WriterCore {
         let (opened, full) = {
             let mut state = self.shared.lock();
             if let Some(err) = &state.failed {
-                return Err(clone_error(err));
+                return Err(err.clone());
             }
             let opened = state.batcher.push(row, cost, Instant::now());
             (opened, state.batcher.is_full())
@@ -399,8 +388,8 @@ impl WriterCore {
             return Ok(false);
         }
         self.last_refresh = Some(now);
-        let stream = get_write_stream(&self.db, &self.span, &self.stream).await?;
-        let schema = stream_schema(&stream)?;
+        let stream = self.db.get_write_stream(&self.span, &self.stream).await?;
+        let schema = BigQueryTableSchema::try_from(&stream)?;
         self.switch_plan(schema).await
     }
 
@@ -431,7 +420,7 @@ impl WriterCore {
             {
                 let mut state = self.shared.lock();
                 if let Some(err) = &state.failed {
-                    return Err(clone_error(err));
+                    return Err(err.clone());
                 }
                 if state.batcher.open_bytes().is_none() {
                     return Ok(());
@@ -450,7 +439,8 @@ impl WriterCore {
         self.seal_open().await?;
         let (tx, rx) = oneshot::channel();
         self.command(Command::Flush(tx))?;
-        rx.await.map_err(|_| task_ended())?
+        rx.await
+            .map_err(|_| BigQueryError::system("WRITER_TASK_ENDED", TASK_ENDED))?
     }
 
     pub(crate) async fn finish(&mut self, kind: FinishKind) -> BigQueryResult<Finished> {
@@ -458,7 +448,9 @@ impl WriterCore {
         let sealed = self.seal_open().await;
         let (tx, rx) = oneshot::channel();
         self.command(Command::Finish(kind, tx))?;
-        let finished = rx.await.map_err(|_| task_ended())?;
+        let finished = rx
+            .await
+            .map_err(|_| BigQueryError::system("WRITER_TASK_ENDED", TASK_ENDED))?;
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
@@ -672,8 +664,7 @@ impl BigQueryDb {
         }
         let table_path = table.table_path(&self.options().google_project_id);
         let span = debug_span!("BigQuery commit write streams", "/bigquery/table" = %table);
-        batch_commit(
-            self,
+        self.batch_commit(
             &span,
             &table_path,
             streams.into_iter().map(|s| s.name.to_string()).collect(),

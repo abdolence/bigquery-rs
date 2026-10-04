@@ -1,6 +1,7 @@
 //! What a `db.fluent().schema().table(..)` chain declares, and the checks the crate needs before
 //! it can diff or render a declaration.
 
+use crate::db::proto::millis;
 use crate::errors::BigQueryError;
 use crate::BigQueryInstant;
 use crate::BigQueryLabels;
@@ -279,6 +280,17 @@ impl BigQueryPartitionUnit {
             BigQueryPartitionUnit::Year => "YEAR",
         }
     }
+
+    /// The unit the v2 API names `name`, if the crate models it.
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "HOUR" => Some(BigQueryPartitionUnit::Hour),
+            "DAY" => Some(BigQueryPartitionUnit::Day),
+            "MONTH" => Some(BigQueryPartitionUnit::Month),
+            "YEAR" => Some(BigQueryPartitionUnit::Year),
+            _ => None,
+        }
+    }
 }
 
 impl Display for BigQueryPartitionUnit {
@@ -441,11 +453,13 @@ pub struct BigQueryTableDeclaration {
     pub(crate) columns: Vec<DeclaredColumn>,
     pub(crate) primary_key: Option<Vec<String>>,
     pub(crate) partitioning: Option<BigQueryPartitioning>,
-    pub(crate) partition_expiration_ms: Option<i64>,
+    /// Whole milliseconds that fit an INT64, as the v2 API stores it.
+    pub(crate) partition_expiration: Option<Duration>,
     pub(crate) clustering: Option<Vec<String>>,
     pub(crate) description: Option<String>,
     pub(crate) labels: BigQueryLabels,
-    pub(crate) expiration_ms: Option<i64>,
+    /// Whole milliseconds, as the v2 API stores it.
+    pub(crate) expiration: Option<BigQueryInstant>,
     pub(crate) allow_widening: bool,
     pub(crate) prune: bool,
     pub(crate) recreate: Option<BigQueryRecreatePolicy>,
@@ -483,74 +497,69 @@ fn check_name(field: &str, name: &str) -> BigQueryResult<()> {
     }
 }
 
-/// Checks one level of columns and converts them, `path` naming the enclosing record.
-fn declared_fields(
-    columns: Vec<BigQuerySchemaColumn>,
-    path: &str,
-) -> BigQueryResult<Vec<DeclaredColumn>> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::with_capacity(columns.len());
-    for column in columns {
-        let at = if path.is_empty() {
-            column.name.clone()
-        } else {
-            format!("{path}.{}", column.name)
-        };
-        check_name("columns", &column.name)?;
-        if !seen.insert(column.name.to_ascii_lowercase()) {
-            return Err(BigQueryError::invalid_parameters(
-                "columns",
-                format!("the column `{at}` is declared twice (names ignore case)"),
-            ));
-        }
-        if let Some(old) = &column.renamed_from {
-            if !path.is_empty() {
-                return Err(BigQueryError::invalid_parameters(
-                    "renamed_from",
-                    format!("`{at}` is a nested field; BigQuery renames top-level columns only"),
-                ));
-            }
-            check_name("renamed_from", old)?;
-        }
-        let field_type = match column.kind {
-            None => {
+impl DeclaredColumn {
+    /// Checks one level of columns and converts them, `path` naming the enclosing record.
+    fn checked(columns: Vec<BigQuerySchemaColumn>, path: &str) -> BigQueryResult<Vec<Self>> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::with_capacity(columns.len());
+        for column in columns {
+            let at = if path.is_empty() {
+                column.name.clone()
+            } else {
+                format!("{path}.{}", column.name)
+            };
+            check_name("columns", &column.name)?;
+            if !seen.insert(column.name.to_ascii_lowercase()) {
                 return Err(BigQueryError::invalid_parameters(
                     "columns",
-                    format!("the column `{at}` has no type"),
-                ))
+                    format!("the column `{at}` is declared twice (names ignore case)"),
+                ));
             }
-            Some(ColumnKind::Type(BigQueryFieldType::Struct(fields))) => {
-                for field in &fields {
-                    check_name("columns", &field.name)?;
+            if let Some(old) = &column.renamed_from {
+                if !path.is_empty() {
+                    return Err(BigQueryError::invalid_parameters(
+                        "renamed_from",
+                        format!(
+                            "`{at}` is a nested field; BigQuery renames top-level columns only"
+                        ),
+                    ));
                 }
-                BigQueryFieldType::Struct(fields)
+                check_name("renamed_from", old)?;
             }
-            Some(ColumnKind::Type(field_type)) => field_type,
-            Some(ColumnKind::Record(fields)) => BigQueryFieldType::Struct(
-                declared_fields(fields, &at)?
-                    .into_iter()
-                    .map(|c| c.field)
-                    .collect(),
-            ),
-        };
-        out.push(DeclaredColumn {
-            field: BigQueryFieldSchema {
-                name: column.name,
-                field_type,
-                mode: column.mode,
-                description: column.description,
-                default_value_expression: column.default_value,
-            },
-            renamed_from: column.renamed_from,
-        });
+            let field_type = match column.kind {
+                None => {
+                    return Err(BigQueryError::invalid_parameters(
+                        "columns",
+                        format!("the column `{at}` has no type"),
+                    ))
+                }
+                Some(ColumnKind::Type(BigQueryFieldType::Struct(fields))) => {
+                    for field in &fields {
+                        check_name("columns", &field.name)?;
+                    }
+                    BigQueryFieldType::Struct(fields)
+                }
+                Some(ColumnKind::Type(field_type)) => field_type,
+                Some(ColumnKind::Record(fields)) => BigQueryFieldType::Struct(
+                    Self::checked(fields, &at)?
+                        .into_iter()
+                        .map(|c| c.field)
+                        .collect(),
+                ),
+            };
+            out.push(Self {
+                field: BigQueryFieldSchema {
+                    name: column.name,
+                    field_type,
+                    mode: column.mode,
+                    description: column.description,
+                    default_value_expression: column.default_value,
+                },
+                renamed_from: column.renamed_from,
+            });
+        }
+        Ok(out)
     }
-    Ok(out)
-}
-
-fn millis(field: &str, d: Duration) -> BigQueryResult<i64> {
-    i64::try_from(d.as_millis()).map_err(|_| {
-        BigQueryError::invalid_parameters(field, format!("{d:?} is longer than {} ms", i64::MAX))
-    })
 }
 
 /// Refuses what the diff and the DDL renderer cannot represent: a column without a type, a
@@ -562,7 +571,7 @@ impl TryFrom<BigQueryTableDeclarationDraft> for BigQueryTableDeclaration {
     type Error = BigQueryError;
 
     fn try_from(draft: BigQueryTableDeclarationDraft) -> Result<Self, Self::Error> {
-        let columns = declared_fields(draft.columns, "")?;
+        let columns = DeclaredColumn::checked(draft.columns, "")?;
         if let Some(old) = columns
             .iter()
             .filter_map(|c| c.renamed_from.as_ref())
@@ -617,14 +626,24 @@ impl TryFrom<BigQueryTableDeclarationDraft> for BigQueryTableDeclaration {
             columns,
             primary_key: draft.primary_key,
             partitioning: draft.partitioning,
-            partition_expiration_ms: draft
+            partition_expiration: draft
                 .partition_expiration
-                .map(|d| millis("partition_expiration", d))
+                .map(|d| {
+                    millis::<i64>("partition_expiration", d)
+                        .map(|ms| Duration::from_millis(ms.unsigned_abs()))
+                })
                 .transpose()?,
             clustering: draft.clustering,
             description: draft.description,
             labels: draft.labels,
-            expiration_ms: draft.expiration.map(|t| t.as_millisecond()),
+            expiration: draft
+                .expiration
+                .map(|t| {
+                    BigQueryInstant::from_millisecond(t.as_millisecond()).map_err(|err| {
+                        BigQueryError::invalid_parameters("expiration", format!("{t}: {err}"))
+                    })
+                })
+                .transpose()?,
             allow_widening: draft.allow_widening,
             prune: draft.prune,
             recreate: draft.recreate,

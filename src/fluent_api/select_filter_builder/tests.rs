@@ -11,14 +11,13 @@ fn render(filter: Option<BigQueryFilter>) -> String {
     filter
         .expect("a filter")
         .into_row_restriction()
-        .map_err(BigQueryError::from)
         .expect("a valid filter")
 }
 
 fn failure(filter: Option<BigQueryFilter>) -> BigQueryError {
     match filter.expect("a filter").into_row_restriction() {
         Ok(sql) => panic!("expected a refused filter, got {sql:.80}"),
-        Err(failure) => failure.into(),
+        Err(failure) => failure,
     }
 }
 

@@ -12,8 +12,8 @@ documentation = "https://docs.rs/bigquery"
 keywords = ["bigquery", "google", "client"]
 categories = ["api-bindings", "database"]
 readme = "README.md"
-# The prototype crates in the repository root (`probe/`, `codec-proto/`, etc.) and the probe
-# result pages in `docs/` are not part of the published crate.
+# The published crate carries the library, the README, the licence and the book's pages, and
+# nothing else from the repository.
 include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE", "docs/src/**/*.md"]
 
 [badges]

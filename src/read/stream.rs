@@ -1,6 +1,6 @@
 //! Read streams: one task per stream, resumed at its row offset, merged into one stream.
 
-use crate::errors::{BigQueryDatabaseError, BigQueryError, BigQueryErrorPublicGenericDetails};
+use crate::errors::BigQueryError;
 use crate::read::ipc::ArrowIpcDecoder;
 use crate::read::session::OpenedSession;
 use crate::{BigQueryDb, BigQueryResult};
@@ -9,7 +9,6 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::read_rows_response::Rows;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{ReadRowsRequest, ReadRowsResponse};
-use gcloud_sdk::tonic::Status;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -76,44 +75,46 @@ pub(crate) struct RunningStreams<M> {
     totals: Arc<ReadTotals>,
 }
 
-/// Starts one task per stream of `session`. Each task decodes its batches with `on_batch`,
-/// given the batch and the row offset of its first row in the stream. At most two items per
-/// stream wait for the caller, so a slow consumer slows the streams down rather than growing
-/// memory.
-pub(crate) fn start_streams<M, F>(
-    db: &BigQueryDb,
-    session: OpenedSession,
-    span: &Span,
-    on_batch: F,
-) -> RunningStreams<M>
-where
-    M: Send + 'static,
-    F: Fn(RecordBatch, u64) -> M + Clone + Send + 'static,
-{
-    let (tx, rx) = mpsc::channel((2 * session.streams.len()).max(1));
-    let schema: Arc<[u8]> = session.schema.into();
-    let totals = Arc::new(ReadTotals::default());
-    let mut tasks = JoinSet::new();
-    for stream in session.streams {
-        let stream_task = StreamTask {
-            db: db.clone(),
-            stream,
-            schema: schema.clone(),
+impl BigQueryDb {
+    /// Starts one task per stream of `session`. Each task decodes its batches with `on_batch`,
+    /// given the batch and the row offset of its first row in the stream. At most two items per
+    /// stream wait for the caller, so a slow consumer slows the streams down rather than growing
+    /// memory.
+    pub(crate) fn start_read_streams<M, F>(
+        &self,
+        session: OpenedSession,
+        span: &Span,
+        on_batch: F,
+    ) -> RunningStreams<M>
+    where
+        M: Send + 'static,
+        F: Fn(RecordBatch, u64) -> M + Clone + Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel((2 * session.streams.len()).max(1));
+        let schema: Arc<[u8]> = session.schema.into();
+        let totals = Arc::new(ReadTotals::default());
+        let mut tasks = JoinSet::new();
+        for stream in session.streams {
+            let stream_task = StreamTask {
+                db: self.clone(),
+                stream,
+                schema: schema.clone(),
+                span: span.clone(),
+                totals: totals.clone(),
+            };
+            let (tx, on_batch) = (tx.clone(), on_batch.clone());
+            tasks.spawn(async move {
+                if let Err(err) = stream_task.pump(&tx, on_batch).await {
+                    let _ = tx.send(StreamMessage::Failed(err)).await;
+                }
+            });
+        }
+        RunningStreams {
+            rx,
+            tasks,
             span: span.clone(),
-            totals: totals.clone(),
-        };
-        let (tx, on_batch) = (tx.clone(), on_batch.clone());
-        tasks.spawn(async move {
-            if let Err(err) = stream_task.pump(&tx, on_batch).await {
-                let _ = tx.send(StreamMessage::Failed(err)).await;
-            }
-        });
-    }
-    RunningStreams {
-        rx,
-        tasks,
-        span: span.clone(),
-        totals,
+            totals,
+        }
     }
 }
 
@@ -201,8 +202,7 @@ impl StreamTask {
                                 let rows = match response.rows {
                                     Some(Rows::ArrowRecordBatch(rows)) => rows,
                                     Some(Rows::AvroRows(_)) => {
-                                        return Err(BigQueryError::invalid_parameters(
-                                            "data_format",
+                                        return Err(BigQueryError::unexpected_response(
                                             "The read stream sent Avro rows to an Arrow session",
                                         ))
                                     }
@@ -224,7 +224,19 @@ impl StreamTask {
                 }
                 Err(status) => status,
             };
-            let err = read_rows_error(status);
+            let err = if status.message().contains(INTERVAL_OVERFLOW) {
+                BigQueryError::database(
+                    status.code(),
+                    format!(
+                        "{status}. An INTERVAL with a time part beyond about 2,562,047 hours \
+                         cannot be read through the Storage Read API; select CAST(column AS \
+                         STRING) in a query instead"
+                    ),
+                    false,
+                )
+            } else {
+                BigQueryError::from(status)
+            };
             if !err.retry_possible() || failures >= max_retries {
                 return Err(err);
             }
@@ -244,19 +256,4 @@ impl StreamTask {
             tokio::time::sleep(delay).await;
         }
     }
-}
-
-fn read_rows_error(status: Status) -> BigQueryError {
-    if status.message().contains(INTERVAL_OVERFLOW) {
-        return BigQueryError::DatabaseError(BigQueryDatabaseError::new(
-            BigQueryErrorPublicGenericDetails::new(format!("{:?}", status.code())),
-            format!(
-                "{status}. An INTERVAL with a time part beyond about 2,562,047 hours cannot be \
-                 read through the Storage Read API; select CAST(column AS STRING) in a query \
-                 instead"
-            ),
-            false,
-        ));
-    }
-    BigQueryError::from(status)
 }

@@ -1,5 +1,5 @@
-use crate::query::routing::{dry_run, execute, query_rows, query_span, Rows};
-use crate::read::{decode_rows, read_table_batches, read_table_rows, skip_failed_row};
+use crate::query::routing::Rows;
+use crate::read::{decode_rows, skip_failed_rows};
 use crate::{
     BigQueryDb, BigQueryDryRunResult, BigQueryJobStats, BigQueryQueryOutcome, BigQueryQueryParams,
     BigQueryQuerySupport, BigQueryReadParams, BigQueryResult,
@@ -39,9 +39,7 @@ impl BigQueryQuerySupport for BigQueryDb {
         T: DeserializeOwned + Send + 'static,
     {
         let rows = self.stream_query_obj_with_errors(params).await?;
-        Ok(rows
-            .filter_map(|row| futures::future::ready(skip_failed_row(row)))
-            .boxed())
+        Ok(skip_failed_rows(rows))
     }
 
     async fn stream_query_obj_with_errors<'b, T>(
@@ -61,16 +59,17 @@ impl BigQueryQuerySupport for BigQueryDb {
     where
         T: DeserializeOwned + Send + 'static,
     {
-        let span = query_span(&params);
-        let (rows, stats) = query_rows(self, &params, &span)
+        let span = params.span();
+        let (rows, stats) = self
+            .query_rows(&params, &span)
             .instrument(span.clone())
             .await?;
         let rows = match rows {
-            Rows::Inline(Some(batch)) => futures::stream::iter(decode_rows::<T>(&batch, 0)).boxed(),
-            Rows::Inline(None) | Rows::None => futures::stream::empty().boxed(),
+            Rows::Inline(batch) => futures::stream::iter(decode_rows::<T>(&batch, 0)).boxed(),
+            Rows::None => futures::stream::empty().boxed(),
             Rows::Table(table) => {
                 let read = BigQueryReadParams::new(table).with_options(params.read_options);
-                read_table_rows(self, read).await?
+                self.read_table_rows(read).await?
             }
         };
         Ok((rows, stats))
@@ -80,17 +79,18 @@ impl BigQueryQuerySupport for BigQueryDb {
         &self,
         params: BigQueryQueryParams,
     ) -> BigQueryResult<BoxStream<'b, BigQueryResult<RecordBatch>>> {
-        let span = query_span(&params);
-        match query_rows(self, &params, &span)
+        let span = params.span();
+        match self
+            .query_rows(&params, &span)
             .instrument(span.clone())
             .await?
             .0
         {
-            Rows::Inline(Some(batch)) => Ok(futures::stream::once(async { Ok(batch) }).boxed()),
-            Rows::Inline(None) | Rows::None => Ok(futures::stream::empty().boxed()),
+            Rows::Inline(batch) => Ok(futures::stream::once(async { Ok(batch) }).boxed()),
+            Rows::None => Ok(futures::stream::empty().boxed()),
             Rows::Table(table) => {
                 let read = BigQueryReadParams::new(table).with_options(params.read_options);
-                read_table_batches(self, read).await
+                self.read_table_batches(read).await
             }
         }
     }
@@ -99,15 +99,19 @@ impl BigQueryQuerySupport for BigQueryDb {
         &self,
         params: BigQueryQueryParams,
     ) -> BigQueryResult<BigQueryQueryOutcome> {
-        let span = query_span(&params);
-        execute(self, &params, &span).instrument(span.clone()).await
+        let span = params.span();
+        self.execute_statement(&params, &span)
+            .instrument(span.clone())
+            .await
     }
 
     async fn dry_run_query(
         &self,
         params: BigQueryQueryParams,
     ) -> BigQueryResult<BigQueryDryRunResult> {
-        let span = query_span(&params);
-        dry_run(self, &params, &span).instrument(span.clone()).await
+        let span = params.span();
+        self.dry_run_statement(&params, &span)
+            .instrument(span.clone())
+            .await
     }
 }

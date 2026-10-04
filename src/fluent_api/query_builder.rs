@@ -1,4 +1,5 @@
-use crate::query::{infer_param, struct_params, typed_param, ParamFailure, ParamLabel};
+use crate::errors::BigQueryError;
+use crate::query::{infer_param, struct_params, typed_param, ParamLabel};
 use crate::{
     BigQueryDatasetRef, BigQueryDryRunResult, BigQueryJobCreation, BigQueryJobStats,
     BigQueryParamType, BigQueryQueryOutcome, BigQueryQueryParams, BigQueryQuerySupport,
@@ -29,7 +30,7 @@ where
 {
     db: &'a D,
     params: BigQueryQueryParams,
-    failure: Option<ParamFailure>,
+    failure: Option<BigQueryError>,
 }
 
 impl<'a, D> BigQueryQueryBuilder<'a, D>
@@ -44,7 +45,7 @@ where
         }
     }
 
-    fn push(mut self, encoded: Result<QueryParameter, ParamFailure>) -> Self {
+    fn push(mut self, encoded: Result<QueryParameter, BigQueryError>) -> Self {
         match encoded {
             Ok(parameter) if self.failure.is_none() => self.params.query_parameters.push(parameter),
             Ok(_) => {}
@@ -227,7 +228,7 @@ where
 
     fn checked(self) -> BigQueryResult<(&'a D, BigQueryQueryParams)> {
         match self.failure {
-            Some(failure) => Err(failure.into()),
+            Some(failure) => Err(failure),
             None => Ok((self.db, self.params)),
         }
     }
@@ -238,9 +239,7 @@ where
         T: DeserializeOwned + Send + 'static,
     {
         BigQueryQueryObjBuilder {
-            db: self.db,
-            params: self.params,
-            failure: self.failure,
+            query: self,
             _target: PhantomData,
         }
     }
@@ -279,9 +278,7 @@ pub struct BigQueryQueryObjBuilder<'a, D, T>
 where
     D: BigQueryQuerySupport,
 {
-    db: &'a D,
-    params: BigQueryQueryParams,
-    failure: Option<ParamFailure>,
+    query: BigQueryQueryBuilder<'a, D>,
     _target: PhantomData<fn() -> T>,
 }
 
@@ -291,10 +288,7 @@ where
     T: DeserializeOwned + Send + 'static,
 {
     fn checked(self) -> BigQueryResult<(&'a D, BigQueryQueryParams)> {
-        match self.failure {
-            Some(failure) => Err(failure.into()),
-            None => Ok((self.db, self.params)),
-        }
+        self.query.checked()
     }
 
     /// Reads every row into a `Vec`, failing on the first row or stream error.

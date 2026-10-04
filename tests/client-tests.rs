@@ -6,65 +6,31 @@ use gcloud_sdk::google::cloud::bigquery::v2 as bq;
 mod common;
 use common::*;
 
-const TABLE_ID: &str = "client_probe";
+const TABLE_ID: &str = "two_columns";
 
 #[tokio::test]
 async fn both_channels_serve_calls() -> TestResult {
-    let Some(project) = test_project() else {
-        eprintln!("GCP_PROJECT is not set, skipping the live client test");
-        return Ok(());
-    };
-    let db = setup(&project).await?;
+    with_scratch("both_channels_serve_calls", async |s: &Scratch| {
+        let account =
+            s.db.project_client()
+                .get_service_account(bq::GetServiceAccountRequest {
+                    project_id: s.project.clone(),
+                })
+                .await
+                .map_err(BigQueryError::from)?
+                .into_inner();
+        assert!(
+            account.email.ends_with(".gserviceaccount.com"),
+            "unexpected service account: {}",
+            account.email
+        );
 
-    let account = db
-        .project_client()
-        .get_service_account(bq::GetServiceAccountRequest {
-            project_id: project.clone(),
-        })
-        .await
-        .map_err(BigQueryError::from)?
-        .into_inner();
-    assert!(
-        account.email.ends_with(".gserviceaccount.com"),
-        "unexpected service account: {}",
-        account.email
-    );
-
-    let dataset_id = scratch_dataset_id("bqp1")?;
-    db.dataset_client()
-        .insert_dataset(bq::InsertDatasetRequest {
-            project_id: project.clone(),
-            dataset: Some(bq::Dataset {
-                dataset_reference: Some(bq::DatasetReference {
-                    dataset_id: dataset_id.to_string(),
-                    project_id: project.clone(),
-                }),
-                default_table_expiration_ms: Some(2 * 3600 * 1000),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .map_err(BigQueryError::from)?;
-
-    let result = write_stream_schema(&db, &project, dataset_id.as_str()).await;
-
-    let cleanup = db
-        .dataset_client()
-        .delete_dataset(bq::DeleteDatasetRequest {
-            project_id: project.clone(),
-            dataset_id: dataset_id.to_string(),
-            delete_contents: true,
-        })
-        .await
-        .map_err(BigQueryError::from);
-
-    let schema = result?;
-    cleanup?;
-
-    let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(names, ["id", "name"]);
-    Ok(())
+        let schema = write_stream_schema(&s.db, &s.project, s.dataset.as_str()).await?;
+        let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["id", "name"]);
+        Ok(())
+    })
+    .await
 }
 
 /// Creates a two-column table in `dataset_id` and reads its schema back through the Storage

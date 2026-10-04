@@ -4,7 +4,6 @@
 
 use super::tests::{every_char_class, injection_corpus};
 use super::{quote_identifier, SqlLiteral};
-use crate::errors::BigQueryError;
 use crate::query::{infer_param, ParamLabel};
 use crate::{
     BigQueryDate, BigQueryDb, BigQueryDecimal, BigQueryInterval, BigQueryJson, BigQueryRange,
@@ -81,8 +80,7 @@ impl Live {
                     page_token: page_token.clone(),
                     ..Default::default()
                 })
-                .await
-                .map_err(BigQueryError::from)?
+                .await?
                 .into_inner();
             for job in page.jobs {
                 let ours = job

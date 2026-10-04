@@ -1,5 +1,6 @@
-use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
+use crate::errors::BigQueryError;
 use crate::types::error::CodecError;
+use crate::write::batch::MAX_REQUEST_BYTES;
 use crate::BigQueryInstant;
 use crate::{BigQueryResult, BigQueryTableRef};
 use rsb_derive::Builder;
@@ -25,7 +26,7 @@ pub struct BigQueryStreamingWriteOptions {
     pub mode: BigQueryWriteMode,
     /// The largest append request in bytes; it cannot be set above the default, since BigQuery
     /// ends the whole connection on a request over its limit.
-    #[default = "19_000_000"]
+    #[default = "MAX_REQUEST_BYTES"]
     pub max_request_bytes: usize,
     /// Sends a batch once it holds this many rows.
     pub max_batch_rows: Option<usize>,
@@ -201,10 +202,8 @@ pub enum BigQueryChangeType {
     Delete,
 }
 
-/// A CDC `_CHANGE_SEQUENCE_NUMBER`, which orders changes to one key.
-///
-/// One to four `/`-separated sections of one to sixteen hex digits, as BigQuery documents
-/// `_CHANGE_SEQUENCE_NUMBER` (unverified). `From<u64>` writes one section.
+/// A CDC `_CHANGE_SEQUENCE_NUMBER`, which orders changes to one key. `From<u64>` writes it in
+/// hex; any other text is sent as it is, and BigQuery checks its form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BigQueryChangeSequenceNumber(String);
 
@@ -224,26 +223,17 @@ impl BigQueryChangeSequenceNumber {
 impl FromStr for BigQueryChangeSequenceNumber {
     type Err = BigQueryError;
 
-    /// Parses one to four `/`-separated sections of one to sixteen hex digits.
+    /// Takes the text as it is. An empty text is refused, since it would be sent as no
+    /// sequence number at all; leave [`BigQueryChange::sequence_number`] `None` for that.
     ///
     /// # Errors
     /// [`BigQueryError::SerializeError`] with kind
-    /// [`InvalidText`](crate::errors::BigQueryCodecErrorKind::InvalidText) for any other text.
+    /// [`InvalidText`](crate::errors::BigQueryCodecErrorKind::InvalidText) for an empty text.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let sections = s.split('/');
-        let valid = s.split('/').count() <= 4
-            && sections.into_iter().all(|section| {
-                (1..=16).contains(&section.len()) && section.bytes().all(|b| b.is_ascii_hexdigit())
-            });
-        if !valid {
-            return Err(CodecError::new(
-                BigQueryCodecErrorKind::InvalidText,
-                format!(
-                    "invalid _CHANGE_SEQUENCE_NUMBER `{s}`, expected one to four `/`-separated \
-                     sections of one to sixteen hex digits"
-                ),
-            )
-            .into_serialize());
+        if s.is_empty() {
+            return Err(
+                CodecError::invalid_text("an empty _CHANGE_SEQUENCE_NUMBER").into_serialize()
+            );
         }
         Ok(Self(s.to_string()))
     }

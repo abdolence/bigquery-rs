@@ -1,7 +1,8 @@
 //! Tables: get, delete and list, through the v2 `TableService`. Tables are created and changed
 //! by the declarative schema API.
 
-use crate::admin::{non_empty, paged, timestamp_ms};
+use crate::admin::paged;
+use crate::db::proto::{timestamp_ms, NonEmpty};
 use crate::errors::BigQueryError;
 use crate::schema::table_partitioning;
 use crate::BigQueryInstant;
@@ -12,7 +13,6 @@ use crate::{
 use crate::{BigQueryLabels, BigQueryLocation};
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2;
-use gcloud_sdk::tonic::metadata::MetadataMap;
 use std::fmt::{Display, Formatter};
 use tracing::Span;
 
@@ -129,14 +129,13 @@ pub struct BigQueryTableSummary {
 
 fn table_reference(reference: Option<v2::TableReference>) -> BigQueryResult<BigQueryTableRef> {
     reference
-        .ok_or_else(|| {
-            BigQueryError::invalid_parameters("table_reference", "BigQuery returned none")
-        })?
+        .ok_or_else(|| BigQueryError::unexpected_response("BigQuery returned no table_reference"))?
         .try_into()
 }
 
 /// # Errors
-/// [`BigQueryError::InvalidParametersError`] for a missing or invalid table reference or
+/// [`BigQueryError::SystemError`] for a missing table reference,
+/// [`BigQueryError::InvalidParametersError`] for an invalid one or
 /// partitioning the crate does not model, and [`BigQueryError::DeserializeError`] for a column
 /// type the crate does not handle or a time out of range.
 impl TryFrom<v2::Table> for BigQueryTable {
@@ -154,9 +153,9 @@ impl TryFrom<v2::Table> for BigQueryTable {
         let last_modified_time = i64::try_from(table.last_modified_time).unwrap_or(i64::MAX);
         Ok(Self {
             reference: table_reference(table.table_reference)?,
-            table_type: non_empty(table.r#type).map(Into::into),
+            table_type: table.r#type.non_empty().map(Into::into),
             schema,
-            description: table.description.and_then(non_empty),
+            description: table.description.and_then(NonEmpty::non_empty),
             labels: table.labels.into_iter().collect(),
             partitioning,
             clustering: table.clustering.map(|c| c.fields).unwrap_or_default(),
@@ -171,7 +170,8 @@ impl TryFrom<v2::Table> for BigQueryTable {
 }
 
 /// # Errors
-/// [`BigQueryError::InvalidParametersError`] for a missing or invalid table reference, and
+/// [`BigQueryError::SystemError`] for a missing table reference,
+/// [`BigQueryError::InvalidParametersError`] for an invalid one, and
 /// [`BigQueryError::DeserializeError`] for a time out of range.
 impl TryFrom<v2::ListFormatTable> for BigQueryTableSummary {
     type Error = BigQueryError;
@@ -179,7 +179,7 @@ impl TryFrom<v2::ListFormatTable> for BigQueryTableSummary {
     fn try_from(table: v2::ListFormatTable) -> Result<Self, Self::Error> {
         Ok(Self {
             reference: table_reference(table.table_reference)?,
-            table_type: non_empty(table.r#type).map(Into::into),
+            table_type: table.r#type.non_empty().map(Into::into),
             labels: table.labels.into_iter().collect(),
             creation_time: timestamp_ms("creation_time", table.creation_time)?,
             expiration_time: timestamp_ms("expiration_time", table.expiration_time)?,
@@ -188,59 +188,36 @@ impl TryFrom<v2::ListFormatTable> for BigQueryTableSummary {
 }
 
 impl BigQueryDb {
-    fn table_request_ids(&self, table: &BigQueryTableRef) -> (String, String, String) {
-        (
-            table
-                .project()
-                .unwrap_or(&self.options().google_project_id)
-                .to_string(),
-            table.dataset().to_string(),
-            table.table().to_string(),
-        )
-    }
-
     pub(crate) async fn get_table(
         &self,
         table: &BigQueryTableRef,
     ) -> BigQueryResult<BigQueryTable> {
-        let (project_id, dataset_id, table_id) = self.table_request_ids(table);
+        let ids = table.ids(&self.options().google_project_id);
         let request = v2::GetTableRequest {
-            project_id,
-            dataset_id,
-            table_id,
+            project_id: ids.project,
+            dataset_id: ids.dataset,
+            table_id: ids.table,
             ..Default::default()
         };
-        self.retry(
-            &table_span(table),
-            "get a table",
-            &request,
-            &MetadataMap::new(),
-            |r| {
-                let mut client = self.table_client();
-                async move { client.get_table(r).await }
-            },
-        )
+        self.retry(&table.admin_span(), "get a table", &request, |r| {
+            let mut client = self.table_client();
+            async move { client.get_table(r).await }
+        })
         .await?
         .try_into()
     }
 
     pub(crate) async fn delete_table(&self, table: &BigQueryTableRef) -> BigQueryResult<()> {
-        let (project_id, dataset_id, table_id) = self.table_request_ids(table);
+        let ids = table.ids(&self.options().google_project_id);
         let request = v2::DeleteTableRequest {
-            project_id,
-            dataset_id,
-            table_id,
+            project_id: ids.project,
+            dataset_id: ids.dataset,
+            table_id: ids.table,
         };
-        self.retry(
-            &table_span(table),
-            "delete a table",
-            &request,
-            &MetadataMap::new(),
-            |r| {
-                let mut client = self.table_client();
-                async move { client.delete_table(r).await }
-            },
-        )
+        self.retry(&table.admin_span(), "delete a table", &request, |r| {
+            let mut client = self.table_client();
+            async move { client.delete_table(r).await }
+        })
         .await
     }
 
@@ -251,8 +228,7 @@ impl BigQueryDb {
     ) -> BoxStream<'static, BigQueryResult<BigQueryTableSummary>> {
         let db = self.clone();
         let project_id = dataset
-            .project()
-            .unwrap_or(&self.options().google_project_id)
+            .project_or(&self.options().google_project_id)
             .to_string();
         let dataset_id = dataset.dataset().to_string();
         let span = tracing::debug_span!("BigQuery tables", "/bigquery/dataset" = %dataset);
@@ -267,7 +243,7 @@ impl BigQueryDb {
             };
             async move {
                 let page = db
-                    .retry(&span, "list tables", &request, &MetadataMap::new(), |r| {
+                    .retry(&span, "list tables", &request, |r| {
                         let mut client = db.table_client();
                         async move { client.list_tables(r).await }
                     })
@@ -283,8 +259,11 @@ impl BigQueryDb {
     }
 }
 
-fn table_span(table: &BigQueryTableRef) -> Span {
-    tracing::debug_span!("BigQuery table", "/bigquery/table" = %table)
+impl BigQueryTableRef {
+    /// The span of one table admin call.
+    fn admin_span(&self) -> Span {
+        tracing::debug_span!("BigQuery table", "/bigquery/table" = %self)
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,3 @@
-use crate::errors::BigQueryError;
 use crate::{
     BigQueryChange, BigQueryChangeType, BigQueryInsertParams, BigQueryResult,
     BigQueryStreamingWriteOptions, BigQueryTableRef, BigQueryWriteMode, BigQueryWriteSummary,
@@ -151,21 +150,12 @@ where
     /// # Errors
     /// The first failed batch's error; in pending mode nothing is committed then. A row that
     /// does not serialize stops the insert with
-    /// [`BigQueryError::SerializeError`]; on the default and committed streams the batches
-    /// before it may be written. [`BigQueryError::InvalidParametersError`] for
-    /// [`upsert`](Self::upsert) with another mode than the default.
+    /// [`BigQueryError::SerializeError`](crate::errors::BigQueryError::SerializeError); on the default and committed streams the batches
+    /// before it may be written. [`BigQueryError::InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError) for the field
+    /// `mode` for [`upsert`](Self::upsert) with another mode than the default.
     pub async fn execute(self) -> BigQueryResult<BigQueryWriteSummary> {
         if !self.upsert {
             return self.db.insert_objects(self.params, self.rows).await;
-        }
-        if self.params.options.mode != BigQueryWriteMode::Default {
-            return Err(BigQueryError::invalid_parameters(
-                "upsert",
-                format!(
-                    "CDC upserts go through the default stream only, not {:?}",
-                    self.params.options.mode
-                ),
-            ));
         }
         let changes = self.rows.into_iter().map(|row| BigQueryChange {
             change_type: BigQueryChangeType::Upsert,
@@ -206,7 +196,7 @@ where
     ///
     /// # Errors
     /// The first failed batch's error, a change that does not serialize, or
-    /// [`BigQueryError::InvalidParametersError`] for a mode other than the default.
+    /// [`BigQueryError::InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError) for a mode other than the default.
     pub async fn execute(self) -> BigQueryResult<BigQueryWriteSummary> {
         self.db.insert_changes(self.params, self.changes).await
     }

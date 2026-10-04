@@ -1,4 +1,4 @@
-use crate::query::ParamFailure;
+use crate::errors::BigQueryError;
 use crate::BigQueryInstant;
 use crate::{
     BigQueryFilter, BigQueryFilterBuilder, BigQueryReadOptions, BigQueryReadParams,
@@ -74,7 +74,7 @@ where
     db: &'a D,
     params: BigQueryReadParams,
     /// Why the last `filter` could not be rendered, returned by the terminal.
-    filter_failure: Option<ParamFailure>,
+    filter_failure: Option<BigQueryError>,
 }
 
 impl<'a, D> BigQuerySelectBuilder<'a, D>
@@ -170,8 +170,7 @@ where
     }
 
     /// Reads a random sample of about this percentage of the table, above 0 and up to 100.
-    /// Another value fails the terminal with
-    /// [`InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError).
+    /// BigQuery refuses another value when the session opens.
     pub fn sample_percentage(self, percentage: f64) -> Self {
         Self {
             params: self.params.with_sample_percentage(percentage),
@@ -206,7 +205,7 @@ where
         self,
     ) -> BigQueryResult<BoxStream<'b, BigQueryResult<RecordBatch>>> {
         if let Some(failure) = self.filter_failure {
-            return Err(failure.into());
+            return Err(failure);
         }
         self.db.stream_read_record_batches(self.params).await
     }
@@ -223,7 +222,7 @@ where
 {
     db: &'a D,
     params: BigQueryReadParams,
-    filter_failure: Option<ParamFailure>,
+    filter_failure: Option<BigQueryError>,
     _target: PhantomData<fn() -> T>,
 }
 
@@ -234,7 +233,7 @@ where
 {
     fn checked_params(self) -> BigQueryResult<BigQueryReadParams> {
         match self.filter_failure {
-            Some(failure) => Err(failure.into()),
+            Some(failure) => Err(failure),
             None => Ok(self.params),
         }
     }

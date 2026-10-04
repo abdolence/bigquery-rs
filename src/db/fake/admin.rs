@@ -111,6 +111,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_sends_the_default_table_expiration() {
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            if call.method() != "InsertDataset" {
+                return unexpected(call).await;
+            }
+            let request: v2::InsertDatasetRequest = call.next_request().await.expect("a request");
+            let dataset = request.dataset.unwrap_or_default();
+            call.log(format!(
+                "InsertDataset default_table_expiration_ms={:?}",
+                dataset.default_table_expiration_ms
+            ));
+            call.reply(&dataset);
+        })
+        .await;
+        let created = fake
+            .db
+            .fluent()
+            .schema()
+            .dataset(SHOP)
+            .create()
+            .default_table_expiration(Duration::from_secs(2 * 3600))
+            .execute()
+            .await
+            .expect("the call succeeds");
+        assert_eq!(
+            fake.calls(),
+            ["InsertDataset default_table_expiration_ms=Some(7200000)"]
+        );
+        assert_eq!(
+            created.default_table_expiration,
+            Some(Duration::from_secs(2 * 3600))
+        );
+    }
+
+    #[tokio::test]
     async fn get_reads_another_project_into_a_typed_dataset() {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
             if call.method() != "GetDataset" {

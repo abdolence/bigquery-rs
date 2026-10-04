@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 mod common;
-mod read_common;
-use common::TestResult;
-use read_common::{with_scratch_prefixed, Scratch};
+use common::{with_scratch, Scratch, TestResult};
 
 /// The payloads of the crate's own injection corpus that fit a `row_restriction` many times
 /// over; the 1 MiB entry is refused before any request, which the unit tests cover.
@@ -90,8 +88,7 @@ async fn ids(
 
 #[tokio::test]
 async fn filter_matches_hostile_values_literally() -> TestResult {
-    with_scratch_prefixed(
-        "bqp4c",
+    with_scratch(
         "filter_matches_hostile_values_literally",
         async |s: &Scratch| {
             let hostile = hostile_values();
@@ -116,7 +113,7 @@ async fn filter_matches_hostile_values_literally() -> TestResult {
             let outcome =
                 s.db.fluent()
                     .query("CREATE TABLE hostile AS SELECT * FROM UNNEST(@rows)")
-                    .default_dataset(BigQueryDatasetRef::new(&s.project, s.dataset.clone())?)
+                    .default_dataset(s.dataset_ref()?)
                     .location(BigQueryLocation::from_static("US"))
                     .param("rows", &rows)
                     .execute()
@@ -165,7 +162,7 @@ async fn filter_matches_hostile_values_literally() -> TestResult {
             let count: Vec<Count> =
                 s.db.fluent()
                     .query("SELECT COUNT(*) AS n FROM hostile")
-                    .default_dataset(BigQueryDatasetRef::new(&s.project, s.dataset.clone())?)
+                    .default_dataset(s.dataset_ref()?)
                     .location(BigQueryLocation::from_static("US"))
                     .obj::<Count>()
                     .query()

@@ -7,9 +7,7 @@ use gcloud_sdk::google::cloud::bigquery::v2 as bq;
 use serde::{Deserialize, Serialize};
 
 mod common;
-mod query_common;
-use common::TestResult;
-use query_common::{live, RUN_LABEL};
+use common::{with_scratch, TestResult, RUN_LABEL};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Pair {
@@ -43,118 +41,113 @@ struct Echo {
 
 #[tokio::test]
 async fn named_parameters_of_every_kind_round_trip() -> TestResult {
-    live(
-        "named_parameters_of_every_kind_round_trip",
-        false,
-        async |l| {
-            let ts: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse()?;
-            let d = jiff::civil::date(2024, 2, 29);
-            let t = jiff::civil::time(23, 59, 59, 999_999_000);
-            let iv = BigQueryInterval {
-                months: 14,
-                days: -3,
-                nanos: 3_723_500_000_000,
-            };
-            let columns = [
-                "i", "f", "s", "b", "bytes", "num", "big", "d", "t", "dt", "ts", "ts_plain", "geo",
-                "j", "iv", "r", "arr", "st", "null_i", "null_ts",
-            ];
-            let sql = format!(
-                "SELECT {}",
-                columns
-                    .iter()
-                    .map(|c| format!("@{c} AS {c}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            let rows: Vec<Echo> =
-                l.db.fluent()
-                    .query(sql)
-                    .label(RUN_LABEL, l.run.as_str())
-                    .param("i", -42)
-                    .param("f", 1.5)
-                    .param("s", "Åsa Öberg")
-                    .param("b", true)
-                    .param("bytes", serde_bytes::ByteBuf::from(vec![0u8, 255]))
-                    .param("num", BigQueryDecimal("123.450"))
-                    .param(
-                        "big",
-                        BigQueryDecimal("0.00000000000000000000000000000000000001"),
-                    )
-                    .param("d", BigQueryDate(d))
-                    .param("t", BigQueryTime(t))
-                    .param("dt", BigQueryDateTime(d.to_datetime(t)))
-                    .param("ts", BigQueryTimestamp(ts))
-                    .param_as("ts_plain", BigQueryFieldType::Timestamp, ts)
-                    .param_as("geo", BigQueryFieldType::Geography, "POINT(1 2)")
-                    .param("j", BigQueryJson(serde_json::json!({"stad": "Malmö"})))
-                    .param("iv", iv)
-                    .param(
-                        "r",
-                        BigQueryRange {
-                            start: Some(BigQueryDate(d)),
-                            end: None,
-                        },
-                    )
-                    .param("arr", vec![1i64, 2, 3])
-                    .param(
-                        "st",
-                        Pair {
-                            a: 7,
-                            b: "z".into(),
-                        },
-                    )
-                    .param_as("null_i", BigQueryFieldType::Int64, None::<i64>)
-                    .param_as(
-                        "null_ts",
-                        BigQueryFieldType::Timestamp,
-                        None::<jiff::Timestamp>,
-                    )
-                    .obj::<Echo>()
-                    .query()
-                    .await?;
-            assert_eq!(
-                rows,
-                [Echo {
-                    i: -42,
-                    f: 1.5,
-                    s: "Åsa Öberg".into(),
-                    b: true,
-                    bytes: vec![0, 255],
-                    num: "123.45".into(),
-                    big: "0.00000000000000000000000000000000000001".into(),
-                    d,
-                    t,
-                    dt: d.to_datetime(t),
-                    ts,
-                    ts_plain: ts,
-                    geo: "POINT(1 2)".into(),
-                    j: BigQueryJson(serde_json::json!({"stad": "Malmö"})),
-                    iv,
-                    r: BigQueryRange {
+    with_scratch("named_parameters_of_every_kind_round_trip", async |l| {
+        let ts: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse()?;
+        let d = jiff::civil::date(2024, 2, 29);
+        let t = jiff::civil::time(23, 59, 59, 999_999_000);
+        let iv = BigQueryInterval {
+            months: 14,
+            days: -3,
+            nanos: 3_723_500_000_000,
+        };
+        let columns = [
+            "i", "f", "s", "b", "bytes", "num", "big", "d", "t", "dt", "ts", "ts_plain", "geo",
+            "j", "iv", "r", "arr", "st", "null_i", "null_ts",
+        ];
+        let sql = format!(
+            "SELECT {}",
+            columns
+                .iter()
+                .map(|c| format!("@{c} AS {c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let rows: Vec<Echo> =
+            l.db.fluent()
+                .query(sql)
+                .label(RUN_LABEL, l.dataset.as_str())
+                .param("i", -42)
+                .param("f", 1.5)
+                .param("s", "Åsa Öberg")
+                .param("b", true)
+                .param("bytes", serde_bytes::ByteBuf::from(vec![0u8, 255]))
+                .param("num", BigQueryDecimal("123.450"))
+                .param(
+                    "big",
+                    BigQueryDecimal("0.00000000000000000000000000000000000001"),
+                )
+                .param("d", BigQueryDate(d))
+                .param("t", BigQueryTime(t))
+                .param("dt", BigQueryDateTime(d.to_datetime(t)))
+                .param("ts", BigQueryTimestamp(ts))
+                .param_as("ts_plain", BigQueryFieldType::Timestamp, ts)
+                .param_as("geo", BigQueryFieldType::Geography, "POINT(1 2)")
+                .param("j", BigQueryJson(serde_json::json!({"stad": "Malmö"})))
+                .param("iv", iv)
+                .param(
+                    "r",
+                    BigQueryRange {
                         start: Some(BigQueryDate(d)),
                         end: None,
                     },
-                    arr: vec![1, 2, 3],
-                    st: Pair {
+                )
+                .param("arr", vec![1i64, 2, 3])
+                .param(
+                    "st",
+                    Pair {
                         a: 7,
-                        b: "z".into()
+                        b: "z".into(),
                     },
-                    null_i: None,
-                    null_ts: None,
-                }]
-            );
-            Ok(())
-        },
-    )
+                )
+                .param_as("null_i", BigQueryFieldType::Int64, None::<i64>)
+                .param_as(
+                    "null_ts",
+                    BigQueryFieldType::Timestamp,
+                    None::<jiff::Timestamp>,
+                )
+                .obj::<Echo>()
+                .query()
+                .await?;
+        assert_eq!(
+            rows,
+            [Echo {
+                i: -42,
+                f: 1.5,
+                s: "Åsa Öberg".into(),
+                b: true,
+                bytes: vec![0, 255],
+                num: "123.45".into(),
+                big: "0.00000000000000000000000000000000000001".into(),
+                d,
+                t,
+                dt: d.to_datetime(t),
+                ts,
+                ts_plain: ts,
+                geo: "POINT(1 2)".into(),
+                j: BigQueryJson(serde_json::json!({"stad": "Malmö"})),
+                iv,
+                r: BigQueryRange {
+                    start: Some(BigQueryDate(d)),
+                    end: None,
+                },
+                arr: vec![1, 2, 3],
+                st: Pair {
+                    a: 7,
+                    b: "z".into()
+                },
+                null_i: None,
+                null_ts: None,
+            }]
+        );
+        Ok(())
+    })
     .await
 }
 
 #[tokio::test]
 async fn result_over_the_inline_limit_is_read_through_storage_read() -> TestResult {
-    live(
+    with_scratch(
         "result_over_the_inline_limit_is_read_through_storage_read",
-        false,
         async |l| {
             #[derive(Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
             struct Row {
@@ -167,7 +160,7 @@ async fn result_over_the_inline_limit_is_read_through_storage_read() -> TestResu
                         "SELECT x, CONCAT('r', CAST(x AS STRING)) AS s \
                      FROM UNNEST(GENERATE_ARRAY(1, 50)) AS x",
                     )
-                    .label(RUN_LABEL, l.run.as_str())
+                    .label(RUN_LABEL, l.dataset.as_str())
                     .inline_rows_limit(10)
                     .obj::<Row>()
                     .query()
@@ -184,7 +177,7 @@ async fn result_over_the_inline_limit_is_read_through_storage_read() -> TestResu
             let batches: Vec<arrow_array::RecordBatch> =
                 l.db.fluent()
                     .query("SELECT x FROM UNNEST(GENERATE_ARRAY(1, 30)) AS x")
-                    .label(RUN_LABEL, l.run.as_str())
+                    .label(RUN_LABEL, l.dataset.as_str())
                     .inline_rows_limit(5)
                     .record_batches()
                     .await?
@@ -199,7 +192,7 @@ async fn result_over_the_inline_limit_is_read_through_storage_read() -> TestResu
 
 #[tokio::test]
 async fn stats_report_what_a_query_job_used() -> TestResult {
-    live("stats_report_what_a_query_job_used", false, async |l| {
+    with_scratch("stats_report_what_a_query_job_used", async |l| {
         #[derive(Deserialize)]
         struct Row {
             x: i64,
@@ -210,7 +203,7 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
         let (rows, inline): (Vec<Row>, _) =
             l.db.fluent()
                 .query(sql)
-                .label(RUN_LABEL, l.run.as_str())
+                .label(RUN_LABEL, l.dataset.as_str())
                 .use_query_cache(false)
                 .obj::<Row>()
                 .query_with_stats()
@@ -232,7 +225,7 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
         let (rows, read) =
             l.db.fluent()
                 .query(sql)
-                .label(RUN_LABEL, l.run.as_str())
+                .label(RUN_LABEL, l.dataset.as_str())
                 .use_query_cache(false)
                 .inline_rows_limit(10)
                 .obj::<Row>()
@@ -258,15 +251,14 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
 
 #[tokio::test]
 async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
-    live(
+    with_scratch(
         "dml_counts_labels_and_dry_run_on_a_scratch_table",
-        true,
         async |l| {
             let run = |sql: &str| {
                 l.db.fluent()
                     .query(sql.to_string())
-                    .default_dataset(l.run.clone())
-                    .label(RUN_LABEL, l.run.as_str())
+                    .default_dataset(l.dataset.clone())
+                    .label(RUN_LABEL, l.dataset.as_str())
             };
             let created = run("CREATE TABLE t (id INT64, name STRING)")
                 .execute()
@@ -319,7 +311,7 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
             let labels = details.configuration.map(|c| c.labels).unwrap_or_default();
             assert_eq!(
                 labels.get(RUN_LABEL).map(String::as_str),
-                Some(l.run.as_str())
+                Some(l.dataset.as_str())
             );
 
             let estimate = run("SELECT id, name FROM t").dry_run().await?;
@@ -363,12 +355,12 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
 
 #[tokio::test]
 async fn injection_payloads_stay_data() -> TestResult {
-    live("injection_payloads_stay_data", true, async |l| {
+    with_scratch("injection_payloads_stay_data", async |l| {
         let run = |sql: &str| {
             l.db.fluent()
                 .query(sql.to_string())
-                .default_dataset(l.run.clone())
-                .label(RUN_LABEL, l.run.as_str())
+                .default_dataset(l.dataset.clone())
+                .label(RUN_LABEL, l.dataset.as_str())
         };
         run("CREATE TABLE people (name STRING)").execute().await?;
         run("INSERT people (name) VALUES ('Åsa'), ('Linnéa'), ('Olle')")

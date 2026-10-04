@@ -1,13 +1,14 @@
 //! Datasets: create, get, update, delete and list, through the v2 `DatasetService`.
 
-use crate::admin::{duration_ms, non_empty, paged, timestamp_ms};
-use crate::errors::{BigQueryDataConflictError, BigQueryError};
+use crate::admin::paged;
+use crate::db::if_match;
+use crate::db::proto::{duration_ms, millis, timestamp_ms, NonEmpty};
+use crate::errors::BigQueryError;
 use crate::BigQueryInstant;
 use crate::{BigQueryDatasetRef, BigQueryDb, BigQueryResult};
 use crate::{BigQueryLabels, BigQueryLocation};
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2;
-use gcloud_sdk::tonic::metadata::{MetadataMap, MetadataValue};
 use std::time::Duration;
 use tracing::Span;
 
@@ -49,7 +50,8 @@ pub struct BigQueryDatasetSummary {
 }
 
 /// # Errors
-/// [`BigQueryError::InvalidParametersError`] for a missing or invalid dataset reference, and
+/// [`BigQueryError::SystemError`] for a missing dataset reference,
+/// [`BigQueryError::InvalidParametersError`] for an invalid one, and
 /// [`BigQueryError::DeserializeError`] for a time or a duration out of range.
 impl TryFrom<v2::Dataset> for BigQueryDataset {
     type Error = BigQueryError;
@@ -58,8 +60,8 @@ impl TryFrom<v2::Dataset> for BigQueryDataset {
         Ok(Self {
             reference: dataset_reference(dataset.dataset_reference)?,
             location: BigQueryLocation::reported(dataset.location),
-            friendly_name: dataset.friendly_name.and_then(non_empty),
-            description: dataset.description.and_then(non_empty),
+            friendly_name: dataset.friendly_name.and_then(NonEmpty::non_empty),
+            description: dataset.description.and_then(NonEmpty::non_empty),
             labels: dataset.labels.into_iter().collect(),
             default_table_expiration: duration_ms(
                 "default_table_expiration_ms",
@@ -76,7 +78,8 @@ impl TryFrom<v2::Dataset> for BigQueryDataset {
 }
 
 /// # Errors
-/// [`BigQueryError::InvalidParametersError`] for a missing or invalid dataset reference.
+/// [`BigQueryError::SystemError`] for a missing dataset reference,
+/// [`BigQueryError::InvalidParametersError`] for an invalid one.
 impl TryFrom<v2::ListFormatDataset> for BigQueryDatasetSummary {
     type Error = BigQueryError;
 
@@ -84,7 +87,7 @@ impl TryFrom<v2::ListFormatDataset> for BigQueryDatasetSummary {
         Ok(Self {
             reference: dataset_reference(dataset.dataset_reference)?,
             location: BigQueryLocation::reported(dataset.location),
-            friendly_name: dataset.friendly_name.and_then(non_empty),
+            friendly_name: dataset.friendly_name.and_then(NonEmpty::non_empty),
             labels: dataset.labels.into_iter().collect(),
         })
     }
@@ -95,7 +98,7 @@ fn dataset_reference(
 ) -> BigQueryResult<BigQueryDatasetRef> {
     reference
         .ok_or_else(|| {
-            BigQueryError::invalid_parameters("dataset_reference", "BigQuery returned none")
+            BigQueryError::unexpected_response("BigQuery returned no dataset_reference")
         })?
         .try_into()
 }
@@ -104,6 +107,7 @@ fn dataset_reference(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DatasetSettings {
     pub location: Option<BigQueryLocation>,
+    pub default_table_expiration: Option<Duration>,
     pub description: Option<String>,
     pub labels: BigQueryLabels,
 }
@@ -147,15 +151,17 @@ impl DatasetEdits {
     }
 }
 
-fn dataset_span(dataset: &BigQueryDatasetRef) -> Span {
-    tracing::debug_span!("BigQuery dataset", "/bigquery/dataset" = %dataset)
+impl BigQueryDatasetRef {
+    /// The span of one dataset admin call.
+    fn admin_span(&self) -> Span {
+        tracing::debug_span!("BigQuery dataset", "/bigquery/dataset" = %self)
+    }
 }
 
 impl BigQueryDb {
     fn dataset_project(&self, dataset: &BigQueryDatasetRef) -> String {
         dataset
-            .project()
-            .unwrap_or(&self.options().google_project_id)
+            .project_or(&self.options().google_project_id)
             .to_string()
     }
 
@@ -173,23 +179,21 @@ impl BigQueryDb {
                     project_id,
                 }),
                 location: settings.location.map(|l| l.to_string()).unwrap_or_default(),
+                default_table_expiration_ms: settings
+                    .default_table_expiration
+                    .map(|d| millis("default_table_expiration", d))
+                    .transpose()?,
                 description: settings.description,
                 labels: settings.labels.into_iter().collect(),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let span = dataset_span(dataset);
-        self.retry(
-            &span,
-            "create a dataset",
-            &request,
-            &MetadataMap::new(),
-            |r| {
-                let mut client = self.dataset_client();
-                async move { client.insert_dataset(r).await }
-            },
-        )
+        let span = dataset.admin_span();
+        self.retry(&span, "create a dataset", &request, |r| {
+            let mut client = self.dataset_client();
+            async move { client.insert_dataset(r).await }
+        })
         .await?
         .try_into()
     }
@@ -205,7 +209,7 @@ impl BigQueryDb {
             dataset_view: v2::get_dataset_request::DatasetView::Metadata.into(),
             ..Default::default()
         };
-        self.retry(span, "get a dataset", &request, &MetadataMap::new(), |r| {
+        self.retry(span, "get a dataset", &request, |r| {
             let mut client = self.dataset_client();
             async move { client.get_dataset(r).await }
         })
@@ -216,7 +220,7 @@ impl BigQueryDb {
         &self,
         dataset: &BigQueryDatasetRef,
     ) -> BigQueryResult<BigQueryDataset> {
-        self.get_raw_dataset(dataset, &dataset_span(dataset))
+        self.get_raw_dataset(dataset, &dataset.admin_span())
             .await?
             .try_into()
     }
@@ -226,18 +230,11 @@ impl BigQueryDb {
         dataset: &BigQueryDatasetRef,
         edits: DatasetEdits,
     ) -> BigQueryResult<BigQueryDataset> {
-        let span = dataset_span(dataset);
+        let span = dataset.admin_span();
         let mut body = self.get_raw_dataset(dataset, &span).await?;
         let etag = body.etag.clone();
         edits.apply(&mut body);
-        let precondition = MetadataValue::try_from(etag.as_str()).map_err(|_| {
-            BigQueryError::invalid_parameters(
-                "etag",
-                format!("GetDataset returned an etag that is not a valid header: {etag:?}"),
-            )
-        })?;
-        let mut metadata = MetadataMap::new();
-        metadata.insert("if-match", precondition);
+        let metadata = if_match("GetDataset", &etag)?;
         let request = v2::UpdateOrPatchDatasetRequest {
             project_id: self.dataset_project(dataset),
             dataset_id: dataset.dataset().to_string(),
@@ -246,27 +243,21 @@ impl BigQueryDb {
             ..Default::default()
         };
         let result = self
-            .retry(&span, "update a dataset", &request, &metadata, |r| {
+            .retry_with_metadata(&span, "update a dataset", &request, &metadata, |r| {
                 let mut client = self.dataset_client();
                 async move { client.update_dataset(r).await }
             })
             .await;
-        match result {
-            Ok(updated) => updated.try_into(),
-            Err(BigQueryError::DatabaseError(err)) if err.public.code == "FailedPrecondition" => {
-                Err(BigQueryError::DataConflictError(
-                    BigQueryDataConflictError::new(
-                        err.public,
-                        format!(
-                            "{dataset} changed since this update read it (etag {etag}); nothing \
-                             was written, run the update again. {}",
-                            err.details
-                        ),
-                    ),
-                ))
-            }
-            Err(err) => Err(err),
-        }
+        result
+            .map_err(|err| {
+                err.on_stale_etag(|| {
+                    format!(
+                        "{dataset} changed since this update read it (etag {etag}); nothing \
+                         was written, run the update again."
+                    )
+                })
+            })?
+            .try_into()
     }
 
     pub(crate) async fn delete_dataset(
@@ -279,17 +270,11 @@ impl BigQueryDb {
             dataset_id: dataset.dataset().to_string(),
             delete_contents,
         };
-        let span = dataset_span(dataset);
-        self.retry(
-            &span,
-            "delete a dataset",
-            &request,
-            &MetadataMap::new(),
-            |r| {
-                let mut client = self.dataset_client();
-                async move { client.delete_dataset(r).await }
-            },
-        )
+        let span = dataset.admin_span();
+        self.retry(&span, "delete a dataset", &request, |r| {
+            let mut client = self.dataset_client();
+            async move { client.delete_dataset(r).await }
+        })
         .await
     }
 
@@ -312,7 +297,7 @@ impl BigQueryDb {
             };
             async move {
                 let page = db
-                    .retry(&span, "list datasets", &request, &MetadataMap::new(), |r| {
+                    .retry(&span, "list datasets", &request, |r| {
                         let mut client = db.dataset_client();
                         async move { client.list_datasets(r).await }
                     })

@@ -64,11 +64,13 @@ pub(crate) fn append_request(
     }
 }
 
-/// The bytes of a request that are not rows, with the writer schema always counted: a batch
-/// can become the first request of a new connection when it is resent after a reconnect.
-fn overhead(plan: &WritePlan, target: &RequestTarget) -> usize {
-    append_request(target, Some(i64::MAX), Some(plan), Vec::new()).encoded_len()
-        + NESTED_LENGTH_SLACK
+impl WritePlan {
+    /// The bytes of a request that are not rows, with the writer schema always counted: a batch
+    /// can become the first request of a new connection when it is resent after a reconnect.
+    fn request_overhead(&self, target: &RequestTarget) -> usize {
+        append_request(target, Some(i64::MAX), Some(self), Vec::new()).encoded_len()
+            + NESTED_LENGTH_SLACK
+    }
 }
 
 /// A sealed batch: rows encoded against one plan, the unit of sending, acknowledging and
@@ -119,7 +121,7 @@ impl Batcher {
         max_request_bytes: usize,
         max_rows: Option<usize>,
     ) -> Self {
-        let overhead = overhead(&plan, target);
+        let overhead = plan.request_overhead(target);
         Batcher {
             plan,
             target: target.clone(),
@@ -233,7 +235,7 @@ impl Batcher {
     /// holds rows of one plan only.
     pub(crate) fn set_plan(&mut self, plan: Arc<WritePlan>) {
         debug_assert!(self.open.is_none(), "a batch holds rows of one plan only");
-        self.overhead = overhead(&plan, &self.target);
+        self.overhead = plan.request_overhead(&self.target);
         self.plan = plan;
     }
 }

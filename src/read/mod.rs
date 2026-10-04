@@ -18,78 +18,72 @@ mod stream;
 mod support;
 
 pub(crate) use decoder::decode_rows;
-#[allow(
-    unused_imports,
-    reason = "queries decode their inline Arrow results with it"
-)]
 pub(crate) use ipc::ArrowIpcDecoder;
-pub(crate) use support::skip_failed_row;
+pub(crate) use support::skip_failed_rows;
 
 use crate::{BigQueryDb, BigQueryResult};
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
 use serde::de::DeserializeOwned;
-use session::{open_session, Projection};
+use session::Projection;
 use tracing::field::Empty;
 
-fn read_span(params: &BigQueryReadParams) -> tracing::Span {
-    tracing::debug_span!(
-        "BigQuery Read",
-        "/bigquery/table" = %params.table,
-        "/bigquery/streams" = Empty,
-        "/bigquery/estimated_bytes_scanned" = Empty,
-        "/bigquery/estimated_rows" = Empty,
-        "/bigquery/rows_read" = Empty,
-        "/bigquery/bytes_read" = Empty,
-        "/bigquery/throttle_percent" = Empty,
-    )
+impl BigQueryReadParams {
+    /// The span of one read terminal call.
+    fn span(&self) -> tracing::Span {
+        tracing::debug_span!(
+            "BigQuery Read",
+            "/bigquery/table" = %self.table,
+            "/bigquery/streams" = Empty,
+            "/bigquery/estimated_bytes_scanned" = Empty,
+            "/bigquery/estimated_rows" = Empty,
+            "/bigquery/rows_read" = Empty,
+            "/bigquery/bytes_read" = Empty,
+            "/bigquery/throttle_percent" = Empty,
+        )
+    }
 }
 
-/// Records what the session reported when it opened on the read's span.
-fn record_session(span: &tracing::Span, session: &session::OpenedSession) {
-    span.record("/bigquery/streams", session.streams.len());
-    span.record(
-        "/bigquery/estimated_bytes_scanned",
-        session.estimated_bytes_scanned,
-    );
-    span.record("/bigquery/estimated_rows", session.estimated_rows);
-}
+impl BigQueryDb {
+    /// Reads `params.table` as the record batches BigQuery sends, after IPC decode and
+    /// decompression. Without `selected_fields` every column is read.
+    pub(crate) async fn read_table_batches<'b>(
+        &self,
+        params: BigQueryReadParams,
+    ) -> BigQueryResult<BoxStream<'b, BigQueryResult<RecordBatch>>> {
+        let span = params.span();
+        let session = self
+            .open_read_session(&params, Projection::All, &span)
+            .await?;
+        session.record(&span);
+        Ok(self
+            .start_read_streams(session, &span, |batch, _| batch)
+            .into_batches())
+    }
 
-/// Reads `params.table` as the record batches BigQuery sends, after IPC decode and
-/// decompression. Without `selected_fields` every column is read.
-pub(crate) async fn read_table_batches<'b>(
-    db: &BigQueryDb,
-    params: BigQueryReadParams,
-) -> BigQueryResult<BoxStream<'b, BigQueryResult<RecordBatch>>> {
-    let span = read_span(&params);
-    let session = open_session(db, &params, Projection::All, &span).await?;
-    record_session(&span, &session);
-    Ok(stream::start_streams(db, session, &span, |batch, _| batch).into_batches())
-}
-
-/// Reads `params.table` decoded into `T`, each row on its stream's task. Without
-/// `selected_fields` the read selects the columns that `T`'s top-level fields name, when `T`
-/// is a plain struct, and every column otherwise.
-pub(crate) async fn read_table_rows<'b, T>(
-    db: &BigQueryDb,
-    params: BigQueryReadParams,
-) -> BigQueryResult<BoxStream<'b, BigQueryResult<T>>>
-where
-    T: DeserializeOwned + Send + 'static,
-{
-    let span = read_span(&params);
-    let projection = match projection::struct_fields::<T>() {
-        Some(fields) => Projection::Auto(fields),
-        None => Projection::All,
-    };
-    let session = open_session(db, &params, projection, &span).await?;
-    record_session(&span, &session);
-    Ok(
-        stream::start_streams(db, session, &span, |batch, first_row| {
-            decode_rows::<T>(&batch, first_row)
-        })
-        .into_rows(),
-    )
+    /// Reads `params.table` decoded into `T`, each row on its stream's task. Without
+    /// `selected_fields` the read selects the columns that `T`'s top-level fields name, when `T`
+    /// is a plain struct, and every column otherwise.
+    pub(crate) async fn read_table_rows<'b, T>(
+        &self,
+        params: BigQueryReadParams,
+    ) -> BigQueryResult<BoxStream<'b, BigQueryResult<T>>>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        let span = params.span();
+        let projection = match projection::struct_fields::<T>() {
+            Some(fields) => Projection::Auto(fields),
+            None => Projection::All,
+        };
+        let session = self.open_read_session(&params, projection, &span).await?;
+        session.record(&span);
+        Ok(self
+            .start_read_streams(session, &span, |batch, first_row| {
+                decode_rows::<T>(&batch, first_row)
+            })
+            .into_rows())
+    }
 }
 
 /// Decodes every row of `batch` into `T` and calls `f` with each result. Not part of the API:

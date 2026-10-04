@@ -33,7 +33,7 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         .create()
         .location(BigQueryLocation::from_static("EU"))
         .description("scratch")
-        .labels([("purpose", "bqp6b")])
+        .labels([("purpose", "bq_admin_live")])
         .execute()
         .await?;
     assert_eq!(created.reference.project(), Some(project));
@@ -41,7 +41,7 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
 
     let read = schema().dataset(dataset.clone()).get().await?;
     assert_eq!(read.description.as_deref(), Some("scratch"));
-    assert_eq!(read.labels.get("purpose"), Some("bqp6b"));
+    assert_eq!(read.labels.get("purpose"), Some("bq_admin_live"));
     assert!(read.creation_time.is_some());
 
     let listed = schema()
@@ -183,7 +183,7 @@ async fn dataset_table_and_job_crud() -> TestResult {
         return Ok(());
     };
     let db = setup(&project).await?;
-    let dataset = scratch_dataset_id("bqp6b")?;
+    let dataset = scratch_dataset_id("bq_admin_live")?;
     let result = AssertUnwindSafe(crud(&db, &project, &dataset))
         .catch_unwind()
         .await;

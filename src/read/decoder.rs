@@ -36,10 +36,6 @@ use serde::Deserialize;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
-fn codec_error(kind: BigQueryCodecErrorKind, message: impl Into<String>) -> CodecError {
-    CodecError::new(kind, message)
-}
-
 /// The typed view of one column's values.
 enum Cells<'a> {
     I64(&'a [i64]),
@@ -74,7 +70,7 @@ pub(crate) struct Column<'a> {
 
 impl<'a> Column<'a> {
     fn new(field: &'a Field, array: &'a ArrayRef, ctx: &Rc<Ctx>) -> Result<Self, CodecError> {
-        let unsupported = || unsupported_type(field);
+        let unsupported = || CodecError::unsupported_arrow_type(field);
         match field.data_type() {
             DataType::List(item) => {
                 let kind = BqKind::from_arrow_list_item(field, item).ok_or_else(unsupported)?;
@@ -138,7 +134,7 @@ impl<'a> Column<'a> {
                         ctx.clone(),
                     )))
                 }
-                _ => return Err(unsupported_type(field)),
+                _ => return Err(CodecError::unsupported_arrow_type(field)),
             },
         };
         Ok(Column {
@@ -161,7 +157,7 @@ fn parse_json<'a, T>(
     read(&mut de)
         .and_then(|value| de.end().map(|()| value))
         .map_err(|err| {
-            codec_error(
+            CodecError::new(
                 BigQueryCodecErrorKind::Custom,
                 format!("JSON column: {err}"),
             )
@@ -175,17 +171,6 @@ fn decimal_scale(data_type: &DataType, default: u32) -> u32 {
         }
         _ => default,
     }
-}
-
-fn unsupported_type(field: &Field) -> CodecError {
-    codec_error(
-        BigQueryCodecErrorKind::UnsupportedType,
-        format!(
-            "column `{}` has Arrow type {}, which BigQuery does not send",
-            field.name(),
-            field.data_type()
-        ),
-    )
 }
 
 /// State shared by every node of one batch.
@@ -432,11 +417,13 @@ impl<'a> SeqAccess<'a> for IntervalSeq {
     }
 }
 
-fn interval(v: IntervalMonthDayNano) -> BigQueryInterval {
-    BigQueryInterval {
-        months: v.months,
-        days: v.days,
-        nanos: v.nanoseconds,
+impl From<IntervalMonthDayNano> for BigQueryInterval {
+    fn from(v: IntervalMonthDayNano) -> Self {
+        BigQueryInterval {
+            months: v.months,
+            days: v.days,
+            nanos: v.nanoseconds,
+        }
     }
 }
 
@@ -464,7 +451,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
     #[inline]
     fn non_null(&self) -> Result<(), CodecError> {
         if self.is_null() {
-            Err(codec_error(
+            Err(CodecError::new(
                 BigQueryCodecErrorKind::NullForNonOption,
                 "NULL value, and the target type is not an Option",
             ))
@@ -484,7 +471,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
             Cells::Ts(v) => civil::fmt_timestamp(v[r], out),
             Cells::Num(v, scale) => decimal::fmt_decimal_i128(v[r], *scale, out),
             Cells::Big(v, scale) => decimal::fmt_decimal_i256(v[r], *scale, out),
-            Cells::Iv(v) => interval(v[r]).write_bq(out),
+            Cells::Iv(v) => BigQueryInterval::from(v[r]).write_bq(out),
             _ => return false,
         }
         true
@@ -516,7 +503,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
         };
         let divisor = i256::from_i128(10).wrapping_pow(scale);
         if value.wrapping_rem(divisor) != i256::ZERO {
-            return Some(Err(codec_error(
+            return Some(Err(CodecError::new(
                 BigQueryCodecErrorKind::OutOfRange,
                 format!(
                     "{} has a fractional part and cannot be an integer; read it into a String, \
@@ -526,7 +513,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
             )));
         }
         Some(value.wrapping_div(divisor).to_i128().ok_or_else(|| {
-            codec_error(
+            CodecError::new(
                 BigQueryCodecErrorKind::OutOfRange,
                 format!("{} does not fit in i128", text()),
             )
@@ -546,7 +533,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
             } else if let Ok(x) = u64::try_from(whole) {
                 v.visit_u64(x)
             } else {
-                Err(codec_error(
+                Err(CodecError::new(
                     BigQueryCodecErrorKind::OutOfRange,
                     format!("{whole} does not fit in 64 bits; read it into an i128"),
                 ))
@@ -605,7 +592,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
             civil::fmt_timestamp(micros, &mut s);
             return v.visit_str(&s).map_err(|err| {
                 if micros > jiff_max_micros() {
-                    codec_error(
+                    CodecError::new(
                         BigQueryCodecErrorKind::OutOfRange,
                         format!(
                             "TIMESTAMP {s} is above jiff::Timestamp's maximum; read it into a \
@@ -723,14 +710,14 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
                 let mut s = String::with_capacity(48);
                 self.text(&mut s);
                 let x = s.parse().map_err(|_| {
-                    codec_error(
+                    CodecError::new(
                         BigQueryCodecErrorKind::OutOfRange,
                         format!("decimal `{s}` is not an f64"),
                     )
                 })?;
                 v.visit_f64(x)
             }
-            Cells::I64(_) => Err(codec_error(
+            Cells::I64(_) => Err(CodecError::new(
                 BigQueryCodecErrorKind::TypeMismatch,
                 "an INT64 column cannot be read into a float; read it into an integer type",
             )),
@@ -805,7 +792,7 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
             | (BqKind::DateTime, Cells::DateTime(a))
             | (BqKind::Timestamp, Cells::Ts(a)) => a[r],
             _ => {
-                return Err(codec_error(
+                return Err(CodecError::new(
                     BigQueryCodecErrorKind::TypeMismatch,
                     format!(
                         "{name} reads a {} column, and this column is not one",
@@ -974,7 +961,7 @@ impl<'a> BatchDecoder<'a> {
     /// Decodes row `i`. An error belongs to that row only.
     pub(crate) fn row<T: Deserialize<'a>>(&self, i: usize) -> Result<T, CodecError> {
         if i >= self.rows {
-            return Err(codec_error(
+            return Err(CodecError::new(
                 BigQueryCodecErrorKind::Custom,
                 format!("row {i} of a batch with {} rows", self.rows),
             ));

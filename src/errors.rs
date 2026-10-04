@@ -6,16 +6,17 @@
 //! rate-limit errors that BigQuery sends under non-retryable codes.
 
 use crate::{BigQueryJobRef, BigQueryTablePlan, BigQueryTableRef};
+use gcloud_sdk::tonic::Code;
 use rsb_derive::Builder;
 use std::error::Error;
 use std::fmt::Display;
 use std::fmt::Formatter;
 
 /// The main error type for all BigQuery operations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BigQueryError {
     /// An error from the client side rather than from BigQuery: authentication, the token source,
-    /// channel setup, etc.
+    /// channel setup, etc., or a response from BigQuery that the crate cannot use.
     SystemError(BigQuerySystemError),
     /// An error reported by BigQuery that has no more specific variant.
     DatabaseError(BigQueryDatabaseError),
@@ -53,10 +54,96 @@ impl BigQueryError {
         ))
     }
 
+    /// Builds a [`SystemError`](BigQueryError::SystemError) with a crate-defined `code`.
+    pub(crate) fn system(code: &str, message: impl Into<String>) -> Self {
+        BigQueryError::SystemError(BigQuerySystemError::new(
+            BigQueryErrorPublicGenericDetails::new(code.to_string()),
+            message.into(),
+        ))
+    }
+
+    /// Builds a [`SystemError`](BigQueryError::SystemError) with the code `UNEXPECTED_RESPONSE`,
+    /// for a response from BigQuery that the crate cannot use: a field it requires left out, or
+    /// a form it did not ask for. It is not the caller's input that is wrong.
+    pub(crate) fn unexpected_response(message: impl Into<String>) -> Self {
+        Self::system("UNEXPECTED_RESPONSE", message)
+    }
+
+    /// Builds a [`DatabaseError`](BigQueryError::DatabaseError) under the gRPC `code`.
+    pub(crate) fn database(code: Code, details: impl Into<String>, retry_possible: bool) -> Self {
+        Self::database_with_code(&code_name(code), details, retry_possible)
+    }
+
+    /// Builds a [`DatabaseError`](BigQueryError::DatabaseError) under a crate-defined `code`,
+    /// for a failure below gRPC.
+    fn database_with_code(code: &str, details: impl Into<String>, retry_possible: bool) -> Self {
+        BigQueryError::DatabaseError(BigQueryDatabaseError::new(
+            BigQueryErrorPublicGenericDetails::new(code.to_string()),
+            details.into(),
+            retry_possible,
+        ))
+    }
+
+    /// Builds a [`SchemaMismatchError`](BigQueryError::SchemaMismatchError) on `table`.
+    pub(crate) fn schema_mismatch(
+        code: &str,
+        table: BigQueryTableRef,
+        details: impl Into<String>,
+    ) -> Self {
+        BigQueryError::SchemaMismatchError(BigQuerySchemaMismatchError::new(
+            BigQueryErrorPublicGenericDetails::new(code.to_string()),
+            table,
+            details.into(),
+        ))
+    }
+
+    /// Builds a [`WriteStreamError`](BigQueryError::WriteStreamError) on the write stream named
+    /// `stream`.
+    pub(crate) fn write_stream(
+        code: &str,
+        stream: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
+        BigQueryError::WriteStreamError(BigQueryWriteStreamError::new(
+            BigQueryErrorPublicGenericDetails::new(code.to_string()),
+            stream.into(),
+            details.into(),
+        ))
+    }
+
+    /// Whether this is a [`DatabaseError`](BigQueryError::DatabaseError) that BigQuery reported
+    /// under the gRPC `code`.
+    pub(crate) fn has_code(&self, code: Code) -> bool {
+        matches!(self, BigQueryError::DatabaseError(err) if err.public.code == code_name(code))
+    }
+
+    /// Turns the `FAILED_PRECONDITION` that BigQuery sends for a write whose `if-match` etag is
+    /// stale into a [`DataConflictError`](BigQueryError::DataConflictError). `stale` says what
+    /// changed and what the caller should do; BigQuery's own message follows it. Any other
+    /// error is returned as it is.
+    pub(crate) fn on_stale_etag(self, stale: impl FnOnce() -> String) -> Self {
+        match self {
+            BigQueryError::DatabaseError(err)
+                if err.public.code == code_name(Code::FailedPrecondition) =>
+            {
+                BigQueryError::DataConflictError(BigQueryDataConflictError::new(
+                    err.public,
+                    format!("{} {}", stale(), err.details),
+                ))
+            }
+            other => other,
+        }
+    }
+
     /// Whether sending the same request again might succeed.
     pub fn retry_possible(&self) -> bool {
         matches!(self, BigQueryError::DatabaseError(err) if err.retry_possible)
     }
+}
+
+/// The name a gRPC code is reported under in [`BigQueryErrorPublicGenericDetails::code`].
+pub(crate) fn code_name(code: Code) -> String {
+    format!("{code:?}")
 }
 
 impl Display for BigQueryError {
@@ -480,26 +567,26 @@ impl From<gcloud_sdk::error::Error> for BigQueryError {
 
 impl From<gcloud_sdk::tonic::Status> for BigQueryError {
     fn from(status: gcloud_sdk::tonic::Status) -> Self {
-        use gcloud_sdk::tonic::Code;
-        match status.code() {
+        let code = status.code();
+        match code {
             Code::AlreadyExists => {
                 BigQueryError::DataConflictError(BigQueryDataConflictError::new(
-                    BigQueryErrorPublicGenericDetails::new(format!("{:?}", status.code())),
+                    BigQueryErrorPublicGenericDetails::new(code_name(code)),
                     format!("{status}"),
                 ))
             }
             Code::NotFound => BigQueryError::DataNotFoundError(BigQueryDataNotFoundError::new(
-                BigQueryErrorPublicGenericDetails::new(format!("{:?}", status.code())),
+                BigQueryErrorPublicGenericDetails::new(code_name(code)),
                 format!("{status}"),
             )),
             Code::Aborted | Code::Unavailable | Code::ResourceExhausted | Code::Internal => {
-                database_error(&status, format!("{status}"), true)
+                Self::database(code, format!("{status}"), true)
             }
             Code::PermissionDenied | Code::InvalidArgument if is_rate_limit(&status) => {
-                database_error(&status, format!("{status}"), true)
+                Self::database(code, format!("{status}"), true)
             }
             Code::Unknown => check_hyper_errors(status),
-            _ => database_error(&status, format!("{status}"), false),
+            _ => Self::database(code, format!("{status}"), false),
         }
     }
 }
@@ -524,48 +611,27 @@ fn check_hyper_errors(status: gcloud_sdk::tonic::Status) -> BigQueryError {
     let hyper_error = status
         .source()
         .and_then(|source| source.downcast_ref::<hyper::Error>());
+    let lost = |code: &str, err: &hyper::Error| {
+        BigQueryError::database_with_code(code, format!("Hyper error: {err}"), true)
+    };
     match hyper_error {
-        Some(err) if err.is_closed() => connection_error("CONNECTION_CLOSED", err),
-        Some(err) if err.is_timeout() => connection_error("CONNECTION_TIMEOUT", err),
+        Some(err) if err.is_closed() => lost("CONNECTION_CLOSED", err),
+        Some(err) if err.is_timeout() => lost("CONNECTION_TIMEOUT", err),
         Some(err) if err.is_user() || err.is_parse() => {
-            database_error(&status, format!("Hyper error: {err}"), false)
+            BigQueryError::database(status.code(), format!("Hyper error: {err}"), false)
         }
-        Some(err) => connection_error("CONNECTION_LOST", err),
+        Some(err) => lost("CONNECTION_LOST", err),
         None if status.message().contains("transport error") => {
-            BigQueryError::DatabaseError(BigQueryDatabaseError::new(
-                BigQueryErrorPublicGenericDetails::new("CONNECTION_ERROR".into()),
-                format!("{status}"),
-                true,
-            ))
+            BigQueryError::database_with_code("CONNECTION_ERROR", format!("{status}"), true)
         }
-        None => database_error(&status, format!("{status}"), false),
+        None => BigQueryError::database(status.code(), format!("{status}"), false),
     }
-}
-
-fn connection_error(code: &str, err: &hyper::Error) -> BigQueryError {
-    BigQueryError::DatabaseError(BigQueryDatabaseError::new(
-        BigQueryErrorPublicGenericDetails::new(code.into()),
-        format!("Hyper error: {err}"),
-        true,
-    ))
-}
-
-fn database_error(
-    status: &gcloud_sdk::tonic::Status,
-    details: String,
-    retry_possible: bool,
-) -> BigQueryError {
-    BigQueryError::DatabaseError(BigQueryDatabaseError::new(
-        BigQueryErrorPublicGenericDetails::new(format!("{:?}", status.code())),
-        details,
-        retry_possible,
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gcloud_sdk::tonic::{Code, Status};
+    use gcloud_sdk::tonic::Status;
 
     fn classify(code: Code, message: &str) -> BigQueryError {
         BigQueryError::from(Status::new(code, message))

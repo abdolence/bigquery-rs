@@ -80,14 +80,6 @@ impl BqKind {
                 | BqKind::Timestamp
         )
     }
-
-    /// Whether the temporal wrappers' integer form applies to this kind.
-    pub(crate) fn is_temporal(self) -> bool {
-        matches!(
-            self,
-            BqKind::Date | BqKind::Time | BqKind::DateTime | BqKind::Timestamp
-        )
-    }
 }
 
 fn classify(data_type: &DataType, metadata: &Metadata) -> Option<BqKind> {

@@ -305,12 +305,11 @@ impl Official {
     }
 
     async fn run(&mut self, request: &Request) -> anyhow::Result<Outcome> {
-        use scenario::*;
-        match request.scenario.as_str() {
-            QUERY_CONST => self.typed_query::<SmallRow>(SQL_CONST.to_string()).await,
-            QUERY_1K => self.typed_query::<Row1k>(sql_1k()).await,
-            QUERY_200K_ROWS => self.typed_query::<Row200k>(sql_200k()).await,
-            SCAN_ROWS => {
+        match request.scenario {
+            Scenario::QueryConst => self.typed_query::<SmallRow>(SQL_CONST.to_string()).await,
+            Scenario::Query1k => self.typed_query::<Row1k>(sql_1k()).await,
+            Scenario::Query200kRows => self.typed_query::<Row200k>(sql_200k()).await,
+            Scenario::ScanRows => {
                 let sql = format!(
                     "SELECT * FROM `{}.{}.{SCAN_TABLE}`",
                     self.args.project, self.args.dataset
@@ -319,16 +318,15 @@ impl Official {
                 outcome.path = Some("rest_json_pages_select_star".into());
                 Ok(outcome)
             }
-            SCAN_ARROW => self.scan_arrow().await,
-            WRITE => self.write().await,
-            QUERY_200K_ARROW => anyhow::bail!(
+            Scenario::ScanArrow => self.scan_arrow().await,
+            Scenario::Write => self.write().await,
+            Scenario::Query200kArrow => anyhow::bail!(
                 "n/a: the query client returns JSON rows only; it has no Arrow result path"
             ),
-            DECODE => anyhow::bail!(
+            Scenario::Decode => anyhow::bail!(
                 "n/a: FromRow converts the JSON rows of a live query (Row has no public \
                  constructor), and there is no Arrow to struct decoder"
             ),
-            other => anyhow::bail!("n/a: no such scenario for this client: {other}"),
         }
     }
 }

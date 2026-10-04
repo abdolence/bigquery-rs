@@ -35,6 +35,35 @@ impl CodecError {
         }
     }
 
+    /// A Rust form the column's type does not accept, in either direction.
+    pub(crate) fn type_mismatch(message: impl Into<String>) -> Self {
+        Self::new(BigQueryCodecErrorKind::TypeMismatch, message)
+    }
+
+    /// A value outside the BigQuery type or outside the Rust target.
+    pub(crate) fn out_of_range(message: impl Into<String>) -> Self {
+        Self::new(BigQueryCodecErrorKind::OutOfRange, message)
+    }
+
+    /// A text form that does not parse.
+    pub(crate) fn invalid_text(message: impl Into<String>) -> Self {
+        Self::new(BigQueryCodecErrorKind::InvalidText, message)
+    }
+
+    /// A column type or mode the crate does not handle.
+    pub(crate) fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(BigQueryCodecErrorKind::UnsupportedType, message)
+    }
+
+    /// A column whose Arrow type BigQuery does not send, so the decoder has no reading for it.
+    pub(crate) fn unsupported_arrow_type(field: &arrow_schema::Field) -> Self {
+        Self::unsupported(format!(
+            "column `{}` has Arrow type {}, which BigQuery does not send",
+            field.name(),
+            field.data_type()
+        ))
+    }
+
     pub(crate) fn kind(&self) -> BigQueryCodecErrorKind {
         self.kind
     }

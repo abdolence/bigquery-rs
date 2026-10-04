@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 
 mod common;
 mod read_common;
-use common::TestResult;
-use read_common::{with_scratch, Scratch};
+use common::{with_scratch, Scratch, TestResult};
+use read_common::run_sql;
 
 /// One column per type and mode: `n_<type>` NULLABLE, `r_<type>` REQUIRED, `a_<type>`
 /// REPEATED, with the NULLABLE value, the REQUIRED value, the array, and the GoogleSQL type.
@@ -403,7 +403,7 @@ fn expected(id: i64) -> AllTypes {
 #[tokio::test]
 async fn read_every_type_and_mode() -> TestResult {
     with_scratch("read_every_type_and_mode", async |s: &Scratch| {
-        s.sql(&all_types_sql()).await?;
+        run_sql(s, &all_types_sql()).await?;
         let table = s.dataset.table(BigQueryTableId::from_static("t_all"));
         let mut rows: Vec<AllTypes> =
             s.db.fluent()
@@ -454,7 +454,7 @@ async fn read_projection_and_row_restriction() -> TestResult {
     with_scratch(
         "read_projection_and_row_restriction",
         async |s: &Scratch| {
-            s.sql(PEOPLE_SQL).await?;
+            run_sql(s, PEOPLE_SQL).await?;
             let table = s.dataset.table(BigQueryTableId::from_static("people"));
 
             let recent: BTreeSet<Person> =
@@ -516,9 +516,9 @@ async fn read_projection_and_row_restriction() -> TestResult {
 async fn read_streams_merge() -> TestResult {
     with_scratch("read_streams_merge", async |s: &Scratch| {
         // Separate statements leave separate storage files, which the session can split.
-        s.sql("CREATE TABLE parts (id INT64, county STRING)").await?;
+        run_sql(s, "CREATE TABLE parts (id INT64, county STRING)").await?;
         for part in 0..4 {
-            s.sql(&format!(
+            run_sql(s, &format!(
                 "INSERT INTO parts SELECT {part} * 10 + n, 'Gotland' FROM UNNEST(GENERATE_ARRAY(1, 10)) AS n"
             ))
             .await?;

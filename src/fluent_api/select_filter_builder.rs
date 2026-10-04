@@ -7,8 +7,8 @@
 //!
 //! Start from [`BigQuerySelectBuilder::filter`](crate::BigQuerySelectBuilder::filter).
 
-use crate::errors::{BigQueryInvalidParametersError, BigQueryInvalidParametersPublicDetails};
-use crate::query::{literal_of, ParamFailure};
+use crate::errors::BigQueryError;
+use crate::query::literal_of;
 use crate::sql::{ColumnPath, SqlLiteral};
 use serde::Serialize;
 
@@ -80,7 +80,10 @@ impl BigQueryFilterBuilder {
     /// before any request; BigQuery checks the rest of its column name rules itself.
     pub fn field<S: AsRef<str>>(&self, column: S) -> BigQueryFilterFieldExpr {
         BigQueryFilterFieldExpr {
-            column: column.as_ref().parse().map_err(ParamFailure::Invalid),
+            column: column
+                .as_ref()
+                .parse()
+                .map_err(BigQueryError::InvalidParametersError),
         }
     }
 }
@@ -88,7 +91,7 @@ impl BigQueryFilterBuilder {
 /// A row filter from [`BigQueryFilterBuilder`]. It holds the first error any of its parts
 /// met, which the read's terminal returns.
 #[derive(Clone, Debug)]
-pub struct BigQueryFilter(Result<FilterExpr, ParamFailure>);
+pub struct BigQueryFilter(Result<FilterExpr, BigQueryError>);
 
 impl BigQueryFilter {
     fn combine<I>(conditions: I, op: fn(Vec<FilterExpr>) -> FilterExpr) -> Option<Self>
@@ -111,7 +114,7 @@ impl BigQueryFilter {
     }
 
     /// The `row_restriction` text.
-    pub(crate) fn into_row_restriction(self) -> Result<String, ParamFailure> {
+    pub(crate) fn into_row_restriction(self) -> Result<String, BigQueryError> {
         Ok(self.0?.to_string())
     }
 }
@@ -146,22 +149,20 @@ impl<F: BigQueryFilterExpr> BigQueryFilterExpr for Option<F> {
 /// compare with [`is_null`](Self::is_null) instead.
 #[derive(Clone, Debug)]
 pub struct BigQueryFilterFieldExpr {
-    column: Result<ColumnPath, ParamFailure>,
+    column: Result<ColumnPath, BigQueryError>,
 }
 
 impl BigQueryFilterFieldExpr {
     fn compare<V: Serialize + ?Sized>(self, op: CompareOp, value: &V) -> Option<BigQueryFilter> {
         let expr = self.column.and_then(|column| {
             let value = literal_of(&column.to_string(), value)?.ok_or_else(|| {
-                ParamFailure::Invalid(BigQueryInvalidParametersError::new(
-                    BigQueryInvalidParametersPublicDetails::new(
-                        column.to_string(),
-                        format!(
-                            "`{column} {} NULL` matches no row; use is_null or is_not_null",
-                            op.sql()
-                        ),
+                BigQueryError::invalid_parameters(
+                    column.to_string(),
+                    format!(
+                        "`{column} {} NULL` matches no row; use is_null or is_not_null",
+                        op.sql()
                     ),
-                ))
+                )
             })?;
             Ok(FilterExpr::Compare { column, op, value })
         });
@@ -179,15 +180,13 @@ impl BigQueryFilterFieldExpr {
                 .into_iter()
                 .map(|v| {
                     literal_of(&name, &v)?.ok_or_else(|| {
-                        ParamFailure::Invalid(BigQueryInvalidParametersError::new(
-                            BigQueryInvalidParametersPublicDetails::new(
-                                name.clone(),
-                                format!(
-                                    "a NULL in the list of `{name} IN (..)` matches no row; \
+                        BigQueryError::invalid_parameters(
+                            name.clone(),
+                            format!(
+                                "a NULL in the list of `{name} IN (..)` matches no row; \
                                      combine with is_null instead"
-                                ),
                             ),
-                        ))
+                        )
                     })
                 })
                 .collect::<Result<_, _>>()?;

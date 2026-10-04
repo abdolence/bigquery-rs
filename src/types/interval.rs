@@ -24,10 +24,6 @@ pub struct BigQueryInterval {
     pub nanos: i64,
 }
 
-fn out_of_range(message: String) -> CodecError {
-    CodecError::new(BigQueryCodecErrorKind::OutOfRange, message)
-}
-
 impl BigQueryInterval {
     /// BigQuery's canonical text, `[-]Y-M [-]D [-]H:M:S[.ffffff]`, the one form Storage Write
     /// was seen to accept. Sub-microsecond nanoseconds are not printed.
@@ -63,7 +59,7 @@ impl BigQueryInterval {
                 return Err(bad());
             }
             p.parse::<i64>()
-                .map_err(|_| out_of_range(format!("INTERVAL `{s}` is out of range")))
+                .map_err(|_| CodecError::out_of_range(format!("INTERVAL `{s}` is out of range")))
         };
         let (year_sign, ym) = split_sign(ym);
         let (y, mo) = ym.split_once('-').ok_or_else(bad)?;
@@ -90,7 +86,7 @@ impl BigQueryInterval {
         };
         let (h, mi, sec) = (unsigned(h)?, unsigned(mi)?, unsigned(sec)?);
         let too_long = || {
-            out_of_range(format!(
+            CodecError::out_of_range(format!(
                 "INTERVAL `{s}`: the time part does not fit in i64 nanoseconds"
             ))
         };
@@ -104,7 +100,7 @@ impl BigQueryInterval {
             .ok_or_else(too_long)?;
         let narrow = |v: Option<i64>| {
             v.and_then(|v| i32::try_from(v).ok())
-                .ok_or_else(|| out_of_range(format!("INTERVAL `{s}` is out of range")))
+                .ok_or_else(|| CodecError::out_of_range(format!("INTERVAL `{s}` is out of range")))
         };
         Ok(BigQueryInterval {
             months: narrow(months)?,
@@ -133,13 +129,14 @@ impl TryFrom<BigQueryInterval> for jiff::Span {
             iv.nanos.signum(),
         ];
         if signs.contains(&1) && signs.contains(&-1) {
-            return Err(out_of_range(format!(
+            return Err(CodecError::out_of_range(format!(
                 "{iv:?} has parts of both signs, which a jiff::Span cannot hold"
             ))
             .into_deserialize());
         }
         let beyond = |err: jiff::Error| {
-            out_of_range(format!("{iv:?} does not fit a jiff::Span: {err}")).into_deserialize()
+            CodecError::out_of_range(format!("{iv:?} does not fit a jiff::Span: {err}"))
+                .into_deserialize()
         };
         jiff::Span::new()
             .try_months(iv.months)
@@ -156,8 +153,10 @@ impl TryFrom<jiff::Span> for BigQueryInterval {
     type Error = BigQueryError;
 
     fn try_from(span: jiff::Span) -> Result<Self, Self::Error> {
-        let beyond =
-            || out_of_range(format!("{span} does not fit a BigQuery INTERVAL")).into_serialize();
+        let beyond = || {
+            CodecError::out_of_range(format!("{span} does not fit a BigQuery INTERVAL"))
+                .into_serialize()
+        };
         let months = i64::from(span.get_years()) * 12 + i64::from(span.get_months());
         let days = i64::from(span.get_weeks()) * 7 + i64::from(span.get_days());
         let nanos = i128::from(span.get_hours()) * 3_600 * i128::from(NANOS_PER_SECOND)

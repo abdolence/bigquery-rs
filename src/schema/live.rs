@@ -1,9 +1,14 @@
 //! A table as `GetTable` returns it, in the terms the diff compares.
 
+use crate::db::proto::{duration_ms, timestamp_ms, NonEmpty};
 use crate::errors::BigQueryError;
 use crate::BigQueryLabels;
-use crate::{BigQueryPartitionUnit, BigQueryPartitioning, BigQueryResult, BigQueryTableSchema};
+use crate::{
+    BigQueryInstant, BigQueryPartitionUnit, BigQueryPartitioning, BigQueryResult,
+    BigQueryTableSchema,
+};
 use gcloud_sdk::google::cloud::bigquery::v2;
+use std::time::Duration;
 
 /// A table's current state, with the raw `GetTable` body kept for the patch and update bodies,
 /// which must carry everything the crate does not model (policy tags, collation, foreign keys)
@@ -13,12 +18,12 @@ pub(crate) struct LiveTable {
     pub raw: v2::Table,
     pub schema: BigQueryTableSchema,
     pub partitioning: Option<BigQueryPartitioning>,
-    pub partition_expiration_ms: Option<i64>,
+    pub partition_expiration: Option<Duration>,
     pub clustering: Vec<String>,
     pub primary_key: Option<Vec<String>>,
     pub description: Option<String>,
     pub labels: BigQueryLabels,
-    pub expiration_ms: Option<i64>,
+    pub expiration: Option<BigQueryInstant>,
     pub num_rows: Option<u64>,
     pub num_bytes: Option<i64>,
 }
@@ -32,19 +37,6 @@ fn unsupported(table: &v2::Table, what: String) -> BigQueryError {
     BigQueryError::invalid_parameters("table", format!("{id}: {what}"))
 }
 
-fn partition_unit(table: &v2::Table, name: &str) -> BigQueryResult<BigQueryPartitionUnit> {
-    match name {
-        "HOUR" => Ok(BigQueryPartitionUnit::Hour),
-        "DAY" => Ok(BigQueryPartitionUnit::Day),
-        "MONTH" => Ok(BigQueryPartitionUnit::Month),
-        "YEAR" => Ok(BigQueryPartitionUnit::Year),
-        other => Err(unsupported(
-            table,
-            format!("time partitioning type {other:?} is not supported"),
-        )),
-    }
-}
-
 fn range_bound(table: &v2::Table, what: &str, text: &str) -> BigQueryResult<i64> {
     text.parse().map_err(|_| {
         unsupported(
@@ -54,21 +46,29 @@ fn range_bound(table: &v2::Table, what: &str, text: &str) -> BigQueryResult<i64>
     })
 }
 
-/// The partitioning of `raw` and its partition expiration in milliseconds, as the crate models
-/// them.
+/// The partitioning of `raw` and its partition expiration, as the crate models them.
 ///
 /// # Errors
-/// [`BigQueryError::InvalidParametersError`] for partitioning the crate does not model.
+/// [`BigQueryError::InvalidParametersError`] for partitioning the crate does not model, and
+/// [`BigQueryError::DeserializeError`] for a partition expiration that is not a duration.
 pub(crate) fn table_partitioning(
     raw: &v2::Table,
-) -> BigQueryResult<(Option<BigQueryPartitioning>, Option<i64>)> {
+) -> BigQueryResult<(Option<BigQueryPartitioning>, Option<Duration>)> {
     Ok(match (&raw.time_partitioning, &raw.range_partitioning) {
         (Some(time), _) => (
             Some(BigQueryPartitioning::Time {
-                unit: partition_unit(raw, &time.r#type)?,
-                column: time.field.clone().filter(|f| !f.is_empty()),
+                unit: BigQueryPartitionUnit::parse(&time.r#type).ok_or_else(|| {
+                    unsupported(
+                        raw,
+                        format!("time partitioning type {:?} is not supported", time.r#type),
+                    )
+                })?,
+                column: time.field.clone().and_then(NonEmpty::non_empty),
             }),
-            time.expiration_ms.filter(|ms| *ms > 0),
+            duration_ms(
+                "time_partitioning.expiration_ms",
+                time.expiration_ms.filter(|ms| *ms > 0),
+            )?,
         ),
         (None, Some(range)) => {
             let bounds = range.range.clone().unwrap_or_default();
@@ -89,7 +89,8 @@ pub(crate) fn table_partitioning(
 /// # Errors
 /// [`BigQueryError::InvalidParametersError`] for a view, a materialized view or an external
 /// table, which a declaration cannot own, and for partitioning the crate does not model; a
-/// column type the crate does not handle is a [`BigQueryError::DeserializeError`].
+/// column type the crate does not handle, or an expiration out of range, is a
+/// [`BigQueryError::DeserializeError`].
 impl TryFrom<v2::Table> for LiveTable {
     type Error = BigQueryError;
 
@@ -106,11 +107,15 @@ impl TryFrom<v2::Table> for LiveTable {
             .map(BigQueryTableSchema::try_from)
             .transpose()?
             .unwrap_or(BigQueryTableSchema { fields: Vec::new() });
-        let (partitioning, partition_expiration_ms) = table_partitioning(&raw)?;
+        let (partitioning, partition_expiration) = table_partitioning(&raw)?;
+        let expiration = match raw.expiration_time.filter(|ms| *ms > 0) {
+            Some(ms) => timestamp_ms("expiration_time", ms)?,
+            None => None,
+        };
         Ok(Self {
             schema,
             partitioning,
-            partition_expiration_ms,
+            partition_expiration,
             clustering: raw
                 .clustering
                 .as_ref()
@@ -121,10 +126,10 @@ impl TryFrom<v2::Table> for LiveTable {
                 .as_ref()
                 .and_then(|c| c.primary_key.as_ref())
                 .map(|k| k.columns.clone())
-                .filter(|columns| !columns.is_empty()),
-            description: raw.description.clone().filter(|d| !d.is_empty()),
+                .and_then(NonEmpty::non_empty),
+            description: raw.description.clone().and_then(NonEmpty::non_empty),
             labels: raw.labels.clone().into_iter().collect(),
-            expiration_ms: raw.expiration_time.filter(|ms| *ms > 0),
+            expiration,
             num_rows: raw.num_rows,
             num_bytes: raw.num_bytes,
             raw,

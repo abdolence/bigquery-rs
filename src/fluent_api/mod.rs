@@ -3,9 +3,7 @@
 //! Start from [`BigQueryDb::fluent()`](crate::BigQueryDb::fluent).
 
 use crate::{BigQueryDb, BigQueryQueryParams};
-use crate::{
-    BigQueryQuerySupport, BigQueryReadSupport, BigQuerySchemaSupport, BigQueryWriteSupport,
-};
+use crate::{BigQueryQuerySupport, BigQueryReadSupport, BigQueryWriteSupport};
 
 mod dataset_builder;
 mod insert_builder;
@@ -74,10 +72,7 @@ where
     }
 }
 
-impl<'a, D> BigQueryExprBuilder<'a, D>
-where
-    D: BigQuerySchemaSupport + Clone + Send + Sync + 'static,
-{
+impl<'a> BigQueryExprBuilder<'a, BigQueryDb> {
     /// Starts a schema declaration. Continue with `.table()` to declare one table's columns
     /// and settings, then `.plan()` or `.sync()`.
     ///
@@ -114,7 +109,7 @@ where
     /// # }
     /// ```
     #[inline]
-    pub fn schema(self) -> BigQuerySchemaBuilder<'a, D> {
+    pub fn schema(self) -> BigQuerySchemaBuilder<'a> {
         BigQuerySchemaBuilder::new(self.db)
     }
 }

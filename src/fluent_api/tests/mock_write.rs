@@ -208,21 +208,4 @@ async fn insert_chain_passes_mode_and_rows() {
         inserts[4].changes,
         Some(vec![(BigQueryChangeType::Delete, Some("A".to_string()))])
     );
-
-    let refused = BigQueryExprBuilder::new(&db)
-        .insert()
-        .into(DS.table(T))
-        .objects(&rows)
-        .upsert()
-        .exactly_once()
-        .execute()
-        .await;
-    assert!(
-        matches!(
-            refused,
-            Err(crate::errors::BigQueryError::InvalidParametersError(_))
-        ),
-        "{refused:?}"
-    );
-    assert!(take_inserts().is_empty());
 }

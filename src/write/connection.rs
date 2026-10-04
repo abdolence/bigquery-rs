@@ -11,12 +11,11 @@
 //! `ABORTED`), and sends them again at their new offsets once nothing is in flight.
 
 use crate::errors::{
-    BigQueryError, BigQueryErrorPublicGenericDetails, BigQueryRowError, BigQueryRowErrors,
-    BigQuerySchemaMismatchError, BigQuerySystemError, BigQueryWriteStreamError,
+    code_name, BigQueryError, BigQueryErrorPublicGenericDetails, BigQueryRowError,
+    BigQueryRowErrors,
 };
 use crate::write::batch::{append_request, Batch, Batcher, RequestTarget};
 use crate::write::descriptor::WritePlan;
-use crate::write::writer::{batch_commit, finalize_write_stream, get_write_stream};
 use crate::{
     BigQueryDb, BigQueryResult, BigQueryTableRef, BigQueryTableSchema, BigQueryWriteMode,
     BigQueryWriteResponse, BigQueryWriteSummary,
@@ -142,33 +141,8 @@ impl Shared {
     }
 }
 
-/// A copy of `err`, since one failure is reported to every batch and call it ends.
-pub(crate) fn clone_error(err: &BigQueryError) -> BigQueryError {
-    match err {
-        BigQueryError::SystemError(e) => BigQueryError::SystemError(e.clone()),
-        BigQueryError::DatabaseError(e) => BigQueryError::DatabaseError(e.clone()),
-        BigQueryError::DataConflictError(e) => BigQueryError::DataConflictError(e.clone()),
-        BigQueryError::DataNotFoundError(e) => BigQueryError::DataNotFoundError(e.clone()),
-        BigQueryError::InvalidParametersError(e) => {
-            BigQueryError::InvalidParametersError(e.clone())
-        }
-        BigQueryError::SerializeError(e) => BigQueryError::SerializeError(e.clone()),
-        BigQueryError::DeserializeError(e) => BigQueryError::DeserializeError(e.clone()),
-        BigQueryError::RowErrors(e) => BigQueryError::RowErrors(e.clone()),
-        BigQueryError::SchemaMismatchError(e) => BigQueryError::SchemaMismatchError(e.clone()),
-        BigQueryError::WriteStreamError(e) => BigQueryError::WriteStreamError(e.clone()),
-        BigQueryError::JobError(e) => BigQueryError::JobError(e.clone()),
-        BigQueryError::SchemaChangeRefused(e) => BigQueryError::SchemaChangeRefused(e.clone()),
-    }
-}
-
 /// The error for a writer whose task is gone, which only happens if it panicked.
-pub(crate) fn task_ended() -> BigQueryError {
-    BigQueryError::SystemError(BigQuerySystemError::new(
-        BigQueryErrorPublicGenericDetails::new("WRITER_TASK_ENDED".into()),
-        "the streaming writer's background task ended unexpectedly".into(),
-    ))
-}
+pub(crate) const TASK_ENDED: &str = "the streaming writer's background task ended unexpectedly";
 
 /// The `StorageError` BigQuery attaches to an in-band append error.
 fn storage_error(status: &gcloud_sdk::google::rpc::Status) -> Option<StorageError> {
@@ -338,7 +312,7 @@ impl ConnectionTask {
             self.batches += 1;
             match &self.fatal {
                 Some(err) => {
-                    let err = clone_error(err);
+                    let err = err.clone();
                     self.fail_batch(batch, err);
                 }
                 None => self.queue.push_back(batch),
@@ -359,7 +333,7 @@ impl ConnectionTask {
         }
         for waiter in self.flush_waiters.drain(..) {
             let answer = match &self.fatal {
-                Some(err) => Err(clone_error(err)),
+                Some(err) => Err(err.clone()),
                 None => Ok(()),
             };
             let _ = waiter.send(answer);
@@ -557,13 +531,11 @@ impl ConnectionTask {
                 self.requeue(sent, Status::new(code, status.message));
             }
             _ if schema_mismatch => {
-                let err = BigQueryError::SchemaMismatchError(BigQuerySchemaMismatchError::new(
-                    BigQueryErrorPublicGenericDetails::new(
-                        S::SchemaMismatchExtraFields.as_str_name().into(),
-                    ),
+                let err = BigQueryError::schema_mismatch(
+                    S::SchemaMismatchExtraFields.as_str_name(),
                     self.settings.table.clone(),
                     status.message,
-                ));
+                );
                 self.batch_not_written(sent, err);
                 self.refresh_schema().await;
             }
@@ -579,12 +551,10 @@ impl ConnectionTask {
                 _,
             ) => {
                 self.inflight.push_front(sent);
-                self.fail_writer(BigQueryError::WriteStreamError(
-                    BigQueryWriteStreamError::new(
-                        BigQueryErrorPublicGenericDetails::new(storage.as_str_name().into()),
-                        self.settings.target.write_stream.clone(),
-                        status.message,
-                    ),
+                self.fail_writer(BigQueryError::write_stream(
+                    storage.as_str_name(),
+                    self.settings.target.write_stream.clone(),
+                    status.message,
                 ));
             }
             (Some(S::TableNotFound), _) => {
@@ -601,13 +571,12 @@ impl ConnectionTask {
     /// Reads the stream's schema again after BigQuery rejected the writer's, so the writer
     /// encodes the next rows against the table as it is now.
     async fn refresh_schema(&mut self) {
-        let fetched = get_write_stream(
-            &self.settings.db,
-            &self.settings.span,
-            &self.settings.target.write_stream,
-        )
-        .await
-        .and_then(|stream| crate::write::writer::stream_schema(&stream));
+        let fetched = self
+            .settings
+            .db
+            .get_write_stream(&self.settings.span, &self.settings.target.write_stream)
+            .await
+            .and_then(|stream| BigQueryTableSchema::try_from(&stream));
         match fetched {
             Ok(schema) => self.shared.lock().pending_schema = Some(schema),
             Err(err) => warn!(
@@ -678,11 +647,11 @@ impl ConnectionTask {
             .message()
             .contains("The proto field mismatched with BigQuery field")
         {
-            BigQueryError::SchemaMismatchError(BigQuerySchemaMismatchError::new(
-                BigQueryErrorPublicGenericDetails::new(format!("{:?}", status.code())),
+            BigQueryError::schema_mismatch(
+                &code_name(status.code()),
                 self.settings.table.clone(),
-                status.message().to_string(),
-            ))
+                status.message(),
+            )
         } else {
             BigQueryError::from(status)
         };
@@ -725,7 +694,7 @@ impl ConnectionTask {
         pending.extend(self.queue.drain(..));
         {
             let mut state = self.shared.lock();
-            state.failed = Some(clone_error(&err));
+            state.failed = Some(err.clone());
             self.shared.seal_locked(&mut state);
             let sealed: Vec<Batch> = state.sealed.drain(..).collect();
             drop(state);
@@ -733,7 +702,7 @@ impl ConnectionTask {
             pending.extend(sealed);
         }
         for batch in pending {
-            self.fail_batch(batch, clone_error(&err));
+            self.fail_batch(batch, err.clone());
         }
         self.fatal = Some(err);
         self.shared.capacity.notify_waiters();
@@ -742,7 +711,7 @@ impl ConnectionTask {
     fn fail_batch(&mut self, batch: Batch, err: BigQueryError) {
         self.rows_failed += batch.row_count();
         if self.first_error.is_none() {
-            self.first_error = Some(clone_error(&err));
+            self.first_error = Some(err.clone());
         }
         self.resolve(batch, Err(err));
     }
@@ -775,7 +744,7 @@ impl ConnectionTask {
             return;
         };
         let result = match &self.fatal {
-            Some(err) => Err(clone_error(err)),
+            Some(err) => Err(err.clone()),
             None => self.close_stream(kind).await,
         };
         let _ = waiter.send(result);
@@ -783,7 +752,7 @@ impl ConnectionTask {
 
     async fn close_stream(&mut self, kind: FinishKind) -> BigQueryResult<Finished> {
         let stream = self.settings.target.write_stream.clone();
-        let first_error = self.first_error.as_ref().map(clone_error);
+        let first_error = self.first_error.as_ref().cloned();
         match self.settings.mode {
             BigQueryWriteMode::Default => Ok(Finished {
                 summary: self.summary(None),
@@ -791,8 +760,11 @@ impl ConnectionTask {
                 finalized_rows: None,
             }),
             BigQueryWriteMode::Committed => {
-                let rows =
-                    finalize_write_stream(&self.settings.db, &self.settings.span, &stream).await?;
+                let rows = self
+                    .settings
+                    .db
+                    .finalize_write_stream(&self.settings.span, &stream)
+                    .await?;
                 Ok(Finished {
                     summary: self.summary(None),
                     first_error,
@@ -801,34 +773,36 @@ impl ConnectionTask {
             }
             BigQueryWriteMode::Pending => {
                 if self.rows_failed > 0 {
-                    return Err(BigQueryError::WriteStreamError(
-                        BigQueryWriteStreamError::new(
-                            BigQueryErrorPublicGenericDetails::new("NOT_COMMITTED".into()),
-                            stream,
-                            format!(
-                                "{} rows were in failed batches, so the pending stream was not \
+                    return Err(BigQueryError::write_stream(
+                        "NOT_COMMITTED",
+                        stream,
+                        format!(
+                            "{} rows were in failed batches, so the pending stream was not \
                              committed and none of its rows are visible; the first failure: {}",
-                                self.rows_failed,
-                                first_error
-                                    .as_ref()
-                                    .map(ToString::to_string)
-                                    .unwrap_or_default()
-                            ),
+                            self.rows_failed,
+                            first_error
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_default()
                         ),
                     ));
                 }
-                let rows =
-                    finalize_write_stream(&self.settings.db, &self.settings.span, &stream).await?;
+                let rows = self
+                    .settings
+                    .db
+                    .finalize_write_stream(&self.settings.span, &stream)
+                    .await?;
                 let commit_time = match kind {
                     FinishKind::Finalize => None,
                     FinishKind::Close => Some(
-                        batch_commit(
-                            &self.settings.db,
-                            &self.settings.span,
-                            &self.settings.table_path,
-                            vec![stream],
-                        )
-                        .await?,
+                        self.settings
+                            .db
+                            .batch_commit(
+                                &self.settings.span,
+                                &self.settings.table_path,
+                                vec![stream],
+                            )
+                            .await?,
                     ),
                 };
                 Ok(Finished {

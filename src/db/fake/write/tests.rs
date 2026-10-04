@@ -923,3 +923,28 @@ async fn dropped_writer_records_what_was_sent() {
     assert_eq!(fields["/bigquery/appends"], "1");
     assert_eq!(fields["/bigquery/rows_appended"], "1");
 }
+
+#[tokio::test]
+async fn an_upsert_outside_the_default_stream_is_refused_before_any_call() {
+    let fake = FakeBigQuery::start(|call: FakeCall| async move {
+        panic!("unexpected call {}", call.method());
+    })
+    .await;
+    let result = fake
+        .db
+        .fluent()
+        .insert()
+        .into(DS.table(T))
+        .objects(&[row(1)])
+        .upsert()
+        .exactly_once()
+        .execute()
+        .await;
+    match result {
+        Err(BigQueryError::InvalidParametersError(err)) => {
+            assert_eq!(err.public.field, "mode", "{err}");
+        }
+        other => panic!("expected the mode to be refused, got {other:?}"),
+    }
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}

@@ -1,7 +1,8 @@
 //! One vocabulary for the schemas that three sources name differently: the v2 API's legacy
 //! type strings, the Storage API's enums, and the physical types of an Arrow schema.
 
-use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
+use crate::db::proto::NonEmpty;
+use crate::errors::BigQueryError;
 use crate::types::error::CodecError;
 use crate::types::kind::BqKind;
 use crate::BigQueryResult;
@@ -90,6 +91,33 @@ pub enum BigQueryFieldMode {
     Repeated,
 }
 
+impl BigQueryFieldMode {
+    /// The name the v2 API and DDL use, as in `NULLABLE`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            BigQueryFieldMode::Nullable => "NULLABLE",
+            BigQueryFieldMode::Required => "REQUIRED",
+            BigQueryFieldMode::Repeated => "REPEATED",
+        }
+    }
+
+    /// The mode a v2 `mode` names, in any case. An empty one is NULLABLE, as DDL creates it.
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "" | "NULLABLE" => Some(BigQueryFieldMode::Nullable),
+            "REQUIRED" => Some(BigQueryFieldMode::Required),
+            "REPEATED" => Some(BigQueryFieldMode::Repeated),
+            _ => None,
+        }
+    }
+}
+
+impl Display for BigQueryFieldMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// One column, or one field of a STRUCT.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BigQueryFieldSchema {
@@ -113,15 +141,6 @@ pub struct BigQueryTableSchema {
     pub fields: Vec<BigQueryFieldSchema>,
 }
 
-fn unsupported(message: String) -> CodecError {
-    CodecError::new(BigQueryCodecErrorKind::UnsupportedType, message)
-}
-
-/// An empty optional string in a proto is unset.
-fn non_empty(s: &str) -> Option<String> {
-    (!s.is_empty()).then(|| s.to_string())
-}
-
 /// `max_length`, `precision` and `scale` as the proto carries them: 0 is unset.
 struct TypeParams {
     max_length: i64,
@@ -136,7 +155,7 @@ impl TypeParams {
             0 => Ok(None),
             n => u64::try_from(n)
                 .map(Some)
-                .map_err(|_| unsupported(format!("max_length {n} is negative"))),
+                .map_err(|_| CodecError::unsupported(format!("max_length {n} is negative"))),
         }
     }
 
@@ -145,7 +164,8 @@ impl TypeParams {
             return Ok(None);
         }
         let narrow = |what: &str, v: i64| {
-            u8::try_from(v).map_err(|_| unsupported(format!("{what} {v} is out of range")))
+            u8::try_from(v)
+                .map_err(|_| CodecError::unsupported(format!("{what} {v} is out of range")))
         };
         Ok(Some(BigQueryDecimalParams {
             precision: narrow("precision", self.precision)?,
@@ -156,22 +176,10 @@ impl TypeParams {
     fn timestamp(&self) -> Result<BigQueryFieldType, CodecError> {
         match self.timestamp_precision {
             None | Some(6) => Ok(BigQueryFieldType::Timestamp),
-            Some(p) => Err(unsupported(format!(
+            Some(p) => Err(CodecError::unsupported(format!(
                 "TIMESTAMP with timestamp_precision {p} is not supported, only 6"
             ))),
         }
-    }
-}
-
-fn range_element_from_name(name: Option<&str>) -> Result<BigQueryRangeElementType, CodecError> {
-    match name.map(str::to_ascii_uppercase).as_deref() {
-        Some("DATE") => Ok(BigQueryRangeElementType::Date),
-        Some("DATETIME") => Ok(BigQueryRangeElementType::DateTime),
-        Some("TIMESTAMP") => Ok(BigQueryRangeElementType::Timestamp),
-        Some(other) => Err(unsupported(format!("RANGE of {other} is not supported"))),
-        None => Err(unsupported(
-            "RANGE without a range_element_type".to_string(),
-        )),
     }
 }
 
@@ -205,8 +213,10 @@ fn field_from_v2(field: &v2::TableFieldSchema) -> Result<BigQueryFieldSchema, Co
         "JSON" => BigQueryFieldType::Json,
         "INTERVAL" => BigQueryFieldType::Interval,
         "RANGE" => BigQueryFieldType::Range(
-            range_element_from_name(field.range_element_type.as_ref().map(|e| e.r#type.as_str()))
-                .map_err(at)?,
+            BigQueryRangeElementType::parse(
+                field.range_element_type.as_ref().map(|e| e.r#type.as_str()),
+            )
+            .map_err(at)?,
         ),
         "RECORD" | "STRUCT" => BigQueryFieldType::Struct(
             field
@@ -217,36 +227,32 @@ fn field_from_v2(field: &v2::TableFieldSchema) -> Result<BigQueryFieldSchema, Co
                 .map_err(at)?,
         ),
         other => {
-            return Err(at(unsupported(format!(
+            return Err(at(CodecError::unsupported(format!(
                 "column type `{other}` is not supported"
             ))))
         }
     };
-    let mode = match field.mode.to_ascii_uppercase().as_str() {
-        "" | "NULLABLE" => BigQueryFieldMode::Nullable,
-        "REQUIRED" => BigQueryFieldMode::Required,
-        "REPEATED" => BigQueryFieldMode::Repeated,
-        other => {
-            return Err(at(unsupported(format!(
-                "column mode `{other}` is not supported"
-            ))))
-        }
-    };
+    let mode = BigQueryFieldMode::parse(&field.mode).ok_or_else(|| {
+        at(CodecError::unsupported(format!(
+            "column mode `{}` is not supported",
+            field.mode.to_ascii_uppercase()
+        )))
+    })?;
     Ok(BigQueryFieldSchema {
         name: field.name.clone(),
         field_type,
         mode,
-        description: field.description.as_deref().and_then(non_empty),
+        description: field.description.clone().and_then(NonEmpty::non_empty),
         default_value_expression: field
             .default_value_expression
-            .as_deref()
-            .and_then(non_empty),
+            .clone()
+            .and_then(NonEmpty::non_empty),
     })
 }
 
 fn storage_type(value: i32) -> Result<StorageType, CodecError> {
     match StorageType::try_from(value) {
-        Ok(StorageType::Unspecified) | Err(_) => Err(unsupported(format!(
+        Ok(StorageType::Unspecified) | Err(_) => Err(CodecError::unsupported(format!(
             "Storage API column type {value} is not supported"
         ))),
         Ok(ty) => Ok(ty),
@@ -290,7 +296,7 @@ fn field_from_storage(
                 .map(|e| storage_type(e.r#type).map(|ty| ty.as_str_name()))
                 .transpose()
                 .map_err(at)?;
-            BigQueryFieldType::Range(range_element_from_name(element).map_err(at)?)
+            BigQueryFieldType::Range(BigQueryRangeElementType::parse(element).map_err(at)?)
         }
         StorageType::Struct => BigQueryFieldType::Struct(
             field
@@ -300,14 +306,16 @@ fn field_from_storage(
                 .collect::<Result<_, _>>()
                 .map_err(at)?,
         ),
-        StorageType::Unspecified => return Err(at(unsupported("TYPE_UNSPECIFIED".to_string()))),
+        StorageType::Unspecified => {
+            return Err(at(CodecError::unsupported("TYPE_UNSPECIFIED".to_string())))
+        }
     };
     let mode = match StorageMode::try_from(field.mode) {
         Ok(StorageMode::Unspecified | StorageMode::Nullable) => BigQueryFieldMode::Nullable,
         Ok(StorageMode::Required) => BigQueryFieldMode::Required,
         Ok(StorageMode::Repeated) => BigQueryFieldMode::Repeated,
         Err(_) => {
-            return Err(at(unsupported(format!(
+            return Err(at(CodecError::unsupported(format!(
                 "Storage API column mode {} is not supported",
                 field.mode
             ))))
@@ -317,8 +325,8 @@ fn field_from_storage(
         name: field.name.clone(),
         field_type,
         mode,
-        description: non_empty(&field.description),
-        default_value_expression: non_empty(&field.default_value_expression),
+        description: field.description.clone().non_empty(),
+        default_value_expression: field.default_value_expression.clone().non_empty(),
     })
 }
 
@@ -361,12 +369,7 @@ impl From<&BigQueryFieldSchema> for v2::TableFieldSchema {
         let mut out = v2::TableFieldSchema {
             name: field.name.clone(),
             r#type: BqKind::from(&field.field_type).name().to_string(),
-            mode: match field.mode {
-                BigQueryFieldMode::Nullable => "NULLABLE",
-                BigQueryFieldMode::Required => "REQUIRED",
-                BigQueryFieldMode::Repeated => "REPEATED",
-            }
-            .to_string(),
+            mode: field.mode.name().to_string(),
             description: field.description.clone(),
             default_value_expression: field.default_value_expression.clone(),
             ..Default::default()
@@ -449,7 +452,7 @@ fn field_from_arrow(field: &Field) -> Result<BigQueryFieldSchema, CodecError> {
         ),
     };
     let kind = kind.ok_or_else(|| {
-        at(unsupported(format!(
+        at(CodecError::unsupported(format!(
             "Arrow type {} is not one BigQuery sends",
             element.data_type()
         )))
@@ -479,7 +482,7 @@ fn field_from_arrow(field: &Field) -> Result<BigQueryFieldSchema, CodecError> {
                     .map_err(at)?,
             ),
             other => {
-                return Err(at(unsupported(format!(
+                return Err(at(CodecError::unsupported(format!(
                     "Arrow type {other} is not a STRUCT"
                 ))))
             }
@@ -507,9 +510,27 @@ fn range_element_from_arrow(range: &Field) -> Result<BigQueryRangeElementType, C
         Some(DataType::Timestamp(TimeUnit::Microsecond, Some(_))) => {
             Ok(BigQueryRangeElementType::Timestamp)
         }
-        other => Err(unsupported(format!(
+        other => Err(CodecError::unsupported(format!(
             "a RANGE whose start is {other:?} is not one BigQuery sends"
         ))),
+    }
+}
+
+impl BigQueryRangeElementType {
+    /// The element type a v2 or Storage API `range_element_type` names, in any case; `None` is
+    /// a RANGE that names none.
+    fn parse(name: Option<&str>) -> Result<Self, CodecError> {
+        match name.map(str::to_ascii_uppercase).as_deref() {
+            Some("DATE") => Ok(BigQueryRangeElementType::Date),
+            Some("DATETIME") => Ok(BigQueryRangeElementType::DateTime),
+            Some("TIMESTAMP") => Ok(BigQueryRangeElementType::Timestamp),
+            Some(other) => Err(CodecError::unsupported(format!(
+                "RANGE of {other} is not supported"
+            ))),
+            None => Err(CodecError::unsupported(
+                "RANGE without a range_element_type",
+            )),
+        }
     }
 }
 

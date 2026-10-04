@@ -1,9 +1,10 @@
 //! The plan as a pure function of a declaration and the table `GetTable` returned, and the
 //! request bodies that carry it out.
 //!
-//! Nothing here performs I/O, so every diff class BigQuery was measured on
-//! (`docs/schema-probe-2026-10.md`) is a unit test.
+//! Nothing here performs I/O, so every class of change BigQuery was measured on is a unit
+//! test.
 
+use crate::db::proto::millis;
 use crate::schema::declaration::DeclaredColumn;
 use crate::schema::live::LiveTable;
 use crate::schema::plan::ChangeStep;
@@ -11,91 +12,93 @@ use crate::BigQueryLabels;
 use crate::{
     BigQueryDecimalParams, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType,
     BigQueryRecreate, BigQueryRecreateMethod, BigQueryRecreatePolicy, BigQueryRefusal,
-    BigQuerySchemaChange, BigQueryTableDeclaration, BigQueryTablePlan, BigQueryTableRef,
-    BigQueryTableTarget, BigQueryWithheldChange, BigQueryWithheldReason,
+    BigQueryResult, BigQuerySchemaChange, BigQueryTableDeclaration, BigQueryTablePlan,
+    BigQueryTableRef, BigQueryTableTarget, BigQueryWithheldChange, BigQueryWithheldReason,
 };
 use gcloud_sdk::google::cloud::bigquery::v2;
 use std::collections::HashSet;
 
-/// What `.sync()` would do to `table`, declared as `declaration`, given its current state;
-/// `None` when it does not exist. `row_access_policies` of a recreate are left empty for the
-/// caller to list.
-pub(crate) fn plan_table(
-    declaration: &BigQueryTableDeclaration,
-    table: BigQueryTableRef,
-    live: Option<&LiveTable>,
-) -> BigQueryTablePlan {
-    let mut plan = BigQueryTablePlan {
-        table,
-        create: None,
-        changes: Vec::new(),
-        withheld: Vec::new(),
-        recreate: None,
-        impossible: Vec::new(),
-        refusal: None,
-    };
-    let Some(live) = live else {
-        plan.create = Some(target(declaration, None));
-        return plan;
-    };
+impl BigQueryTableDeclaration {
+    /// What `.sync()` would do to `table`, declared as `declaration`, given its current state;
+    /// `None` when it does not exist. `row_access_policies` of a recreate are left empty for the
+    /// caller to list.
+    pub(crate) fn plan(
+        &self,
+        table: BigQueryTableRef,
+        live: Option<&LiveTable>,
+    ) -> BigQueryTablePlan {
+        let mut plan = BigQueryTablePlan {
+            table,
+            create: None,
+            changes: Vec::new(),
+            withheld: Vec::new(),
+            recreate: None,
+            impossible: Vec::new(),
+            refusal: None,
+        };
+        let Some(live) = live else {
+            plan.create = Some(self.target(None));
+            return plan;
+        };
 
-    let mut diff = Diff {
-        declaration,
-        changes: Vec::new(),
-        withheld: Vec::new(),
-        impossible: Vec::new(),
-    };
-    diff.columns(&live.schema.fields);
-    diff.settings(live);
-    // A stable sort keeps the column changes ahead of the table settings within a step.
-    diff.changes.sort_by_key(BigQuerySchemaChange::step);
-    plan.withheld = diff.withheld;
+        let mut diff = Diff {
+            declaration: self,
+            changes: Vec::new(),
+            withheld: Vec::new(),
+            impossible: Vec::new(),
+        };
+        diff.columns(&live.schema.fields);
+        diff.settings(live);
+        // A stable sort keeps the column changes ahead of the table settings within a step.
+        diff.changes.sort_by_key(BigQuerySchemaChange::step);
+        plan.withheld = diff.withheld;
 
-    if diff.impossible.is_empty() {
-        plan.changes = diff.changes;
-        return plan;
+        if diff.impossible.is_empty() {
+            plan.changes = diff.changes;
+            return plan;
+        }
+        let dangerous = match self.recreate {
+            Some(BigQueryRecreatePolicy::DangerouslyWithDataLoss) => true,
+            Some(BigQueryRecreatePolicy::IfEmpty) if live.num_rows == Some(0) => false,
+            Some(BigQueryRecreatePolicy::IfEmpty) => {
+                plan.changes = diff.changes;
+                plan.impossible = diff.impossible;
+                plan.refusal = Some(BigQueryRefusal::NotEmpty {
+                    num_rows: live.num_rows,
+                });
+                return plan;
+            }
+            None => {
+                plan.changes = diff.changes;
+                plan.impossible = diff.impossible;
+                plan.refusal = Some(BigQueryRefusal::NoRecreateOptIn);
+                return plan;
+            }
+        };
+        let target = self.target(Some(live));
+        let same_partitioning = match (&target.partitioning, &live.partitioning) {
+            (Some(a), Some(b)) => a.same_as(b),
+            (None, None) => true,
+            _ => false,
+        };
+        // `CREATE OR REPLACE` must restate the partitioning and clustering exactly.
+        let method = if same_partitioning && same_columns(&target.clustering, &live.clustering) {
+            BigQueryRecreateMethod::CreateOrReplace
+        } else {
+            BigQueryRecreateMethod::DropAndCreate
+        };
+        plan.recreate = Some(BigQueryRecreate {
+            method,
+            reasons: diff.impossible,
+            target,
+            num_rows: live.num_rows,
+            num_bytes: live.num_bytes,
+            row_access_policies: Vec::new(),
+            dangerous,
+            snapshot_first: self.snapshot_first,
+        });
+        plan
     }
-    let dangerous = match declaration.recreate {
-        Some(BigQueryRecreatePolicy::DangerouslyWithDataLoss) => true,
-        Some(BigQueryRecreatePolicy::IfEmpty) if live.num_rows == Some(0) => false,
-        Some(BigQueryRecreatePolicy::IfEmpty) => {
-            plan.changes = diff.changes;
-            plan.impossible = diff.impossible;
-            plan.refusal = Some(BigQueryRefusal::NotEmpty {
-                num_rows: live.num_rows,
-            });
-            return plan;
-        }
-        None => {
-            plan.changes = diff.changes;
-            plan.impossible = diff.impossible;
-            plan.refusal = Some(BigQueryRefusal::NoRecreateOptIn);
-            return plan;
-        }
-    };
-    let target = target(declaration, Some(live));
-    let same_partitioning = match (&target.partitioning, &live.partitioning) {
-        (Some(a), Some(b)) => a.same_as(b),
-        (None, None) => true,
-        _ => false,
-    };
-    // `CREATE OR REPLACE` must restate the partitioning and clustering exactly (recreate probe 1A to 1C4).
-    let method = if same_partitioning && same_columns(&target.clustering, &live.clustering) {
-        BigQueryRecreateMethod::CreateOrReplace
-    } else {
-        BigQueryRecreateMethod::DropAndCreate
-    };
-    plan.recreate = Some(BigQueryRecreate {
-        method,
-        reasons: diff.impossible,
-        target,
-        num_rows: live.num_rows,
-        num_bytes: live.num_bytes,
-        row_access_policies: Vec::new(),
-        dangerous,
-        snapshot_first: declaration.snapshot_first,
-    });
-    plan
 }
 
 /// Column names compare as BigQuery compares them, ignoring case.
@@ -119,18 +122,13 @@ fn join(prefix: &str, name: &str) -> String {
     }
 }
 
-/// The live column a declared top-level column matches: the one with its name, or else the
-/// one it is renamed from.
-fn matched<'f>(
-    column: &DeclaredColumn,
-    live: &'f [BigQueryFieldSchema],
-) -> Option<&'f BigQueryFieldSchema> {
-    find(live, &column.field.name).or_else(|| {
-        column
-            .renamed_from
-            .as_deref()
-            .and_then(|old| find(live, old))
-    })
+impl DeclaredColumn {
+    /// The live column a declared top-level column matches: the one with its name, or else the
+    /// one it is renamed from.
+    fn matched<'f>(&self, live: &'f [BigQueryFieldSchema]) -> Option<&'f BigQueryFieldSchema> {
+        find(live, &self.field.name)
+            .or_else(|| self.renamed_from.as_deref().and_then(|old| find(live, old)))
+    }
 }
 
 fn decimal_widens(from: Option<BigQueryDecimalParams>, to: Option<BigQueryDecimalParams>) -> bool {
@@ -153,21 +151,23 @@ fn length_widens(from: Option<u64>, to: Option<u64>) -> bool {
     }
 }
 
-/// Whether `ALTER COLUMN SET DATA TYPE` takes `from` to `to`.
-///
-/// BigQuery takes INT64 to NUMERIC and a longer `STRING(n)` (5f, 5g), and refuses INT64 to
-/// FLOAT64 (2c), so FLOAT64 is never a widening target here. The other pairs follow
-/// GoogleSQL's assignability of the exact numeric types and of type parameters.
-fn widens(from: &BigQueryFieldType, to: &BigQueryFieldType) -> bool {
-    use BigQueryFieldType::*;
-    match (from, to) {
-        (Int64, Numeric(None) | BigNumeric(None)) => true,
-        (Numeric(None), BigNumeric(None)) => true,
-        (Numeric(a), Numeric(b)) => decimal_widens(*a, *b),
-        (BigNumeric(a), BigNumeric(b)) => decimal_widens(*a, *b),
-        (String { max_length: a }, String { max_length: b }) => length_widens(*a, *b),
-        (Bytes { max_length: a }, Bytes { max_length: b }) => length_widens(*a, *b),
-        _ => false,
+impl BigQueryFieldType {
+    /// Whether `ALTER COLUMN SET DATA TYPE` takes this type to `to`.
+    ///
+    /// BigQuery takes INT64 to NUMERIC and a longer `STRING(n)`, and refuses INT64 to
+    /// FLOAT64, so FLOAT64 is never a widening target here. The other pairs follow
+    /// GoogleSQL's assignability of the exact numeric types and of type parameters.
+    fn widens_to(&self, to: &BigQueryFieldType) -> bool {
+        use BigQueryFieldType::*;
+        match (self, to) {
+            (Int64, Numeric(None) | BigNumeric(None)) => true,
+            (Numeric(None), BigNumeric(None)) => true,
+            (Numeric(a), Numeric(b)) => decimal_widens(*a, *b),
+            (BigNumeric(a), BigNumeric(b)) => decimal_widens(*a, *b),
+            (String { max_length: a }, String { max_length: b }) => length_widens(*a, *b),
+            (Bytes { max_length: a }, Bytes { max_length: b }) => length_widens(*a, *b),
+            _ => false,
+        }
     }
 }
 
@@ -208,7 +208,7 @@ impl Diff<'_> {
         let declaration = self.declaration;
         let mut matched_names = HashSet::new();
         for column in &declaration.columns {
-            let Some(current) = matched(column, live) else {
+            let Some(current) = column.matched(live) else {
                 self.add(column.field.name.clone(), &column.field);
                 continue;
             };
@@ -252,7 +252,7 @@ impl Diff<'_> {
                 BigQueryFieldType::Struct(live_fields),
             ) => self.nested(path, declared_fields, live_fields),
             (to, from) if to == from => {}
-            (to, from) if ddl_name.is_some() && widens(from, to) => {
+            (to, from) if ddl_name.is_some() && from.widens_to(to) => {
                 let change = BigQuerySchemaChange::WidenColumn {
                     column: ddl_name.unwrap_or(path).to_string(),
                     from: from.clone(),
@@ -362,21 +362,21 @@ impl Diff<'_> {
                 });
             }
         }
-        if let Some(to) = declaration.expiration_ms {
-            if live.expiration_ms != Some(to) {
+        if let Some(to) = declaration.expiration {
+            if live.expiration != Some(to) {
                 self.changes.push(BigQuerySchemaChange::SetExpiration {
-                    from: live.expiration_ms,
+                    from: live.expiration,
                     to,
                 });
             }
         }
         match (&declaration.partitioning, &live.partitioning) {
             (Some(declared), Some(current)) if declared.same_as(current) => {
-                if let Some(to) = declaration.partition_expiration_ms {
-                    if live.partition_expiration_ms != Some(to) {
+                if let Some(to) = declaration.partition_expiration {
+                    if live.partition_expiration != Some(to) {
                         self.changes
                             .push(BigQuerySchemaChange::SetPartitionExpiration {
-                                from: live.partition_expiration_ms,
+                                from: live.partition_expiration,
                                 to,
                             });
                     }
@@ -429,111 +429,117 @@ impl Diff<'_> {
     }
 }
 
-/// `declared` with what it leaves undeclared taken from `current`: descriptions, defaults and,
-/// unless pruning, nested fields.
-fn merged_field(
-    declared: &BigQueryFieldSchema,
-    current: Option<&BigQueryFieldSchema>,
-    prune: bool,
-) -> BigQueryFieldSchema {
-    let mut field = declared.clone();
-    let Some(current) = current else {
-        return field;
-    };
-    if field.description.is_none() {
-        field.description.clone_from(&current.description);
-    }
-    if field.default_value_expression.is_none() {
-        field
-            .default_value_expression
-            .clone_from(&current.default_value_expression);
-    }
-    if let (BigQueryFieldType::Struct(declared_fields), BigQueryFieldType::Struct(live_fields)) =
-        (&declared.field_type, &current.field_type)
-    {
-        let mut fields: Vec<BigQueryFieldSchema> = declared_fields
-            .iter()
-            .map(|f| merged_field(f, find(live_fields, &f.name), prune))
-            .collect();
-        if !prune {
-            fields.extend(
-                live_fields
-                    .iter()
-                    .filter(|f| find(declared_fields, &f.name).is_none())
-                    .cloned(),
-            );
+impl BigQueryFieldSchema {
+    /// This declared field with what it leaves undeclared taken from `current`: descriptions, defaults and,
+    /// unless pruning, nested fields.
+    fn merged_with(
+        &self,
+        current: Option<&BigQueryFieldSchema>,
+        prune: bool,
+    ) -> BigQueryFieldSchema {
+        let mut field = self.clone();
+        let Some(current) = current else {
+            return field;
+        };
+        if field.description.is_none() {
+            field.description.clone_from(&current.description);
         }
-        field.field_type = BigQueryFieldType::Struct(fields);
+        if field.default_value_expression.is_none() {
+            field
+                .default_value_expression
+                .clone_from(&current.default_value_expression);
+        }
+        if let (
+            BigQueryFieldType::Struct(declared_fields),
+            BigQueryFieldType::Struct(live_fields),
+        ) = (&self.field_type, &current.field_type)
+        {
+            let mut fields: Vec<BigQueryFieldSchema> = declared_fields
+                .iter()
+                .map(|f| f.merged_with(find(live_fields, &f.name), prune))
+                .collect();
+            if !prune {
+                fields.extend(
+                    live_fields
+                        .iter()
+                        .filter(|f| find(declared_fields, &f.name).is_none())
+                        .cloned(),
+                );
+            }
+            field.field_type = BigQueryFieldType::Struct(fields);
+        }
+        field
     }
-    field
 }
 
-/// The whole table as `.sync()` creates or recreates it: the declaration, plus what it leaves
-/// undeclared and does not prune.
-fn target(declaration: &BigQueryTableDeclaration, live: Option<&LiveTable>) -> BigQueryTableTarget {
-    let prune = declaration.prune;
-    let live_fields = live.map_or(&[][..], |l| &l.schema.fields[..]);
-    let mut columns: Vec<BigQueryFieldSchema> = declaration
-        .columns
-        .iter()
-        .map(|c| merged_field(&c.field, matched(c, live_fields), prune))
-        .collect();
-    let mut labels = BigQueryLabels::new();
-    let mut target = BigQueryTableTarget {
-        columns: Vec::new(),
-        primary_key: declaration.primary_key.clone(),
-        partitioning: declaration.partitioning.clone(),
-        partition_expiration_ms: declaration.partition_expiration_ms,
-        clustering: declaration.clustering.clone().unwrap_or_default(),
-        description: declaration.description.clone(),
-        labels: BigQueryLabels::new(),
-        expiration_ms: declaration.expiration_ms,
-    };
-    if let Some(live) = live {
-        if !prune {
-            let declared_live: HashSet<String> = declaration
-                .columns
-                .iter()
-                .filter_map(|c| matched(c, live_fields))
-                .map(|f| f.name.to_ascii_lowercase())
-                .collect();
-            columns.extend(
-                live_fields
-                    .iter()
-                    .filter(|f| !declared_live.contains(&f.name.to_ascii_lowercase()))
-                    .cloned(),
-            );
-            labels.clone_from(&live.labels);
-            if target.primary_key.is_none() {
-                target.primary_key.clone_from(&live.primary_key);
-            }
-            if target.partitioning.is_none() {
-                target.partitioning.clone_from(&live.partitioning);
-            }
-            if declaration.clustering.is_none() {
-                target.clustering.clone_from(&live.clustering);
-            }
-        }
-        let same_partitioning = match (&target.partitioning, &live.partitioning) {
-            (Some(a), Some(b)) => a.same_as(b),
-            _ => false,
+impl BigQueryTableDeclaration {
+    /// The whole table as `.sync()` creates or recreates it: the declaration, plus what it leaves
+    /// undeclared and does not prune.
+    fn target(&self, live: Option<&LiveTable>) -> BigQueryTableTarget {
+        let prune = self.prune;
+        let live_fields = live.map_or(&[][..], |l| &l.schema.fields[..]);
+        let mut columns: Vec<BigQueryFieldSchema> = self
+            .columns
+            .iter()
+            .map(|c| c.field.merged_with(c.matched(live_fields), prune))
+            .collect();
+        let mut labels = BigQueryLabels::new();
+        let mut target = BigQueryTableTarget {
+            columns: Vec::new(),
+            primary_key: self.primary_key.clone(),
+            partitioning: self.partitioning.clone(),
+            partition_expiration: self.partition_expiration,
+            clustering: self.clustering.clone().unwrap_or_default(),
+            description: self.description.clone(),
+            labels: BigQueryLabels::new(),
+            expiration: self.expiration,
         };
-        if target.partition_expiration_ms.is_none() && same_partitioning {
-            target.partition_expiration_ms = live.partition_expiration_ms;
+        if let Some(live) = live {
+            if !prune {
+                let declared_live: HashSet<String> = self
+                    .columns
+                    .iter()
+                    .filter_map(|c| c.matched(live_fields))
+                    .map(|f| f.name.to_ascii_lowercase())
+                    .collect();
+                columns.extend(
+                    live_fields
+                        .iter()
+                        .filter(|f| !declared_live.contains(&f.name.to_ascii_lowercase()))
+                        .cloned(),
+                );
+                labels.clone_from(&live.labels);
+                if target.primary_key.is_none() {
+                    target.primary_key.clone_from(&live.primary_key);
+                }
+                if target.partitioning.is_none() {
+                    target.partitioning.clone_from(&live.partitioning);
+                }
+                if self.clustering.is_none() {
+                    target.clustering.clone_from(&live.clustering);
+                }
+            }
+            let same_partitioning = match (&target.partitioning, &live.partitioning) {
+                (Some(a), Some(b)) => a.same_as(b),
+                _ => false,
+            };
+            if target.partition_expiration.is_none() && same_partitioning {
+                target.partition_expiration = live.partition_expiration;
+            }
+            if target.description.is_none() {
+                target.description.clone_from(&live.description);
+            }
+            if target.expiration.is_none() {
+                target.expiration = live.expiration;
+            }
         }
-        if target.description.is_none() {
-            target.description.clone_from(&live.description);
+        for (key, value) in self.labels.iter() {
+            labels.insert(key, value);
         }
-        if target.expiration_ms.is_none() {
-            target.expiration_ms = live.expiration_ms;
-        }
+        target.columns = columns;
+        target.labels = labels;
+        target
     }
-    for (key, value) in declaration.labels.iter() {
-        labels.insert(key, value);
-    }
-    target.columns = columns;
-    target.labels = labels;
-    target
 }
 
 /// The field at the dotted `path`, matched ignoring case as the diff matched it.
@@ -564,136 +570,143 @@ fn add_field(schema: &mut v2::TableSchema, path: &str, field: v2::TableFieldSche
     }
 }
 
-/// The first `PatchTable` body: every `[patch]` change, with new columns added without their
-/// default value, which BigQuery refuses in the same step (1h).
-///
-/// A schema in the body replaces the whole schema, so it is the live one with the changes
-/// edited in, every column and description included (2k, 3c), and everything the crate does
-/// not model, such as policy tags, carried back as it was.
-pub(crate) fn patch_body(live: &v2::Table, changes: &[BigQuerySchemaChange]) -> Option<v2::Table> {
-    let mut body = v2::Table::default();
-    let mut schema = live.schema.clone().unwrap_or_default();
-    let mut schema_edited = false;
-    let mut any = false;
-    let foreign_keys = || {
-        live.table_constraints
-            .as_ref()
-            .map(|c| c.foreign_keys.clone())
-            .unwrap_or_default()
-    };
-    for change in changes.iter().filter(|c| c.step() == ChangeStep::Patch) {
-        any = true;
-        if matches!(
-            change,
-            BigQuerySchemaChange::AddColumn { .. }
-                | BigQuerySchemaChange::RelaxColumn { .. }
-                | BigQuerySchemaChange::SetColumnDescription { .. }
-                | BigQuerySchemaChange::SetColumnDefault { .. }
-        ) {
-            schema_edited = true;
+impl BigQueryTablePlan {
+    /// The first `PatchTable` body: every `[patch]` change, with new columns added without their
+    /// default value, which BigQuery refuses in the same step.
+    ///
+    /// A schema in the body replaces the whole schema, so it is the live one with the changes
+    /// edited in, every column and description included, and everything the crate does
+    /// not model, such as policy tags, carried back as it was.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for a partition expiration whose milliseconds do
+    /// not fit the request field.
+    pub(crate) fn patch_body(&self, live: &v2::Table) -> BigQueryResult<Option<v2::Table>> {
+        let changes = &self.changes;
+        let mut body = v2::Table::default();
+        let mut schema = live.schema.clone().unwrap_or_default();
+        let mut schema_edited = false;
+        let mut any = false;
+        let foreign_keys = || {
+            live.table_constraints
+                .as_ref()
+                .map(|c| c.foreign_keys.clone())
+                .unwrap_or_default()
+        };
+        for change in changes.iter().filter(|c| c.step() == ChangeStep::Patch) {
+            any = true;
+            if matches!(
+                change,
+                BigQuerySchemaChange::AddColumn { .. }
+                    | BigQuerySchemaChange::RelaxColumn { .. }
+                    | BigQuerySchemaChange::SetColumnDescription { .. }
+                    | BigQuerySchemaChange::SetColumnDefault { .. }
+            ) {
+                schema_edited = true;
+            }
+            match change {
+                BigQuerySchemaChange::AddColumn { path, field } => {
+                    let mut field = v2::TableFieldSchema::from(field);
+                    field.default_value_expression = None;
+                    add_field(&mut schema, path, field);
+                }
+                BigQuerySchemaChange::RelaxColumn { path } => {
+                    if let Some(field) = field_at(&mut schema.fields, path) {
+                        field.mode = "NULLABLE".into();
+                    }
+                }
+                BigQuerySchemaChange::SetColumnDescription { path, to, .. } => {
+                    if let Some(field) = field_at(&mut schema.fields, path) {
+                        field.description = Some(to.clone());
+                    }
+                }
+                BigQuerySchemaChange::SetColumnDefault { path, to, .. } => {
+                    if let Some(field) = field_at(&mut schema.fields, path) {
+                        field.default_value_expression = Some(to.clone());
+                    }
+                }
+                BigQuerySchemaChange::SetDescription { to, .. } => {
+                    body.description = Some(to.clone())
+                }
+                BigQuerySchemaChange::SetLabel { key, to, .. } => {
+                    body.labels.insert(key.clone(), to.clone());
+                }
+                BigQuerySchemaChange::SetExpiration { to, .. } => {
+                    body.expiration_time = Some(to.as_millisecond());
+                }
+                BigQuerySchemaChange::SetPartitionExpiration { to, .. } => {
+                    body.time_partitioning = Some(v2::TimePartitioning {
+                        expiration_ms: Some(millis("partition_expiration", *to)?),
+                        ..live.time_partitioning.clone().unwrap_or_default()
+                    });
+                }
+                BigQuerySchemaChange::SetClustering { to, .. } => {
+                    body.clustering = Some(v2::Clustering { fields: to.clone() });
+                }
+                BigQuerySchemaChange::SetPrimaryKey { to, .. } => {
+                    body.table_constraints = Some(v2::TableConstraints {
+                        primary_key: Some(v2::PrimaryKey {
+                            columns: to.clone(),
+                        }),
+                        foreign_keys: foreign_keys(),
+                    });
+                }
+                BigQuerySchemaChange::RemovePrimaryKey { .. } => {
+                    body.table_constraints = Some(v2::TableConstraints {
+                        primary_key: None,
+                        foreign_keys: foreign_keys(),
+                    });
+                }
+                _ => {}
+            }
         }
-        match change {
-            BigQuerySchemaChange::AddColumn { path, field } => {
-                let mut field = v2::TableFieldSchema::from(field);
-                field.default_value_expression = None;
-                add_field(&mut schema, path, field);
-            }
-            BigQuerySchemaChange::RelaxColumn { path } => {
-                if let Some(field) = field_at(&mut schema.fields, path) {
-                    field.mode = "NULLABLE".into();
-                }
-            }
-            BigQuerySchemaChange::SetColumnDescription { path, to, .. } => {
-                if let Some(field) = field_at(&mut schema.fields, path) {
-                    field.description = Some(to.clone());
-                }
-            }
-            BigQuerySchemaChange::SetColumnDefault { path, to, .. } => {
-                if let Some(field) = field_at(&mut schema.fields, path) {
-                    field.default_value_expression = Some(to.clone());
-                }
-            }
-            BigQuerySchemaChange::SetDescription { to, .. } => body.description = Some(to.clone()),
-            BigQuerySchemaChange::SetLabel { key, to, .. } => {
-                body.labels.insert(key.clone(), to.clone());
-            }
-            BigQuerySchemaChange::SetExpiration { to, .. } => body.expiration_time = Some(*to),
-            BigQuerySchemaChange::SetPartitionExpiration { to, .. } => {
-                body.time_partitioning = Some(v2::TimePartitioning {
-                    expiration_ms: Some(*to),
-                    ..live.time_partitioning.clone().unwrap_or_default()
-                });
-            }
-            BigQuerySchemaChange::SetClustering { to, .. } => {
-                body.clustering = Some(v2::Clustering { fields: to.clone() });
-            }
-            BigQuerySchemaChange::SetPrimaryKey { to, .. } => {
-                body.table_constraints = Some(v2::TableConstraints {
-                    primary_key: Some(v2::PrimaryKey {
-                        columns: to.clone(),
-                    }),
-                    foreign_keys: foreign_keys(),
-                });
-            }
-            BigQuerySchemaChange::RemovePrimaryKey { .. } => {
-                body.table_constraints = Some(v2::TableConstraints {
-                    primary_key: None,
-                    foreign_keys: foreign_keys(),
-                });
-            }
-            _ => {}
-        }
+        body.schema = schema_edited.then_some(schema);
+        Ok(any.then_some(body))
     }
-    body.schema = schema_edited.then_some(schema);
-    any.then_some(body)
-}
 
-/// The second `PatchTable` body, setting the defaults of the columns the first one added; built
-/// from the table the first patch returned. `None` when no added column has a default.
-pub(crate) fn defaults_body(
-    latest: &v2::Table,
-    changes: &[BigQuerySchemaChange],
-) -> Option<v2::Table> {
-    let mut schema = latest.schema.clone().unwrap_or_default();
-    let mut any = false;
-    for change in changes {
-        if let BigQuerySchemaChange::AddColumn { path, field } = change {
-            if let Some(default) = &field.default_value_expression {
-                if let Some(field) = field_at(&mut schema.fields, path) {
-                    field.default_value_expression = Some(default.clone());
+    /// The second `PatchTable` body, setting the defaults of the columns the first one added; built
+    /// from the table the first patch returned. `None` when no added column has a default.
+    pub(crate) fn defaults_body(&self, latest: &v2::Table) -> Option<v2::Table> {
+        let changes = &self.changes;
+        let mut schema = latest.schema.clone().unwrap_or_default();
+        let mut any = false;
+        for change in changes {
+            if let BigQuerySchemaChange::AddColumn { path, field } = change {
+                if let Some(default) = &field.default_value_expression {
+                    if let Some(field) = field_at(&mut schema.fields, path) {
+                        field.default_value_expression = Some(default.clone());
+                        any = true;
+                    }
+                }
+            }
+        }
+        any.then(|| v2::Table {
+            schema: Some(schema),
+            ..Default::default()
+        })
+    }
+
+    /// The `UpdateTable` body: the whole of `latest`, which must be the table as it is now, without
+    /// the removed labels and clustering. Update clears whatever its body leaves out.
+    pub(crate) fn update_body(&self, latest: &v2::Table) -> Option<v2::Table> {
+        let changes = &self.changes;
+        let mut body = latest.clone();
+        let mut any = false;
+        for change in changes {
+            match change {
+                BigQuerySchemaChange::RemoveLabel { key, .. } => {
+                    body.labels.remove(key);
                     any = true;
                 }
+                BigQuerySchemaChange::RemoveClustering { .. } => {
+                    body.clustering = None;
+                    any = true;
+                }
+                _ => {}
             }
         }
+        any.then_some(body)
     }
-    any.then(|| v2::Table {
-        schema: Some(schema),
-        ..Default::default()
-    })
-}
-
-/// The `UpdateTable` body: the whole of `latest`, which must be the table as it is now, without
-/// the removed labels and clustering. Update clears whatever its body leaves out (3g).
-pub(crate) fn update_body(
-    latest: &v2::Table,
-    changes: &[BigQuerySchemaChange],
-) -> Option<v2::Table> {
-    let mut body = latest.clone();
-    let mut any = false;
-    for change in changes {
-        match change {
-            BigQuerySchemaChange::RemoveLabel { key, .. } => {
-                body.labels.remove(key);
-                any = true;
-            }
-            BigQuerySchemaChange::RemoveClustering { .. } => {
-                body.clustering = None;
-                any = true;
-            }
-            _ => {}
-        }
-    }
-    any.then_some(body)
 }
 
 #[cfg(test)]

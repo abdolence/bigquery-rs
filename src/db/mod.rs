@@ -1,8 +1,10 @@
 mod options;
 pub use options::*;
 
+pub(crate) mod proto;
+
 mod retry;
-pub(crate) use retry::retry_delay;
+pub(crate) use retry::{if_match, retry_delay};
 
 mod ids;
 pub use ids::*;

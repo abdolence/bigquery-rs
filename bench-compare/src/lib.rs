@@ -18,15 +18,20 @@ pub const LARGE_QUERY_ROWS: i64 = 200_000;
 pub const SCAN_TABLE: &str = "scan_1m";
 
 /// The scenarios, as named in the requests and the results.
-pub mod scenario {
-    pub const QUERY_CONST: &str = "query_const";
-    pub const QUERY_1K: &str = "query_1k";
-    pub const QUERY_200K_ROWS: &str = "query_200k_rows";
-    pub const QUERY_200K_ARROW: &str = "query_200k_arrow";
-    pub const SCAN_ROWS: &str = "scan_rows";
-    pub const SCAN_ARROW: &str = "scan_arrow";
-    pub const WRITE: &str = "write";
-    pub const DECODE: &str = "decode";
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Scenario {
+    QueryConst,
+    #[serde(rename = "query_1k")]
+    Query1k,
+    #[serde(rename = "query_200k_rows")]
+    Query200kRows,
+    #[serde(rename = "query_200k_arrow")]
+    Query200kArrow,
+    ScanRows,
+    ScanArrow,
+    Write,
+    Decode,
 }
 
 pub const SQL_CONST: &str = "SELECT 1 AS x";
@@ -147,7 +152,7 @@ pub fn write_rows() -> Vec<PlainRow> {
 /// A request from the orchestrator.
 #[derive(Deserialize, Debug)]
 pub struct Request {
-    pub scenario: String,
+    pub scenario: Scenario,
     /// The orchestrator's run number; 0 is the warm-up.
     pub run: u32,
 }
@@ -211,9 +216,9 @@ impl Args {
     }
 }
 
-/// Prints the `ready` line, then answers requests until stdin closes. A failed run is
-/// reported as an `error` line and the loop goes on, so one scenario a client cannot do never
-/// takes the others down with it.
+/// Prints the `ready` line, then answers requests until stdin closes. A failed run, or a
+/// request for a scenario this build does not know, is reported as an `error` line and the
+/// loop goes on, so one scenario a client cannot do never takes the others down with it.
 pub async fn serve<F>(info: serde_json::Value, mut run: F) -> anyhow::Result<()>
 where
     F: AsyncFnMut(&Request) -> anyhow::Result<Outcome>,
@@ -231,10 +236,12 @@ where
         if stdin.lock().read_line(&mut line)? == 0 {
             return Ok(());
         }
-        let request: Request = serde_json::from_str(line.trim())?;
-        let reply = match run(&request).await {
-            Ok(outcome) => serde_json::to_value(&outcome)?,
-            Err(err) => serde_json::json!({ "error": format!("{err:#}") }),
+        let reply = match serde_json::from_str::<Request>(line.trim()) {
+            Ok(request) => match run(&request).await {
+                Ok(outcome) => serde_json::to_value(&outcome)?,
+                Err(err) => serde_json::json!({ "error": format!("{err:#}") }),
+            },
+            Err(err) => serde_json::json!({ "error": format!("n/a: {err}") }),
         };
         writeln!(stdout.lock(), "{reply}")?;
         stdout.lock().flush()?;

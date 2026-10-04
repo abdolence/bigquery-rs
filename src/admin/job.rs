@@ -1,14 +1,14 @@
 //! Jobs: get, delete and list, through the v2 `JobService`, next to
 //! [`BigQueryDb::cancel_job`].
 
-use crate::admin::{logging_errors, non_empty, paged, timestamp_ms};
+use crate::admin::{logging_errors, paged};
+use crate::db::proto::{timestamp_ms, NonEmpty};
 use crate::errors::{BigQueryError, BigQueryJobErrorEntry};
 use crate::BigQueryInstant;
 use crate::{BigQueryDb, BigQueryJobRef, BigQueryResult, BigQueryStatementType};
 use crate::{BigQueryJobId, BigQueryLabels};
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2;
-use gcloud_sdk::tonic::metadata::MetadataMap;
 use rsb_derive::Builder;
 use std::fmt::{Display, Formatter};
 use tracing::Span;
@@ -177,7 +177,7 @@ impl TryFrom<JobParts> for BigQueryJob {
         let reference = job
             .reference
             .ok_or_else(|| {
-                BigQueryError::invalid_parameters("job_reference", "BigQuery returned none")
+                BigQueryError::unexpected_response("BigQuery returned no job_reference")
             })?
             .into();
         let configuration = job.configuration.unwrap_or_default();
@@ -186,12 +186,12 @@ impl TryFrom<JobParts> for BigQueryJob {
         let status = job.status.unwrap_or_default();
         Ok(Self {
             reference,
-            job_type: non_empty(configuration.job_type).map(Into::into),
-            state: non_empty(status.state).map(Into::into),
+            job_type: configuration.job_type.non_empty().map(Into::into),
+            state: status.state.non_empty().map(Into::into),
             error: status.error_result.map(Into::into),
-            user_email: non_empty(job.user_email),
+            user_email: job.user_email.non_empty(),
             labels: configuration.labels.into_iter().collect(),
-            statement_type: non_empty(query.statement_type).map(Into::into),
+            statement_type: query.statement_type.non_empty().map(Into::into),
             creation_time: timestamp_ms("creation_time", statistics.creation_time)?,
             start_time: timestamp_ms("start_time", statistics.start_time)?,
             end_time: timestamp_ms("end_time", statistics.end_time)?,
@@ -202,7 +202,7 @@ impl TryFrom<JobParts> for BigQueryJob {
 }
 
 /// # Errors
-/// [`BigQueryError::InvalidParametersError`] for a missing job reference, and
+/// [`BigQueryError::SystemError`] for a missing job reference, and
 /// [`BigQueryError::DeserializeError`] for a time out of range.
 impl TryFrom<v2::Job> for BigQueryJob {
     type Error = BigQueryError;
@@ -271,16 +271,10 @@ impl BigQueryDb {
             job_id: job.job_id.to_string(),
             location: job.location_field(),
         };
-        self.retry(
-            &job_span(job),
-            "get a job",
-            &request,
-            &MetadataMap::new(),
-            |r| {
-                let mut client = self.job_client();
-                async move { client.get_job(r).await }
-            },
-        )
+        self.retry(&job.admin_span(), "get a job", &request, |r| {
+            let mut client = self.job_client();
+            async move { client.get_job(r).await }
+        })
         .await?
         .try_into()
     }
@@ -298,16 +292,10 @@ impl BigQueryDb {
             job_id: job.job_id.to_string(),
             location: job.location_field(),
         };
-        self.retry(
-            &job_span(job),
-            "delete a job",
-            &request,
-            &MetadataMap::new(),
-            |r| {
-                let mut client = self.job_client();
-                async move { client.delete_job(r).await }
-            },
-        )
+        self.retry(&job.admin_span(), "delete a job", &request, |r| {
+            let mut client = self.job_client();
+            async move { client.delete_job(r).await }
+        })
         .await
     }
 
@@ -351,7 +339,7 @@ impl BigQueryDb {
             };
             async move {
                 let page = db
-                    .retry(&span, "list jobs", &request, &MetadataMap::new(), |r| {
+                    .retry(&span, "list jobs", &request, |r| {
                         let mut client = db.job_client();
                         async move { client.list_jobs(r).await }
                     })
@@ -367,8 +355,11 @@ impl BigQueryDb {
     }
 }
 
-fn job_span(job: &BigQueryJobRef) -> Span {
-    tracing::debug_span!("BigQuery job", "/bigquery/job_id" = job.job_id.as_str())
+impl BigQueryJobRef {
+    /// The span of one job admin call.
+    fn admin_span(&self) -> Span {
+        tracing::debug_span!("BigQuery job", "/bigquery/job_id" = self.job_id.as_str())
+    }
 }
 
 /// Milliseconds since the epoch, as `ListJobs` takes its creation-time bounds.

@@ -19,6 +19,4 @@ mod params;
 mod routing;
 mod support;
 
-pub(crate) use params::{
-    infer_param, literal_of, struct_params, typed_param, ParamFailure, ParamLabel,
-};
+pub(crate) use params::{infer_param, literal_of, struct_params, typed_param, ParamLabel};

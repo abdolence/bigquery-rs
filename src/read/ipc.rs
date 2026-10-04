@@ -1,15 +1,8 @@
-use crate::errors::{BigQueryError, BigQueryErrorPublicGenericDetails, BigQuerySystemError};
+use crate::errors::BigQueryError;
 use crate::BigQueryResult;
 use arrow_array::RecordBatch;
 use arrow_buffer::Buffer;
 use arrow_ipc::reader::StreamDecoder;
-
-fn ipc_error(message: String) -> BigQueryError {
-    BigQueryError::SystemError(BigQuerySystemError::new(
-        BigQueryErrorPublicGenericDetails::new("ARROW_IPC".into()),
-        message,
-    ))
-}
 
 /// Decodes the Arrow IPC messages of one read stream or one inline query result: the schema
 /// message once, then one record batch message at a time, decompressing LZ4 and ZSTD buffers.
@@ -26,12 +19,16 @@ impl ArrowIpcDecoder {
         let mut decoder = StreamDecoder::new();
         let mut buffer = Buffer::from(serialized_schema.to_vec());
         while !buffer.is_empty() {
-            let batch = decoder
-                .decode(&mut buffer)
-                .map_err(|e| ipc_error(format!("Failed to decode the Arrow schema: {e}")))?;
+            let batch = decoder.decode(&mut buffer).map_err(|e| {
+                BigQueryError::system(
+                    "ARROW_IPC",
+                    format!("Failed to decode the Arrow schema: {e}"),
+                )
+            })?;
             if batch.is_some() {
-                return Err(ipc_error(
-                    "The Arrow schema message decoded to a record batch".into(),
+                return Err(BigQueryError::system(
+                    "ARROW_IPC",
+                    "The Arrow schema message decoded to a record batch",
                 ));
             }
         }
@@ -43,20 +40,25 @@ impl ArrowIpcDecoder {
         let mut buffer = Buffer::from(serialized_record_batch.to_vec());
         let mut decoded = None;
         while !buffer.is_empty() {
-            let batch = self
-                .decoder
-                .decode(&mut buffer)
-                .map_err(|e| ipc_error(format!("Failed to decode an Arrow record batch: {e}")))?;
+            let batch = self.decoder.decode(&mut buffer).map_err(|e| {
+                BigQueryError::system(
+                    "ARROW_IPC",
+                    format!("Failed to decode an Arrow record batch: {e}"),
+                )
+            })?;
             match (batch, &decoded) {
                 (Some(_), Some(_)) => {
-                    return Err(ipc_error(
-                        "An Arrow record batch message held more than one batch".into(),
+                    return Err(BigQueryError::system(
+                        "ARROW_IPC",
+                        "An Arrow record batch message held more than one batch",
                     ))
                 }
                 (Some(batch), None) => decoded = Some(batch),
                 (None, _) => {}
             }
         }
-        decoded.ok_or_else(|| ipc_error("An Arrow record batch message is incomplete".into()))
+        decoded.ok_or_else(|| {
+            BigQueryError::system("ARROW_IPC", "An Arrow record batch message is incomplete")
+        })
     }
 }

@@ -22,14 +22,6 @@ pub(crate) const TIMESTAMP_MAX_MICROS: i64 = 253_402_300_799_999_999;
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 
-fn out_of_range(message: String) -> CodecError {
-    CodecError::new(BigQueryCodecErrorKind::OutOfRange, message)
-}
-
-fn invalid_text(message: String) -> CodecError {
-    CodecError::new(BigQueryCodecErrorKind::InvalidText, message)
-}
-
 /// Days since 1970-01-01 for a proleptic Gregorian date. Total over `i32` years that fit the
 /// result, so it is also the integer form of jiff dates outside BigQuery's range.
 pub(crate) fn days_from_civil(y: i32, m: u8, d: u8) -> i32 {
@@ -135,7 +127,7 @@ fn days_in_month(y: i32, m: u8) -> u8 {
 /// at year 1.
 pub(crate) fn parse_date(s: &str) -> Result<i32, CodecError> {
     let b = s.as_bytes();
-    let bad = || invalid_text(format!("invalid DATE `{s}`, expected YYYY-MM-DD"));
+    let bad = || CodecError::invalid_text(format!("invalid DATE `{s}`, expected YYYY-MM-DD"));
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
         return Err(bad());
     }
@@ -148,7 +140,7 @@ pub(crate) fn parse_date(s: &str) -> Result<i32, CodecError> {
         return Err(bad());
     }
     if y == 0 {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "DATE `{s}` is before BigQuery's 0001-01-01"
         )));
     }
@@ -159,7 +151,8 @@ pub(crate) fn parse_date(s: &str) -> Result<i32, CodecError> {
 /// sub-microsecond digits dropped.
 pub(crate) fn parse_time(s: &str) -> Result<i64, CodecError> {
     let b = s.as_bytes();
-    let bad = || invalid_text(format!("invalid TIME `{s}`, expected HH:MM:SS[.ffffff]"));
+    let bad =
+        || CodecError::invalid_text(format!("invalid TIME `{s}`, expected HH:MM:SS[.ffffff]"));
     if b.len() < 8 || b[2] != b':' || b[5] != b':' {
         return Err(bad());
     }
@@ -187,7 +180,7 @@ pub(crate) fn parse_time(s: &str) -> Result<i64, CodecError> {
 pub(crate) fn parse_datetime(s: &str) -> Result<i64, CodecError> {
     let b = s.as_bytes();
     if b.len() < 19 || !matches!(b[10], b'T' | b't' | b' ') || !s.is_char_boundary(10) {
-        return Err(invalid_text(format!(
+        return Err(CodecError::invalid_text(format!(
             "invalid DATETIME `{s}`, expected YYYY-MM-DDTHH:MM:SS[.ffffff]"
         )));
     }
@@ -200,7 +193,7 @@ pub(crate) fn parse_datetime(s: &str) -> Result<i64, CodecError> {
 /// UTC microseconds, sub-microsecond digits floored toward the past.
 pub(crate) fn parse_timestamp(s: &str) -> Result<i64, CodecError> {
     let bad = || {
-        invalid_text(format!(
+        CodecError::invalid_text(format!(
             "invalid TIMESTAMP `{s}`, expected YYYY-MM-DDTHH:MM:SS[.f](Z|±HH:MM)"
         ))
     };
@@ -229,7 +222,7 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<i64, CodecError> {
     // time of day; a negative instant needs nothing more, since the civil part carries the sign.
     let utc = micros - offset_secs * MICROS_PER_SECOND;
     if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&utc) {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "TIMESTAMP `{s}` is outside BigQuery's 0001-01-01 to 9999-12-31 UTC"
         )));
     }
@@ -286,20 +279,20 @@ pub(crate) fn unpack_datetime(packed: i64) -> i64 {
 /// A jiff date for BigQuery days; `OutOfRange` outside BigQuery's DATE range.
 pub(crate) fn jiff_date(days: i32) -> Result<jiff::civil::Date, CodecError> {
     if !(DATE_MIN_DAYS..=DATE_MAX_DAYS).contains(&days) {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "DATE of {days} days since 1970-01-01 is outside BigQuery's range"
         )));
     }
     let (y, m, d) = civil_from_days(days);
     // Years 1 to 9999 fit in i16 and a date from `civil_from_days` is always valid.
     jiff::civil::Date::new(y as i16, m as i8, d as i8)
-        .map_err(|err| out_of_range(format!("DATE of {days} days: {err}")))
+        .map_err(|err| CodecError::out_of_range(format!("DATE of {days} days: {err}")))
 }
 
 /// A jiff time for microseconds since midnight; `OutOfRange` outside one day.
 pub(crate) fn jiff_time(micros: i64) -> Result<jiff::civil::Time, CodecError> {
     if !(0..MICROS_PER_DAY).contains(&micros) {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "TIME of {micros} microseconds is outside 0 to 86400000000"
         )));
     }
@@ -311,13 +304,13 @@ pub(crate) fn jiff_time(micros: i64) -> Result<jiff::civil::Time, CodecError> {
         (secs % 60) as i8,
         ((micros % MICROS_PER_SECOND) * 1000) as i32,
     )
-    .map_err(|err| out_of_range(format!("TIME of {micros} microseconds: {err}")))
+    .map_err(|err| CodecError::out_of_range(format!("TIME of {micros} microseconds: {err}")))
 }
 
 /// A jiff datetime for civil microseconds; `OutOfRange` outside BigQuery's DATETIME range.
 pub(crate) fn jiff_datetime(micros: i64) -> Result<jiff::civil::DateTime, CodecError> {
     if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&micros) {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "DATETIME of {micros} civil microseconds is outside BigQuery's range"
         )));
     }
@@ -330,12 +323,12 @@ pub(crate) fn jiff_datetime(micros: i64) -> Result<jiff::civil::DateTime, CodecE
 /// or above jiff's own maximum, which ends 25 hours before BigQuery's.
 pub(crate) fn jiff_timestamp(micros: i64) -> Result<jiff::Timestamp, CodecError> {
     if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&micros) {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "TIMESTAMP of {micros} microseconds is outside BigQuery's range"
         )));
     }
     jiff::Timestamp::from_microsecond(micros).map_err(|err| {
-        out_of_range(format!(
+        CodecError::out_of_range(format!(
             "TIMESTAMP of {micros} microseconds does not fit jiff::Timestamp: {err}; \
              read it into a String or an i64"
         ))
@@ -359,10 +352,11 @@ pub(crate) fn raw_timestamp_micros(ts: jiff::Timestamp) -> i64 {
 }
 
 /// BigQuery days for a jiff date; `OutOfRange` for a year below 1.
+#[cfg(test)]
 pub(crate) fn date_days(d: jiff::civil::Date) -> Result<i32, CodecError> {
     let days = raw_date_days(d);
     if days < DATE_MIN_DAYS {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "DATE {d} is before BigQuery's 0001-01-01"
         )));
     }
@@ -378,10 +372,11 @@ pub(crate) fn time_micros(t: jiff::civil::Time) -> i64 {
 }
 
 /// Civil microseconds for a jiff datetime; `OutOfRange` for a year below 1.
+#[cfg(test)]
 pub(crate) fn datetime_micros(dt: jiff::civil::DateTime) -> Result<i64, CodecError> {
     let micros = raw_datetime_micros(dt);
     if micros < TIMESTAMP_MIN_MICROS {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "DATETIME {dt} is before BigQuery's 0001-01-01T00:00:00"
         )));
     }
@@ -390,10 +385,11 @@ pub(crate) fn datetime_micros(dt: jiff::civil::DateTime) -> Result<i64, CodecErr
 
 /// Microseconds since the epoch for a jiff timestamp, floored to the microsecond;
 /// `OutOfRange` before BigQuery's 0001-01-01T00:00:00Z.
+#[cfg(test)]
 pub(crate) fn timestamp_micros(ts: jiff::Timestamp) -> Result<i64, CodecError> {
     let micros = raw_timestamp_micros(ts);
     if micros < TIMESTAMP_MIN_MICROS {
-        return Err(out_of_range(format!(
+        return Err(CodecError::out_of_range(format!(
             "TIMESTAMP {ts} is before BigQuery's 0001-01-01T00:00:00Z"
         )));
     }

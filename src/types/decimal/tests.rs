@@ -96,23 +96,6 @@ fn decimals_format_trimmed_and_parse_at_scale() {
         kind(decimal_from_f64(f64::INFINITY, 9)),
         BigQueryCodecErrorKind::OutOfRange
     );
-
-    assert_eq!(
-        decimal_to_i64_exact(i256::from_i128(-42_000_000_000), 9).ok(),
-        Some(-42)
-    );
-    assert_eq!(
-        kind(decimal_to_i64_exact(i256::from_i128(1_500_000_000), 9)),
-        BigQueryCodecErrorKind::OutOfRange,
-        "a fractional value into an integer"
-    );
-    assert_eq!(
-        kind(decimal_to_i64_exact(
-            i256::from_i128(i128::from(i64::MAX) * 1_000_000_000 + 1_000_000_000),
-            9
-        )),
-        BigQueryCodecErrorKind::OutOfRange
-    );
 }
 
 #[test]

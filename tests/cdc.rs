@@ -17,7 +17,7 @@ struct Row {
 
 #[tokio::test]
 async fn cdc_upsert_then_delete() -> TestResult {
-    with_scratch("cdc_upsert_then_delete", |scratch| async move {
+    with_scratch("cdc_upsert_then_delete", async |scratch: &Scratch| {
         let column = |name: &str, field_type, mode| BigQueryFieldSchema {
             name: name.into(),
             field_type,
@@ -25,20 +25,20 @@ async fn cdc_upsert_then_delete() -> TestResult {
             description: None,
             default_value_expression: None,
         };
-        let table = scratch
-            .create_table(
-                "t",
-                vec![
-                    column("id", BigQueryFieldType::Int64, BigQueryFieldMode::Required),
-                    column(
-                        "name",
-                        BigQueryFieldType::String { max_length: None },
-                        BigQueryFieldMode::Nullable,
-                    ),
-                ],
-                Some("id"),
-            )
-            .await?;
+        let table = create_table(
+            scratch,
+            "t",
+            vec![
+                column("id", BigQueryFieldType::Int64, BigQueryFieldMode::Required),
+                column(
+                    "name",
+                    BigQueryFieldType::String { max_length: None },
+                    BigQueryFieldMode::Nullable,
+                ),
+            ],
+            Some("id"),
+        )
+        .await?;
         let (mut writer, _) = scratch
             .db
             .create_cdc_writer::<Row>(table.clone(), BigQueryStreamingWriteOptions::new())
@@ -73,12 +73,14 @@ async fn cdc_upsert_then_delete() -> TestResult {
             .upsert()
             .execute()
             .await?;
-        let (rows, billed) = scratch
-            .query(&format!(
+        let (rows, billed) = query_rows(
+            scratch,
+            &format!(
                 "SELECT id, name FROM {} ORDER BY id",
-                scratch.table_sql("t")
-            ))
-            .await?;
+                table_sql(scratch, "t")
+            ),
+        )
+        .await?;
         let expected = |id: &str, name: &str| vec![Some(id.to_string()), Some(name.to_string())];
         assert_eq!(rows, [expected("1", "b"), expected("3", "d")]);
         eprintln!("cdc_upsert_then_delete: 5 changes written, {billed} bytes billed");
