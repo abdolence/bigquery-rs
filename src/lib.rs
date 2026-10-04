@@ -46,6 +46,8 @@ mod query;
 
 pub use query::*;
 
+mod sql;
+
 mod struct_path_macro;
 
 /// The `struct_path` crate the [`path!`] and [`paths!`] macros expand to, for its

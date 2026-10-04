@@ -13,7 +13,7 @@ use crate::common::{scratch_dataset_id, TestResult};
 pub struct Scratch {
     pub db: BigQueryDb,
     pub project: String,
-    pub dataset: String,
+    pub dataset: bigquery::BigQueryDatasetId,
     bytes_billed: AtomicI64,
 }
 
@@ -26,7 +26,7 @@ impl Scratch {
                 project_id: project.to_string(),
                 dataset: Some(bq::Dataset {
                     dataset_reference: Some(bq::DatasetReference {
-                        dataset_id: dataset.clone(),
+                        dataset_id: dataset.to_string(),
                         project_id: project.to_string(),
                     }),
                     location: "US".into(),
@@ -46,6 +46,10 @@ impl Scratch {
     }
 
     /// Runs one GoogleSQL statement with this dataset as the default and waits for it.
+    #[allow(
+        dead_code,
+        reason = "sql_live builds its table with a parameterised query"
+    )]
     pub async fn sql(&self, sql: &str) -> TestResult {
         let mut response = self
             .db
@@ -57,7 +61,7 @@ impl Scratch {
                     use_legacy_sql: Some(false),
                     timeout_ms: Some(60_000),
                     default_dataset: Some(bq::DatasetReference {
-                        dataset_id: self.dataset.clone(),
+                        dataset_id: self.dataset.to_string(),
                         project_id: self.project.clone(),
                     }),
                     location: "US".into(),
@@ -102,7 +106,7 @@ impl Scratch {
             .dataset_client()
             .delete_dataset(bq::DeleteDatasetRequest {
                 project_id: self.project.clone(),
-                dataset_id: self.dataset.clone(),
+                dataset_id: self.dataset.to_string(),
                 delete_contents: true,
             })
             .await

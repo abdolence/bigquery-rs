@@ -10,6 +10,7 @@ use crate::errors::{
     BigQueryInvalidParametersError, BigQueryInvalidParametersPublicDetails,
     BigQuerySerializationError,
 };
+use crate::sql::SqlLiteral;
 use crate::types::civil;
 use crate::types::decimal::{
     fmt_decimal_i256, parse_bignumeric, parse_numeric, BIGNUMERIC_SCALE, NUMERIC_SCALE, TAG_DECIMAL,
@@ -163,6 +164,38 @@ fn infer_node(label: ParamLabel, node: &Node) -> Result<QueryParameter, ParamFai
         parameter_type: Some(parameter_type),
         parameter_value: Some(parameter_value),
     })
+}
+
+/// The SQL literal of `value`, its type inferred as for a parameter, or `None` when `value`
+/// is NULL. `field` names the value in errors.
+pub(crate) fn literal_of<V: Serialize + ?Sized>(
+    field: &str,
+    value: &V,
+) -> Result<Option<SqlLiteral>, ParamFailure> {
+    let label = ParamLabel::Named(field);
+    let node = value
+        .serialize(NodeSerializer)
+        .map_err(|e| serialize_failure(label, e))?;
+    if node == Node::Null {
+        return Ok(None);
+    }
+    let (ty, value) = infer(&node, String::new()).map_err(|e| match e {
+        InferError::Codec(err) => serialize_failure(label, err),
+        InferError::Untyped { path, what } => {
+            let at = if path.is_empty() {
+                String::new()
+            } else {
+                format!(" at `{path}`")
+            };
+            invalid(
+                field.to_string(),
+                format!("the type of {what}{at} cannot be inferred from its value"),
+            )
+        }
+    })?;
+    SqlLiteral::try_from((&ty, &value))
+        .map(Some)
+        .map_err(|e| serialize_failure(label, e))
 }
 
 /// Encodes `value` as a parameter of type `ty`. `None` is a NULL of that type.

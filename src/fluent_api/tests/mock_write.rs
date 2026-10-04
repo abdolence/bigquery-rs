@@ -3,13 +3,16 @@
 use crate::fluent_api::tests::mockdb::MockDatabase;
 use crate::fluent_api::BigQueryExprBuilder;
 use crate::{
-    BigQueryChange, BigQueryChangeSequenceNumber, BigQueryChangeType, BigQueryInsertParams,
-    BigQueryResult, BigQueryStreamingWriteOptions, BigQueryTableRef, BigQueryWriteMode,
-    BigQueryWriteSummary, BigQueryWriteSupport,
+    BigQueryChange, BigQueryChangeSequenceNumber, BigQueryChangeType, BigQueryDatasetId,
+    BigQueryDatasetRef, BigQueryInsertParams, BigQueryResult, BigQueryStreamingWriteOptions,
+    BigQueryTableId, BigQueryWriteMode, BigQueryWriteSummary, BigQueryWriteSupport,
 };
 use async_trait::async_trait;
 use serde::Serialize;
 use std::cell::RefCell;
+
+const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
+const T: BigQueryTableId = BigQueryTableId::from_static("t");
 
 /// One insert as the mock saw it: rows as JSON, and for CDC each change's type and sequence.
 #[derive(Debug, Clone, PartialEq)]
@@ -120,7 +123,7 @@ async fn insert_chain_passes_mode_and_rows() {
 
     let summary = BigQueryExprBuilder::new(&db)
         .insert()
-        .into(("ds", "t"))
+        .into(DS.table(T))
         .objects(&rows)
         .execute()
         .await
@@ -128,7 +131,11 @@ async fn insert_chain_passes_mode_and_rows() {
     assert_eq!(summary.rows_written, 2);
     BigQueryExprBuilder::new(&db)
         .insert()
-        .into(("p", "ds", "t"))
+        .into(
+            BigQueryDatasetRef::new("p", DS)
+                .expect("valid test input")
+                .table(T),
+        )
         .object(&rows[0])
         .exactly_once()
         .execute()
@@ -136,7 +143,7 @@ async fn insert_chain_passes_mode_and_rows() {
         .expect("the insert runs");
     BigQueryExprBuilder::new(&db)
         .insert()
-        .into(("ds", "t"))
+        .into(DS.table(T))
         .objects(rows.iter())
         .options(BigQueryStreamingWriteOptions::new().with_max_batch_rows(7))
         .atomic()
@@ -145,7 +152,7 @@ async fn insert_chain_passes_mode_and_rows() {
         .expect("the insert runs");
     BigQueryExprBuilder::new(&db)
         .insert()
-        .into(("ds", "t"))
+        .into(DS.table(T))
         .objects(&rows)
         .upsert()
         .execute()
@@ -153,7 +160,7 @@ async fn insert_chain_passes_mode_and_rows() {
         .expect("the insert runs");
     BigQueryExprBuilder::new(&db)
         .insert()
-        .into(("ds", "t"))
+        .into(DS.table(T))
         .changes(vec![BigQueryChange {
             change_type: BigQueryChangeType::Delete,
             sequence_number: Some(BigQueryChangeSequenceNumber::from(10)),
@@ -176,10 +183,12 @@ async fn insert_chain_passes_mode_and_rows() {
             BigQueryWriteMode::Default
         ]
     );
-    assert_eq!(inserts[0].params.table, BigQueryTableRef::from(("ds", "t")));
+    assert_eq!(inserts[0].params.table, DS.table(T));
     assert_eq!(
         inserts[1].params.table,
-        BigQueryTableRef::from(("p", "ds", "t"))
+        BigQueryDatasetRef::new("p", DS)
+            .expect("valid test input")
+            .table(T)
     );
     assert_eq!(inserts[2].params.options.max_batch_rows, Some(7));
     assert_eq!(
@@ -201,7 +210,7 @@ async fn insert_chain_passes_mode_and_rows() {
 
     let refused = BigQueryExprBuilder::new(&db)
         .insert()
-        .into(("ds", "t"))
+        .into(DS.table(T))
         .objects(&rows)
         .upsert()
         .exactly_once()

@@ -100,7 +100,9 @@ mod tests {
     use crate::errors::BigQueryError;
     use crate::fluent_api::BigQueryExprBuilder;
     use crate::query::{infer_param, typed_param, ParamLabel};
-    use crate::{BigQueryFieldType, BigQueryReadCompression, BigQueryReadOptions};
+    use crate::{
+        BigQueryDatasetId, BigQueryFieldType, BigQueryReadCompression, BigQueryReadOptions,
+    };
     use std::collections::BTreeMap;
     use std::time::Duration;
 
@@ -124,7 +126,7 @@ mod tests {
                 .params(&Filter { min: 3 })
                 .param_as("t", BigQueryFieldType::Timestamp, None::<jiff::Timestamp>)
                 .location("EU")
-                .default_dataset("ds")
+                .default_dataset(BigQueryDatasetId::from_static("ds"))
                 .label("team", "data")
                 .labels([("env", "test")])
                 .maximum_bytes_billed(1_000_000)
@@ -159,7 +161,7 @@ mod tests {
                 .map_err(BigQueryError::from)?,
             ])
             .with_location("EU".into())
-            .with_default_dataset("ds".into())
+            .with_default_dataset(BigQueryDatasetId::from_static("ds").into())
             .with_labels(BTreeMap::from([
                 ("team".to_string(), "data".to_string()),
                 ("env".to_string(), "test".to_string()),

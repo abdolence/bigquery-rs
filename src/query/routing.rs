@@ -98,19 +98,10 @@ fn query_request(
     purpose: Purpose,
 ) -> BigQueryResult<PostQueryRequest> {
     let project_id = db.options().google_project_id.clone();
-    let default_dataset = params
-        .default_dataset
-        .as_ref()
-        .map(|d| match d.split_once('.') {
-            Some((project, dataset)) => DatasetReference {
-                project_id: project.to_string(),
-                dataset_id: dataset.to_string(),
-            },
-            None => DatasetReference {
-                project_id: project_id.clone(),
-                dataset_id: d.clone(),
-            },
-        });
+    let default_dataset = params.default_dataset.as_ref().map(|d| DatasetReference {
+        project_id: d.project().unwrap_or(&project_id).to_string(),
+        dataset_id: d.dataset().to_string(),
+    });
     let compression = match params.read_options.compression {
         BigQueryReadCompression::None => CompressionCodec::CompressionUnspecified,
         BigQueryReadCompression::Lz4 => CompressionCodec::Lz4Frame,
@@ -254,11 +245,16 @@ pub(crate) async fn query_rows(
     match destination {
         Some(table) => {
             span.record("/bigquery/route", "storage_read");
-            Ok(Rows::Table(BigQueryTableRef::from((
-                table.project_id,
-                table.dataset_id,
-                table.table_id,
-            ))))
+            let table = BigQueryTableRef::try_from(table).map_err(|err| {
+                system_error(
+                    "INVALID_DESTINATION_TABLE",
+                    format!(
+                        "The query job {} names a destination table this crate cannot read: {err}",
+                        job.job_id
+                    ),
+                )
+            })?;
+            Ok(Rows::Table(table))
         }
         None if statement_type_of(&details).as_deref() == Some("SELECT") => Err(system_error(
             "NO_DESTINATION_TABLE",

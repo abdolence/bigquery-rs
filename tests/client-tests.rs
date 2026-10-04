@@ -36,7 +36,7 @@ async fn both_channels_serve_calls() -> TestResult {
             project_id: project.clone(),
             dataset: Some(bq::Dataset {
                 dataset_reference: Some(bq::DatasetReference {
-                    dataset_id: dataset_id.clone(),
+                    dataset_id: dataset_id.to_string(),
                     project_id: project.clone(),
                 }),
                 default_table_expiration_ms: Some(2 * 3600 * 1000),
@@ -47,13 +47,13 @@ async fn both_channels_serve_calls() -> TestResult {
         .await
         .map_err(BigQueryError::from)?;
 
-    let result = write_stream_schema(&db, &project, &dataset_id).await;
+    let result = write_stream_schema(&db, &project, dataset_id.as_str()).await;
 
     let cleanup = db
         .dataset_client()
         .delete_dataset(bq::DeleteDatasetRequest {
             project_id: project.clone(),
-            dataset_id: dataset_id.clone(),
+            dataset_id: dataset_id.to_string(),
             delete_contents: true,
         })
         .await

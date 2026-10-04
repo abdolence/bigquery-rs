@@ -13,7 +13,7 @@ use std::panic::AssertUnwindSafe;
 pub struct Scratch {
     pub db: BigQueryDb,
     pub project: String,
-    pub dataset: String,
+    pub dataset: bigquery::BigQueryDatasetId,
 }
 
 impl Scratch {
@@ -30,11 +30,11 @@ impl Scratch {
             .table_client()
             .insert_table(bq::InsertTableRequest {
                 project_id: self.project.clone(),
-                dataset_id: self.dataset.clone(),
+                dataset_id: self.dataset.to_string(),
                 table: Some(bq::Table {
                     table_reference: Some(bq::TableReference {
                         project_id: self.project.clone(),
-                        dataset_id: self.dataset.clone(),
+                        dataset_id: self.dataset.to_string(),
                         table_id: table.to_string(),
                     }),
                     schema: Some(bq::TableSchema::from(&schema)),
@@ -49,11 +49,7 @@ impl Scratch {
             })
             .await
             .map_err(BigQueryError::from)?;
-        Ok(BigQueryTableRef::from((
-            self.project.as_str(),
-            self.dataset.as_str(),
-            table,
-        )))
+        Ok(BigQueryDatasetRef::new(&self.project, self.dataset.clone())?.table(table.parse()?))
     }
 
     /// The rows of `sql` as text cells, `None` for NULL, and the bytes BigQuery billed.
@@ -127,7 +123,7 @@ where
             project_id: project.clone(),
             dataset: Some(bq::Dataset {
                 dataset_reference: Some(bq::DatasetReference {
-                    dataset_id: dataset.clone(),
+                    dataset_id: dataset.to_string(),
                     project_id: project.clone(),
                 }),
                 default_table_expiration_ms: Some(2 * 3600 * 1000),
@@ -150,7 +146,7 @@ where
         .dataset_client()
         .delete_dataset(bq::DeleteDatasetRequest {
             project_id: project,
-            dataset_id: dataset.clone(),
+            dataset_id: dataset.to_string(),
             delete_contents: true,
         })
         .await;

@@ -404,8 +404,14 @@ fn expected(id: i64) -> AllTypes {
 async fn read_every_type_and_mode() -> TestResult {
     with_scratch("read_every_type_and_mode", async |s: &Scratch| {
         s.sql(&all_types_sql()).await?;
-        let table = (s.dataset.as_str(), "t_all");
-        let mut rows: Vec<AllTypes> = s.db.fluent().select().from(table).obj().query().await?;
+        let table = s.dataset.table(BigQueryTableId::from_static("t_all"));
+        let mut rows: Vec<AllTypes> =
+            s.db.fluent()
+                .select()
+                .from(table.clone())
+                .obj()
+                .query()
+                .await?;
         rows.sort_by_key(|r| r.id);
         assert_eq!(rows, [expected(1), expected(2)]);
 
@@ -449,13 +455,18 @@ async fn read_projection_and_row_restriction() -> TestResult {
         "read_projection_and_row_restriction",
         async |s: &Scratch| {
             s.sql(PEOPLE_SQL).await?;
-            let table = (s.dataset.as_str(), "people");
+            let table = s.dataset.table(BigQueryTableId::from_static("people"));
 
             let recent: BTreeSet<Person> =
                 s.db.fluent()
                     .select()
-                    .from(table)
-                    .filter("year >= 2010 AND county != 'Norrbotten'")
+                    .from(table.clone())
+                    .filter(|f| {
+                        f.for_all([
+                            f.field("year").ge(2010),
+                            f.field("county").neq("Norrbotten"),
+                        ])
+                    })
                     .obj::<Person>()
                     .stream_query()
                     .await?
@@ -468,8 +479,8 @@ async fn read_projection_and_row_restriction() -> TestResult {
                 s.db.fluent()
                     .select()
                     .fields(["name", "id"])
-                    .from(table)
-                    .filter("id <= 2")
+                    .from(table.clone())
+                    .filter_sql("id <= 2")
                     .record_batches()
                     .await?
                     .try_collect()
@@ -544,7 +555,7 @@ async fn read_streams_merge() -> TestResult {
             .db
             .fluent()
             .select()
-            .from((s.dataset.as_str(), "parts"))
+            .from(s.dataset.table(BigQueryTableId::from_static("parts")))
             .options(options)
             .obj::<Part>()
             .stream_query_with_errors()

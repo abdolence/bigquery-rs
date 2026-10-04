@@ -20,7 +20,11 @@ pub async fn setup(project: &str) -> TestResult<BigQueryDb> {
 
 /// A dataset name unique to this run, `<prefix>_<unix seconds>_<nanos>`, so that concurrent runs
 /// never share one and a leftover is easy to attribute.
-pub fn scratch_dataset_id(prefix: &str) -> TestResult<String> {
+pub fn scratch_dataset_id(prefix: &str) -> TestResult<BigQueryDatasetId> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-    Ok(format!("{prefix}_{}_{}", now.as_secs(), now.subsec_nanos()))
+    Ok(BigQueryDatasetId::new(format!(
+        "{prefix}_{}_{}",
+        now.as_secs(),
+        now.subsec_nanos()
+    ))?)
 }

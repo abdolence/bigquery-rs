@@ -206,7 +206,7 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
             let run = |sql: &str| {
                 l.db.fluent()
                     .query(sql.to_string())
-                    .default_dataset(l.run.as_str())
+                    .default_dataset(l.run.clone())
                     .label(RUN_LABEL, l.run.as_str())
             };
             let created = run("CREATE TABLE t (id INT64, name STRING)")
@@ -251,7 +251,10 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                     .map_err(errors::BigQueryError::from)?
                     .into_inner();
             let labels = details.configuration.map(|c| c.labels).unwrap_or_default();
-            assert_eq!(labels.get(RUN_LABEL), Some(&l.run));
+            assert_eq!(
+                labels.get(RUN_LABEL).map(String::as_str),
+                Some(l.run.as_str())
+            );
 
             let estimate = run("SELECT id, name FROM t").dry_run().await?;
             assert!(
@@ -298,7 +301,7 @@ async fn injection_payloads_stay_data() -> TestResult {
         let run = |sql: &str| {
             l.db.fluent()
                 .query(sql.to_string())
-                .default_dataset(l.run.as_str())
+                .default_dataset(l.run.clone())
                 .label(RUN_LABEL, l.run.as_str())
         };
         run("CREATE TABLE people (name STRING)").execute().await?;

@@ -69,7 +69,13 @@ mod tests {
     use super::*;
     use crate::fluent_api::BigQueryExprBuilder;
     use crate::paths;
-    use crate::{BigQueryReadCompression, BigQueryReadOptions, BigQueryTableRef};
+    use crate::{
+        BigQueryDatasetId, BigQueryDatasetRef, BigQueryReadCompression, BigQueryReadOptions,
+        BigQueryTableId,
+    };
+
+    const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
+    const T: BigQueryTableId = BigQueryTableId::from_static("t");
 
     #[derive(serde::Deserialize)]
     struct Row {
@@ -88,8 +94,12 @@ mod tests {
             BigQueryExprBuilder::new(&db)
                 .select()
                 .fields(paths!(Row::{name, n}))
-                .from(("p", "ds", "t"))
-                .filter("n > 10")
+                .from(
+                    BigQueryDatasetRef::new("p", DS)
+                        .expect("valid test input")
+                        .table(T),
+                )
+                .filter_sql("n > 10")
                 .snapshot_time(at)
                 .sample_percentage(50.0)
                 .options(options.clone())
@@ -101,18 +111,22 @@ mod tests {
         drop(
             BigQueryExprBuilder::new(&db)
                 .select()
-                .from(("ds", "t"))
+                .from(DS.table(T))
                 .record_batches()
                 .await?,
         );
 
-        let full = BigQueryReadParams::new(BigQueryTableRef::from(("p", "ds", "t")))
-            .with_selected_fields(vec!["name".into(), "n".into()])
-            .with_row_restriction("n > 10".into())
-            .with_snapshot_time(at)
-            .with_sample_percentage(50.0)
-            .with_options(options);
-        let bare = BigQueryReadParams::new(BigQueryTableRef::from(("ds", "t")));
+        let full = BigQueryReadParams::new(
+            BigQueryDatasetRef::new("p", DS)
+                .expect("valid test input")
+                .table(T),
+        )
+        .with_selected_fields(vec!["name".into(), "n".into()])
+        .with_row_restriction("n > 10".into())
+        .with_snapshot_time(at)
+        .with_sample_percentage(50.0)
+        .with_options(options);
+        let bare = BigQueryReadParams::new(DS.table(T));
         assert_eq!(
             take_calls(),
             vec![
@@ -124,5 +138,77 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn filter_sends_the_rendered_restriction() -> BigQueryResult<()> {
+        let db = MockDatabase;
+        BigQueryExprBuilder::new(&db)
+            .select()
+            .from(DS.table(T))
+            .filter(|f| {
+                f.for_all([
+                    f.field(crate::path!(Row::name)).eq("x' OR TRUE --"),
+                    f.field(crate::path!(Row::n)).gt(10),
+                ])
+            })
+            .obj::<Row>()
+            .query()
+            .await?;
+        BigQueryExprBuilder::new(&db)
+            .select()
+            .from(DS.table(T))
+            .filter_sql("n > 10")
+            .filter(|f| f.for_all([None::<crate::BigQueryFilter>]))
+            .obj::<Row>()
+            .query()
+            .await?;
+        let restrictions: Vec<Option<String>> = take_calls()
+            .into_iter()
+            .map(|(_, params)| params.row_restriction)
+            .collect();
+        assert_eq!(
+            restrictions,
+            [
+                Some("`name` = 'x\\' OR TRUE --' AND `n` > 10".to_string()),
+                None
+            ],
+            "a filter that builds to None clears the earlier one"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_refused_filter_fails_every_terminal_before_any_call() {
+        let db = MockDatabase;
+        let select = || {
+            BigQueryExprBuilder::new(&db)
+                .select()
+                .from(DS.table(T))
+                .filter(|f| f.field("n\0").eq(1))
+        };
+        let invalid = |result: BigQueryResult<()>| {
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::errors::BigQueryError::InvalidParametersError(_))
+                ),
+                "{result:?}"
+            )
+        };
+        invalid(select().obj::<Row>().query().await.map(drop));
+        invalid(select().obj::<Row>().stream_query().await.map(drop));
+        invalid(
+            select()
+                .obj::<Row>()
+                .stream_query_with_errors()
+                .await
+                .map(drop),
+        );
+        invalid(select().record_batches().await.map(drop));
+        assert!(take_calls().is_empty(), "nothing is sent");
+
+        let replaced = select().filter_sql("n > 1").record_batches().await;
+        assert!(replaced.is_ok(), "the last filter call wins");
     }
 }

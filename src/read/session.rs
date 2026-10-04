@@ -117,11 +117,11 @@ async fn table_columns(
 ) -> BigQueryResult<Vec<String>> {
     let request = GetTableRequest {
         project_id: table
-            .project_id
-            .clone()
-            .unwrap_or_else(|| db.options().google_project_id.clone()),
-        dataset_id: table.dataset_id.clone(),
-        table_id: table.table_id.clone(),
+            .project()
+            .unwrap_or(&db.options().google_project_id)
+            .to_string(),
+        dataset_id: table.dataset().to_string(),
+        table_id: table.table().to_string(),
         view: TableMetadataView::Basic.into(),
         ..Default::default()
     };

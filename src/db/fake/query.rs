@@ -133,7 +133,10 @@ mod tests {
     };
     use crate::db::fake::FakeBigQuery;
     use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-    use crate::{BigQueryDmlStats, BigQueryJobRef, BigQueryQueryOutcome, BigQueryResult};
+    use crate::{
+        BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobRef,
+        BigQueryQueryOutcome, BigQueryResult,
+    };
     use arrow_array::{ArrayRef, Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use futures::{StreamExt, TryStreamExt};
@@ -146,6 +149,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
 
     /// `id, name`, with `ids` as the ids and `Åsa <id>` as the names.
     fn people(ids: &[i64]) -> RecordBatch {
@@ -328,7 +333,7 @@ mod tests {
             .query("SELECT @a")
             .param("a", 1)
             .location("EU")
-            .default_dataset("other.ds")
+            .default_dataset(BigQueryDatasetRef::new("other", DS)?)
             .label("team", "data")
             .maximum_bytes_billed(10)
             .use_query_cache(false)
@@ -343,7 +348,7 @@ mod tests {
             .fluent()
             .query("SELECT ?")
             .positional_param(1)
-            .default_dataset("ds")
+            .default_dataset(DS)
             .request_id("req-2")
             .execute()
             .await?;
@@ -837,33 +842,6 @@ mod tests {
         assert!(fake.calls().is_empty());
     }
 
-    /// Values that would change a statement if they were spliced into its text.
-    fn injection_corpus() -> Vec<String> {
-        let mut corpus: Vec<String> = [
-            "'; DROP TABLE x; --",
-            "' OR '1'='1",
-            "`backtick`",
-            "\\'",
-            "\\\\",
-            "\"",
-            "/* comment */",
-            "--",
-            "#",
-            "a\nb",
-            "a\rb",
-            "a\tb",
-            "a\0b",
-            "\u{2019} OR \u{2019}1\u{2019}=\u{2019}1",
-            "\u{FF07}; DROP TABLE x; --",
-            "@other_param",
-            "?",
-        ]
-        .map(String::from)
-        .into();
-        corpus.push("'".repeat(1 << 20));
-        corpus
-    }
-
     #[derive(serde::Serialize)]
     struct Holder<'a> {
         v: &'a str,
@@ -928,7 +906,7 @@ mod tests {
         }]);
         let named = "SELECT @s, @arr, @st.v, JSON_VALUE(@j, '$.v') -- @s ?";
         let positional = "SELECT ?, ?, ?.v, JSON_VALUE(?, '$.v') /* ? */";
-        let corpus = injection_corpus();
+        let corpus = crate::sql::tests::injection_corpus();
         for payload in &corpus {
             let p = payload.as_str();
             let all = AllForms {

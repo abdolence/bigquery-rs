@@ -124,7 +124,7 @@ async fn round_trip_every_type_through_dml() -> TestResult {
         let mut got: Vec<Resident> =
             s.db.fluent()
                 .select()
-                .from((s.dataset.as_str(), "residents"))
+                .from(s.dataset.table(BigQueryTableId::from_static("residents")))
                 .obj()
                 .query()
                 .await?;
@@ -208,6 +208,8 @@ struct EveryType {
 }
 
 /// The GoogleSQL type of each `<mode>_<name>` column of [`EveryType`].
+const EVERY_TYPE: BigQueryTableId = BigQueryTableId::from_static("every_type");
+
 const EVERY_TYPE_COLUMNS: &[(&str, &str)] = &[
     ("int64", "INT64"),
     ("float64", "FLOAT64"),
@@ -380,7 +382,7 @@ async fn round_trip_every_type_and_mode_through_the_writer() -> TestResult {
             let summary =
                 s.db.fluent()
                     .insert()
-                    .into((s.project.as_str(), s.dataset.as_str(), "every_type"))
+                    .into(BigQueryDatasetRef::new(&s.project, s.dataset.clone())?.table(EVERY_TYPE))
                     .objects(&expected)
                     .execute()
                     .await?;
@@ -388,7 +390,7 @@ async fn round_trip_every_type_and_mode_through_the_writer() -> TestResult {
             let mut got: Vec<EveryType> =
                 s.db.fluent()
                     .select()
-                    .from((s.dataset.as_str(), "every_type"))
+                    .from(s.dataset.table(EVERY_TYPE))
                     .obj()
                     .query()
                     .await?;

@@ -1,7 +1,7 @@
 use crate::query::{infer_param, struct_params, typed_param, ParamFailure, ParamLabel};
 use crate::{
-    BigQueryDryRunResult, BigQueryParamType, BigQueryQueryOutcome, BigQueryQueryParams,
-    BigQueryQuerySupport, BigQueryReadOptions, BigQueryResult,
+    BigQueryDatasetRef, BigQueryDryRunResult, BigQueryParamType, BigQueryQueryOutcome,
+    BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions, BigQueryResult,
 };
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
@@ -123,9 +123,9 @@ where
         }
     }
 
-    /// Resolves unqualified table names in this dataset: `dataset` in the client's project,
-    /// or `project.dataset`.
-    pub fn default_dataset(self, dataset: impl Into<String>) -> Self {
+    /// Resolves unqualified table names in this dataset: a [`BigQueryDatasetId`](crate::BigQueryDatasetId) in the
+    /// client's project, or a [`BigQueryDatasetRef`] for another project.
+    pub fn default_dataset(self, dataset: impl Into<BigQueryDatasetRef>) -> Self {
         Self {
             params: self.params.with_default_dataset(dataset.into()),
             ..self

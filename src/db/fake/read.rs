@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::db::fake::FakeBigQuery;
     use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-    use crate::BigQueryResult;
+    use crate::{BigQueryDatasetId, BigQueryResult, BigQueryTableId};
     use arrow_array::{ArrayRef, Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use futures::StreamExt;
@@ -190,6 +190,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
+    const T: BigQueryTableId = BigQueryTableId::from_static("t");
 
     /// `id, name, extra`, with `ids` as the ids.
     fn people(ids: &[i64]) -> RecordBatch {
@@ -264,7 +267,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(("ds", "t"))
+            .from(DS.table(T))
             .obj::<Person>()
             .stream_query_with_errors()
             .await?;
@@ -282,7 +285,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(("ds", "t"))
+            .from(DS.table(T))
             .obj::<Person>()
             .query()
             .await?;
@@ -339,7 +342,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(("ds", "t"))
+            .from(DS.table(T))
             .obj::<Person>()
             .query()
             .await?;
@@ -372,13 +375,13 @@ mod tests {
             .fluent()
             .select()
             .fields(["id", "nope"])
-            .from(("ds", "t"))
+            .from(DS.table(T))
             .obj::<Person>()
             .query()
             .await;
         match result {
             Err(BigQueryError::SchemaMismatchError(err)) => {
-                assert_eq!(err.table, ("ds", "t").into());
+                assert_eq!(err.table, DS.table(T));
                 assert!(err.details.contains("nope"), "{}", err.details);
             }
             other => panic!("expected a schema mismatch, got {other:?}"),
@@ -599,7 +602,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(("ds", "t"))
+            .from(DS.table(T))
             .obj::<Person>()
             .stream_query()
             .await?
@@ -627,7 +630,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(("ds", "t"))
+            .from(DS.table(T))
             .record_batches()
             .await?
             .collect::<Vec<_>>()
@@ -671,7 +674,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(("ds", "t"))
+            .from(DS.table(T))
             .record_batches()
             .await?
             .collect::<Vec<_>>()

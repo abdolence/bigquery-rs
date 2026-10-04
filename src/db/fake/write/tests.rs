@@ -1,13 +1,19 @@
 use super::*;
 use crate::db::fake::FakeBigQuery;
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-use crate::{BigQueryStreamingWriteOptions, BigQueryWriteMode, BigQueryWriteResponse};
+use crate::{
+    BigQueryDatasetId, BigQueryStreamingWriteOptions, BigQueryTableId, BigQueryWriteMode,
+    BigQueryWriteResponse,
+};
 use futures::StreamExt;
 use serde::Serialize;
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
+const T: BigQueryTableId = BigQueryTableId::from_static("t");
 
 #[derive(Serialize)]
 struct Row {
@@ -112,7 +118,7 @@ async fn default_mode_resends_unacked_batches_after_reconnect() {
     .await;
     let (mut writer, responses) = fake
         .db
-        .create_streaming_writer_with_options::<Row>(("ds", "t"), options())
+        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
         .await
         .expect("the writer opens");
     for id in 0..3 {
@@ -182,7 +188,7 @@ async fn committed_mode_counts_offset_already_exists_as_written() {
     let (mut writer, responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            ("ds", "t"),
+            DS.table(T),
             options().with_mode(BigQueryWriteMode::Committed),
         )
         .await
@@ -266,7 +272,7 @@ async fn committed_mode_resequences_after_row_errors() {
         let (mut writer, responses) = fake
             .db
             .create_streaming_writer_with_options::<Row>(
-                ("ds", "t"),
+                DS.table(T),
                 BigQueryStreamingWriteOptions::new()
                     .with_mode(BigQueryWriteMode::Committed)
                     .with_max_batch_rows(2),
@@ -340,7 +346,7 @@ async fn pending_mode_commits_only_without_failed_batches() {
         let (mut writer, _responses) = fake
             .db
             .create_streaming_writer_with_options::<Row>(
-                ("ds", "t"),
+                DS.table(T),
                 options().with_mode(BigQueryWriteMode::Pending),
             )
             .await
@@ -399,7 +405,7 @@ async fn row_errors_carry_write_order_indexes() {
     let (mut writer, responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            ("ds", "t"),
+            DS.table(T),
             BigQueryStreamingWriteOptions::new().with_max_batch_rows(3),
         )
         .await
@@ -449,7 +455,7 @@ async fn updated_schema_switches_plan_at_a_batch_boundary() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            ("ds", "t"),
+            DS.table(T),
             BigQueryStreamingWriteOptions::new(),
         )
         .await
@@ -505,7 +511,7 @@ async fn write_stream_is_sent_on_every_request() {
     .await;
     let (mut writer, _responses) = fake
         .db
-        .create_streaming_writer_with_options::<Row>(("ds", "t"), options())
+        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
         .await
         .expect("the writer opens");
     for id in 0..3 {
@@ -548,7 +554,7 @@ async fn unknown_field_refreshes_schema_once_then_fails() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            ("ds", "t"),
+            DS.table(T),
             BigQueryStreamingWriteOptions::new()
                 .with_schema_refresh_interval(Duration::from_millis(300)),
         )
@@ -621,7 +627,7 @@ async fn relaxed_mode_reconnects() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            ("ds", "t"),
+            DS.table(T),
             BigQueryStreamingWriteOptions::new(),
         )
         .await
@@ -672,7 +678,7 @@ async fn write_waits_at_the_inflight_limit() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            ("ds", "t"),
+            DS.table(T),
             options().with_max_inflight_requests(2),
         )
         .await
@@ -706,7 +712,7 @@ async fn idle_batch_is_flushed_after_the_delay() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            ("ds", "t"),
+            DS.table(T),
             BigQueryStreamingWriteOptions::new().with_max_batch_delay(Duration::from_millis(50)),
         )
         .await
@@ -739,7 +745,7 @@ async fn oversize_stream_status_is_not_retried() {
     .await;
     let (mut writer, responses) = fake
         .db
-        .create_streaming_writer_with_options::<Row>(("ds", "t"), options())
+        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
         .await
         .expect("the writer opens");
     within(writer.write(&row(0)))
@@ -808,7 +814,7 @@ async fn drop_without_finish_warns() {
     let _guard = tracing::subscriber::set_default(subscriber);
     let (mut writer, _responses) = fake
         .db
-        .create_streaming_writer::<Row>(("ds", "t"))
+        .create_streaming_writer::<Row>(DS.table(T))
         .await
         .expect("the writer opens");
     within(writer.write(&row(0)))

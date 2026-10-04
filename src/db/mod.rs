@@ -4,6 +4,9 @@ pub use options::*;
 mod retry;
 pub(crate) use retry::retry_delay;
 
+mod ids;
+pub use ids::*;
+
 mod table_ref;
 pub use table_ref::*;
 
@@ -124,11 +127,21 @@ impl BigQueryDb {
     ///
     /// Both channels share one token, so the token source is asked for a new one only when it
     /// expires, never once per channel.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for the field `google_project_id` if it is
+    /// empty, before any credentials are read.
     pub async fn with_options_token_source(
         options: BigQueryDbOptions,
         token_scopes: Vec<String>,
         token_source_type: TokenSourceType,
     ) -> BigQueryResult<Self> {
+        if options.google_project_id.is_empty() {
+            return Err(BigQueryError::invalid_parameters(
+                "google_project_id",
+                "must not be empty",
+            ));
+        }
         let api_url = options.effective_bigquery_api_url().to_string();
         let storage_api_url = options.effective_bigquery_storage_api_url().to_string();
 
@@ -264,5 +277,23 @@ struct SharedTokenSource(Arc<GoogleAuthTokenGenerator>);
 impl Source for SharedTokenSource {
     async fn token(&self) -> gcloud_sdk::error::Result<gcloud_sdk::Token> {
         self.0.create_token().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::BigQueryInvalidParametersError;
+
+    #[tokio::test]
+    async fn an_empty_project_id_fails_client_construction() {
+        let result = BigQueryDb::with_options(BigQueryDbOptions::new(String::new())).await;
+        match result {
+            Err(BigQueryError::InvalidParametersError(BigQueryInvalidParametersError {
+                public,
+            })) => assert_eq!(public.field, "google_project_id"),
+            Err(other) => panic!("expected an invalid-parameters error, got {other:?}"),
+            Ok(_) => panic!("expected an invalid-parameters error, got a client"),
+        }
     }
 }

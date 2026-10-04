@@ -1,4 +1,4 @@
-use crate::{BigQueryFieldType, BigQueryReadOptions, BigQueryTableSchema};
+use crate::{BigQueryDatasetRef, BigQueryFieldType, BigQueryReadOptions, BigQueryTableSchema};
 use gcloud_sdk::google::cloud::bigquery::v2::QueryParameter;
 use rsb_derive::Builder;
 use std::collections::BTreeMap;
@@ -17,9 +17,8 @@ pub struct BigQueryQueryParams {
     /// [`location`](crate::BigQueryDbOptions::location) is sent, and with neither BigQuery
     /// finds the location from the tables the statement reads.
     pub location: Option<String>,
-    /// The dataset that unqualified table names resolve in: `dataset` in the client's project,
-    /// or `project.dataset`.
-    pub default_dataset: Option<String>,
+    /// The dataset that unqualified table names resolve in.
+    pub default_dataset: Option<BigQueryDatasetRef>,
     /// Labels attached to the job.
     #[default = "BTreeMap::new()"]
     pub labels: BTreeMap<String, String>,

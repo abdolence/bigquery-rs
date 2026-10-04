@@ -15,7 +15,7 @@ const PREFIX: &str = "bqp4b";
 async fn write<T: Serialize + Sync>(s: &Scratch, table: &str, rows: &[T]) -> BigQueryResult<()> {
     s.db.fluent()
         .insert()
-        .into((s.project.as_str(), s.dataset.as_str(), table))
+        .into(BigQueryDatasetRef::new(&s.project, s.dataset.clone())?.table(table.parse()?))
         .objects(rows)
         .execute()
         .await
@@ -29,7 +29,7 @@ async fn read<T: for<'de> Deserialize<'de> + Send + 'static>(
     Ok(s.db
         .fluent()
         .select()
-        .from((s.dataset.as_str(), table))
+        .from(s.dataset.table(table.parse()?))
         .obj()
         .query()
         .await?)
@@ -218,7 +218,7 @@ async fn invalid_json_text_is_rejected_by_bigquery() -> TestResult {
             let stored: Vec<serde_json::Value> =
                 s.db.fluent()
                     .select()
-                    .from((s.dataset.as_str(), "raw"))
+                    .from(s.dataset.table(BigQueryTableId::from_static("raw")))
                     .obj()
                     .query()
                     .await?;

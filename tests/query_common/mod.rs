@@ -16,7 +16,7 @@ pub struct Live {
     pub db: BigQueryDb,
     pub project: String,
     /// The run label's value, also the scratch dataset's name when there is one.
-    pub run: String,
+    pub run: bigquery::BigQueryDatasetId,
     started_ms: u64,
 }
 
@@ -44,7 +44,7 @@ impl Live {
                     .configuration
                     .as_ref()
                     .and_then(|c| c.labels.get(RUN_LABEL))
-                    .is_some_and(|run| *run == self.run);
+                    .is_some_and(|run| self.run == run.as_str());
                 if labelled {
                     billed += job
                         .statistics
@@ -117,13 +117,13 @@ where
         started_ms,
     };
     if with_dataset {
-        create_dataset(&live.db, &live.project, &live.run).await?;
+        create_dataset(&live.db, &live.project, live.run.as_str()).await?;
     }
     let result = std::panic::AssertUnwindSafe(body(&live))
         .catch_unwind()
         .await;
     let cleanup = if with_dataset {
-        delete_dataset(&live.db, &live.project, &live.run).await
+        delete_dataset(&live.db, &live.project, live.run.as_str()).await
     } else {
         Ok(())
     };

@@ -8,10 +8,12 @@ use crate::{BigQueryQuerySupport, BigQueryReadSupport, BigQueryWriteSupport};
 mod insert_builder;
 mod query_builder;
 mod select_builder;
+mod select_filter_builder;
 
 pub use insert_builder::*;
 pub use query_builder::*;
 pub use select_builder::*;
+pub use select_filter_builder::*;
 
 /// The entry point for fluent BigQuery operations, obtained from
 /// [`BigQueryDb::fluent()`](crate::BigQueryDb::fluent).
