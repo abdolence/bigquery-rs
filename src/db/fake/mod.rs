@@ -5,6 +5,7 @@
 //! time, a status at any point, a dropped connection or a call that never answers. The
 //! per-API answers live in the sibling `read`, `write` and `query` modules.
 
+mod admin;
 mod query;
 mod read;
 mod table;

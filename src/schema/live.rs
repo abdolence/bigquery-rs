@@ -54,6 +54,38 @@ fn range_bound(table: &v2::Table, what: &str, text: &str) -> BigQueryResult<i64>
     })
 }
 
+/// The partitioning of `raw` and its partition expiration in milliseconds, as the crate models
+/// them.
+///
+/// # Errors
+/// [`BigQueryError::InvalidParametersError`] for partitioning the crate does not model.
+pub(crate) fn table_partitioning(
+    raw: &v2::Table,
+) -> BigQueryResult<(Option<BigQueryPartitioning>, Option<i64>)> {
+    Ok(match (&raw.time_partitioning, &raw.range_partitioning) {
+        (Some(time), _) => (
+            Some(BigQueryPartitioning::Time {
+                unit: partition_unit(raw, &time.r#type)?,
+                column: time.field.clone().filter(|f| !f.is_empty()),
+            }),
+            time.expiration_ms.filter(|ms| *ms > 0),
+        ),
+        (None, Some(range)) => {
+            let bounds = range.range.clone().unwrap_or_default();
+            (
+                Some(BigQueryPartitioning::Range {
+                    column: range.field.clone(),
+                    start: range_bound(raw, "start", &bounds.start)?,
+                    end: range_bound(raw, "end", &bounds.end)?,
+                    interval: range_bound(raw, "interval", &bounds.interval)?,
+                }),
+                None,
+            )
+        }
+        (None, None) => (None, None),
+    })
+}
+
 /// # Errors
 /// [`BigQueryError::InvalidParametersError`] for a view, a materialized view or an external
 /// table, which a declaration cannot own, and for partitioning the crate does not model; a
@@ -74,29 +106,7 @@ impl TryFrom<v2::Table> for LiveTable {
             .map(BigQueryTableSchema::try_from)
             .transpose()?
             .unwrap_or(BigQueryTableSchema { fields: Vec::new() });
-        let (partitioning, partition_expiration_ms) =
-            match (&raw.time_partitioning, &raw.range_partitioning) {
-                (Some(time), _) => (
-                    Some(BigQueryPartitioning::Time {
-                        unit: partition_unit(&raw, &time.r#type)?,
-                        column: time.field.clone().filter(|f| !f.is_empty()),
-                    }),
-                    time.expiration_ms.filter(|ms| *ms > 0),
-                ),
-                (None, Some(range)) => {
-                    let bounds = range.range.clone().unwrap_or_default();
-                    (
-                        Some(BigQueryPartitioning::Range {
-                            column: range.field.clone(),
-                            start: range_bound(&raw, "start", &bounds.start)?,
-                            end: range_bound(&raw, "end", &bounds.end)?,
-                            interval: range_bound(&raw, "interval", &bounds.interval)?,
-                        }),
-                        None,
-                    )
-                }
-                (None, None) => (None, None),
-            };
+        let (partitioning, partition_expiration_ms) = table_partitioning(&raw)?;
         Ok(Self {
             schema,
             partitioning,

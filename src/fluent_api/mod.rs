@@ -7,12 +7,14 @@ use crate::{
     BigQueryQuerySupport, BigQueryReadSupport, BigQuerySchemaSupport, BigQueryWriteSupport,
 };
 
+mod dataset_builder;
 mod insert_builder;
 mod query_builder;
 mod schema_builder;
 mod select_builder;
 mod select_filter_builder;
 
+pub use dataset_builder::*;
 pub use insert_builder::*;
 pub use query_builder::*;
 pub use schema_builder::*;

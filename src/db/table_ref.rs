@@ -1,6 +1,6 @@
 use crate::errors::BigQueryError;
 use crate::{BigQueryDatasetId, BigQueryResult, BigQueryTableId};
-use gcloud_sdk::google::cloud::bigquery::v2::TableReference;
+use gcloud_sdk::google::cloud::bigquery::v2::{DatasetReference, TableReference};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
@@ -91,6 +91,28 @@ impl FromStr for BigQueryDatasetRef {
             Some((project, dataset)) => Self::new(project, dataset.parse()?),
             None => Ok(Self::from(s.parse::<BigQueryDatasetId>()?)),
         }
+    }
+}
+
+/// A dataset the v2 API names, such as a listed one.
+///
+/// # Errors
+/// [`BigQueryError::InvalidParametersError`] naming the part that is empty or invalid.
+impl TryFrom<DatasetReference> for BigQueryDatasetRef {
+    type Error = BigQueryError;
+
+    fn try_from(dataset: DatasetReference) -> Result<Self, Self::Error> {
+        Self::new(dataset.project_id, dataset.dataset_id.try_into()?)
+    }
+}
+
+/// `project.dataset`, or `dataset` when the project is unset: the text [`FromStr`] reads back.
+impl Display for BigQueryDatasetRef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(project) = &self.project {
+            write!(f, "{project}.")?;
+        }
+        write!(f, "{}", self.dataset)
     }
 }
 

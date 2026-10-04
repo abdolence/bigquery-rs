@@ -15,6 +15,7 @@ mod plan;
 pub use plan::*;
 
 mod live;
+pub(crate) use live::table_partitioning;
 
 mod diff;
 

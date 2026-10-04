@@ -4,15 +4,17 @@
 
 use crate::schema::BigQueryTableDeclarationDraft;
 use crate::{
+    BigQueryDatasetBuilder, BigQueryDatasetListBuilder, BigQueryDatasetRef, BigQueryDb,
     BigQueryPartitionUnit, BigQueryPartitioning, BigQueryRecreatePolicy, BigQueryResult,
-    BigQuerySchemaColumn, BigQuerySchemaColumnsBuilder, BigQuerySchemaSupport,
+    BigQuerySchemaColumn, BigQuerySchemaColumnsBuilder, BigQuerySchemaSupport, BigQueryTable,
     BigQueryTableDeclaration, BigQueryTablePlan, BigQueryTableRef, BigQueryTableSyncReport,
 };
 use std::time::Duration;
 
 /// The schema namespace, from [`BigQueryExprBuilder::schema`](crate::BigQueryExprBuilder::schema).
 ///
-/// Tables are the one kind of schema object it declares so far.
+/// Tables are the one kind of schema object it declares so far; datasets have the plain calls
+/// of [`dataset`](Self::dataset) and [`datasets`](Self::datasets).
 #[derive(Clone, Debug)]
 pub struct BigQuerySchemaBuilder<'a, D>
 where
@@ -42,7 +44,42 @@ where
     }
 }
 
-/// One table's declaration. End it with [`plan`](Self::plan) or [`sync`](Self::sync).
+impl<'a> BigQuerySchemaBuilder<'a, BigQueryDb> {
+    /// Names a dataset for one plain call: create, get, update, delete, or list its tables.
+    ///
+    /// ```rust,no_run
+    /// # use bigquery::*;
+    /// # async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+    /// const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    ///
+    /// let shop = db
+    ///     .fluent()
+    ///     .schema()
+    ///     .dataset(SHOP)
+    ///     .create()
+    ///     .location("EU")
+    ///     .labels([("team", "shop")])
+    ///     .execute()
+    ///     .await?;
+    /// println!("created {} in {:?}", shop.reference, shop.location);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    pub fn dataset(self, dataset: impl Into<BigQueryDatasetRef>) -> BigQueryDatasetBuilder<'a> {
+        BigQueryDatasetBuilder::new(self.db, dataset.into())
+    }
+
+    /// Starts listing the datasets of the client's project.
+    #[inline]
+    pub fn datasets(self) -> BigQueryDatasetListBuilder<'a> {
+        BigQueryDatasetListBuilder::new(self.db)
+    }
+}
+
+/// One table's declaration. End it with [`plan`](Self::plan) or [`sync`](Self::sync), or with
+/// one of the plain calls [`get`](Self::get) and [`delete`](Self::delete), which act on the
+/// table and ignore whatever the chain declared.
 ///
 /// What the chain declares is what `.sync()` makes the table hold; what it leaves undeclared
 /// (a column, a label, clustering, the primary key, the partitioning, a description or a
@@ -311,5 +348,27 @@ where
     pub async fn sync(self) -> BigQueryResult<BigQueryTableSyncReport> {
         let declaration = BigQueryTableDeclaration::try_from(self.draft)?;
         self.db.sync_table_schema(declaration).await
+    }
+}
+
+impl BigQueryTableSchemaBuilder<'_, BigQueryDb> {
+    /// Reads the table: its schema, sizes and settings. Views and other table-like objects
+    /// read as well.
+    ///
+    /// # Errors
+    /// [`DataNotFoundError`](crate::errors::BigQueryError::DataNotFoundError) for a table that
+    /// does not exist.
+    pub async fn get(self) -> BigQueryResult<BigQueryTable> {
+        self.db.get_table(&self.draft.table).await
+    }
+
+    /// **Deletes the table with every row in it.** Nothing is kept for an undo, and open
+    /// writers to it fail.
+    ///
+    /// # Errors
+    /// [`DataNotFoundError`](crate::errors::BigQueryError::DataNotFoundError) for a table that
+    /// does not exist. A retry after a lost response can report the table it deleted this way.
+    pub async fn delete(self) -> BigQueryResult<()> {
+        self.db.delete_table(&self.draft.table).await
     }
 }
