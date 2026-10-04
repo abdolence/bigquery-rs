@@ -7,6 +7,7 @@ use crate::{
     BigQueryDataset, BigQueryDatasetRef, BigQueryDatasetSummary, BigQueryDb, BigQueryResult,
     BigQueryTableSummary,
 };
+use crate::{BigQueryLabels, BigQueryLocation};
 use futures::stream::BoxStream;
 
 /// One dataset, from [`BigQuerySchemaBuilder::dataset`](crate::BigQuerySchemaBuilder::dataset).
@@ -95,8 +96,8 @@ impl BigQueryDatasetCreateBuilder<'_> {
     /// Where the dataset's data is stored, such as `US`, `EU` or `europe-west2`. It cannot
     /// change later. Unset, BigQuery picks `US`.
     #[inline]
-    pub fn location(mut self, location: impl Into<String>) -> Self {
-        self.settings.location = Some(location.into());
+    pub fn location(mut self, location: BigQueryLocation) -> Self {
+        self.settings.location = Some(location);
         self
     }
 
@@ -109,16 +110,8 @@ impl BigQueryDatasetCreateBuilder<'_> {
 
     /// The labels. Each call replaces the labels of a previous one.
     #[inline]
-    pub fn labels<I, K, V>(mut self, labels: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.settings.labels = labels
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
+    pub fn labels(mut self, labels: impl Into<BigQueryLabels>) -> Self {
+        self.settings.labels = labels.into();
         self
     }
 
@@ -158,18 +151,8 @@ impl BigQueryDatasetUpdateBuilder<'_> {
 
     /// Replaces every label with these. Label changes apply in the order they are made.
     #[inline]
-    pub fn labels<I, K, V>(mut self, labels: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.edits.labels.push(LabelEdit::ReplaceAll(
-            labels
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect(),
-        ));
+    pub fn labels(mut self, labels: impl Into<BigQueryLabels>) -> Self {
+        self.edits.labels.push(LabelEdit::ReplaceAll(labels.into()));
         self
     }
 

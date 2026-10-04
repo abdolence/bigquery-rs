@@ -21,6 +21,7 @@ use crate::{
     BigQueryDb, BigQueryResult, BigQueryTableRef, BigQueryTableSchema, BigQueryWriteMode,
     BigQueryWriteResponse, BigQueryWriteSummary,
 };
+use crate::{BigQueryInstant, BigQueryWriteStreamName};
 use futures::channel::mpsc as stream_channel;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_response::Response;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::row_error::RowErrorCode;
@@ -755,15 +756,15 @@ impl ConnectionTask {
         }
     }
 
-    fn summary(&self, commit_time: Option<jiff::Timestamp>) -> BigQueryWriteSummary {
+    fn summary(&self, commit_time: Option<BigQueryInstant>) -> BigQueryWriteSummary {
         BigQueryWriteSummary {
             rows_written: self.rows_written,
             rows_failed: self.rows_failed,
             batches: self.batches,
             bytes_sent: self.bytes_sent,
-            stream: self
-                .uses_offsets()
-                .then(|| self.settings.target.write_stream.clone()),
+            stream: self.uses_offsets().then(|| {
+                BigQueryWriteStreamName::reported(self.settings.target.write_stream.clone())
+            }),
             commit_time,
         }
     }

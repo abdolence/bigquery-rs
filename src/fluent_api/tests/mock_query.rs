@@ -130,7 +130,7 @@ mod tests {
     use crate::{
         BigQueryDatasetId, BigQueryFieldType, BigQueryReadCompression, BigQueryReadOptions,
     };
-    use std::collections::BTreeMap;
+    use crate::{BigQueryLabels, BigQueryLocation, BigQueryRequestId};
     use std::time::Duration;
 
     #[derive(serde::Deserialize)]
@@ -152,7 +152,7 @@ mod tests {
                 .param("n", 10)
                 .params(&Filter { min: 3 })
                 .param_as("t", BigQueryFieldType::Timestamp, None::<jiff::Timestamp>)
-                .location("EU")
+                .location(BigQueryLocation::from_static("EU"))
                 .default_dataset(BigQueryDatasetId::from_static("ds"))
                 .label("team", "data")
                 .labels([("env", "test")])
@@ -160,7 +160,7 @@ mod tests {
                 .use_query_cache(false)
                 .timeout(Duration::from_secs(3))
                 .job_timeout(Duration::from_secs(60))
-                .request_id("req-1")
+                .request_id(BigQueryRequestId::new("req-1").expect("a request ID"))
                 .inline_rows_limit(500)
                 .read_options(read_options.clone())
         };
@@ -187,17 +187,14 @@ mod tests {
                 )
                 .map_err(BigQueryError::from)?,
             ])
-            .with_location("EU".into())
+            .with_location(BigQueryLocation::from_static("EU"))
             .with_default_dataset(BigQueryDatasetId::from_static("ds").into())
-            .with_labels(BTreeMap::from([
-                ("team".to_string(), "data".to_string()),
-                ("env".to_string(), "test".to_string()),
-            ]))
+            .with_labels(BigQueryLabels::from([("team", "data"), ("env", "test")]))
             .with_maximum_bytes_billed(1_000_000)
             .with_use_query_cache(false)
             .with_timeout(Duration::from_secs(3))
             .with_job_timeout(Duration::from_secs(60))
-            .with_request_id("req-1".into())
+            .with_request_id(BigQueryRequestId::new("req-1")?)
             .with_inline_rows_limit(500)
             .with_read_options(read_options);
         let positional =

@@ -997,7 +997,7 @@ fn a_recreate_keeps_undeclared_columns_and_settings_unless_pruned() {
     let kept = plan_against(&dangerous(false), table.clone());
     let target = &kept.recreate.as_ref().expect("a recreate").target;
     assert_eq!(target.columns.last().map(|c| c.name.as_str()), Some("s"));
-    assert_eq!(target.labels.get("old").map(String::as_str), Some("x"));
+    assert_eq!(target.labels.get("old"), Some("x"));
     assert_eq!(target.description.as_deref(), Some("kept"));
 
     let pruned = plan_against(&dangerous(true), table);

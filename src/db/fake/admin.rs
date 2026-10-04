@@ -7,9 +7,11 @@ mod tests {
     use crate::errors::BigQueryError;
     use crate::{
         BigQueryDatasetId, BigQueryDatasetRef, BigQueryFieldMode, BigQueryFieldType,
-        BigQueryJobRef, BigQueryJobState, BigQueryListJobsParams, BigQueryPartitionUnit,
-        BigQueryPartitioning, BigQueryTableId, BigQueryTableType,
+        BigQueryJobRef, BigQueryJobState, BigQueryJobType, BigQueryListJobsParams,
+        BigQueryPartitionUnit, BigQueryPartitioning, BigQueryStatementType, BigQueryTableId,
+        BigQueryTableType,
     };
+    use crate::{BigQueryJobId, BigQueryLabels, BigQueryLocation};
     use futures::StreamExt;
     use gcloud_sdk::google::cloud::bigquery::v2;
     use gcloud_sdk::tonic::Code;
@@ -85,7 +87,7 @@ mod tests {
             .schema()
             .dataset(SHOP)
             .create()
-            .location("EU")
+            .location(BigQueryLocation::from_static("EU"))
             .description("Shop")
             .labels([("team", "shop")])
             .execute()
@@ -101,7 +103,7 @@ mod tests {
             created.reference,
             BigQueryDatasetRef::new("fake-project", SHOP).expect("a valid project")
         );
-        assert_eq!(created.location.as_deref(), Some("EU"));
+        assert_eq!(created.location, Some(BigQueryLocation::from_static("EU")));
         assert_eq!(
             created.creation_time,
             Some("2026-10-04T00:00:00Z".parse().expect("a timestamp"))
@@ -136,10 +138,7 @@ mod tests {
         assert_eq!(fake.calls(), ["GetDataset other.shop"]);
         assert_eq!(dataset.reference.project(), Some("other"));
         assert_eq!(dataset.description, None, "an empty description is unset");
-        assert_eq!(
-            dataset.labels,
-            BTreeMap::from([("team".to_string(), "shop".to_string())])
-        );
+        assert_eq!(dataset.labels, BigQueryLabels::from([("team", "shop")]));
         assert_eq!(
             dataset.default_table_expiration,
             Some(Duration::from_secs(3600))
@@ -385,7 +384,10 @@ mod tests {
         );
         let names: Vec<_> = datasets.iter().map(|d| d.reference.to_string()).collect();
         assert_eq!(names, ["p.a", "p.b"]);
-        assert_eq!(datasets[1].location.as_deref(), Some("US"));
+        assert_eq!(
+            datasets[1].location,
+            Some(BigQueryLocation::from_static("US"))
+        );
     }
 
     #[tokio::test]
@@ -659,8 +661,8 @@ mod tests {
         .await;
         let reference = BigQueryJobRef {
             project_id: "fake-project".into(),
-            job_id: "job1".into(),
-            location: Some("EU".into()),
+            job_id: BigQueryJobId::new("job1").expect("a job ID"),
+            location: Some(BigQueryLocation::from_static("EU")),
         };
         let job = fake
             .db
@@ -677,8 +679,8 @@ mod tests {
         );
         assert_eq!(job.reference, reference);
         assert_eq!(job.state, Some(BigQueryJobState::Done));
-        assert_eq!(job.job_type.as_deref(), Some("QUERY"));
-        assert_eq!(job.statement_type.as_deref(), Some("SELECT"));
+        assert_eq!(job.job_type, Some(BigQueryJobType::Query));
+        assert_eq!(job.statement_type, Some(BigQueryStatementType::Select));
         assert_eq!(job.total_bytes_billed, Some(0));
         assert_eq!(job.user_email.as_deref(), Some("me@example.com"));
         assert_eq!(job.error.map(|e| e.reason).as_deref(), Some("invalidQuery"));
@@ -754,7 +756,7 @@ mod tests {
         );
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].state, Some(BigQueryJobState::Done));
-        assert_eq!(jobs[0].job_type.as_deref(), Some("QUERY"));
+        assert_eq!(jobs[0].job_type, Some(BigQueryJobType::Query));
     }
 
     #[tokio::test]
@@ -764,7 +766,7 @@ mod tests {
             .db
             .stream_jobs(
                 BigQueryListJobsParams::new()
-                    .with_states(vec![BigQueryJobState::Unrecognised("PAUSED".into())]),
+                    .with_states(vec![BigQueryJobState::Other("PAUSED".into())]),
             )
             .await;
         assert!(

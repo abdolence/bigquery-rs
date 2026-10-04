@@ -16,6 +16,7 @@ use crate::{
     BigQueryTableRef, BigQueryTableSchema, BigQueryWriteMode, BigQueryWriteResponse,
     BigQueryWriteSummary,
 };
+use crate::{BigQueryInstant, BigQueryWriteStreamName};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::write_stream::Type as WriteStreamType;
@@ -124,7 +125,7 @@ pub(crate) async fn batch_commit(
     span: &Span,
     table_path: &str,
     streams: Vec<String>,
-) -> BigQueryResult<jiff::Timestamp> {
+) -> BigQueryResult<BigQueryInstant> {
     let request = BatchCommitWriteStreamsRequest {
         parent: table_path.to_string(),
         write_streams: streams,
@@ -160,7 +161,7 @@ pub(crate) async fn batch_commit(
             "the commit reported no error and no commit time".into(),
         ))
     })?;
-    jiff::Timestamp::new(commit_time.seconds, commit_time.nanos).map_err(|err| {
+    BigQueryInstant::new(commit_time.seconds, commit_time.nanos).map_err(|err| {
         BigQueryError::WriteStreamError(BigQueryWriteStreamError::new(
             BigQueryErrorPublicGenericDetails::new("INVALID_COMMIT_TIME".into()),
             request.write_streams.join(", "),
@@ -269,7 +270,7 @@ impl WriterCore {
         let plan = Arc::new(WritePlan::new(&schema, cdc));
         let target = RequestTarget {
             write_stream: stream.name.clone(),
-            trace_id: options.trace_id.clone(),
+            trace_id: options.trace_id.as_ref().map(ToString::to_string),
             missing_value: options.missing_value,
         };
         let batcher = Batcher::new(
@@ -586,7 +587,7 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
         let finished = self.core.finish(FinishKind::Finalize).await?;
         Ok(BigQueryFinalizedStream {
             table: self.core.table().clone(),
-            name: self.core.stream_name().to_string(),
+            name: BigQueryWriteStreamName::reported(self.core.stream_name().to_string()),
             row_count: finished.finalized_rows.unwrap_or_default(),
         })
     }
@@ -652,7 +653,7 @@ impl BigQueryDb {
     pub async fn commit_write_streams(
         &self,
         streams: Vec<BigQueryFinalizedStream>,
-    ) -> BigQueryResult<jiff::Timestamp> {
+    ) -> BigQueryResult<BigQueryInstant> {
         let Some(first) = streams.first() else {
             return Err(BigQueryError::invalid_parameters(
                 "streams",
@@ -675,7 +676,7 @@ impl BigQueryDb {
             self,
             &span,
             &table_path,
-            streams.into_iter().map(|s| s.name).collect(),
+            streams.into_iter().map(|s| s.name.to_string()).collect(),
         )
         .await
     }

@@ -12,7 +12,7 @@ pub(crate) mod spans;
 mod table;
 mod write;
 
-use crate::{BigQueryDb, BigQueryDbOptions};
+use crate::{BigQueryDb, BigQueryDbOptions, BigQueryEndpoint};
 use futures::future::BoxFuture;
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Code;
@@ -56,12 +56,14 @@ impl FakeBigQuery {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a free loopback port for the fake server");
-        let endpoint = format!(
+        let endpoint: BigQueryEndpoint = format!(
             "http://{}",
             listener
                 .local_addr()
                 .expect("a bound listener has a local address")
-        );
+        )
+        .parse()
+        .expect("a loopback URL is an endpoint");
         let handler: Arc<Handler> = Arc::new(move |call| Box::pin(handler(call)));
         let calls = Arc::new(watch::Sender::new(Vec::new()));
         let accepted = calls.clone();

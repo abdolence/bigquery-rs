@@ -4,6 +4,7 @@ use crate::{
     BigQueryQueryOutcome, BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions,
     BigQueryResult,
 };
+use crate::{BigQueryLabels, BigQueryLocation, BigQueryRequestId};
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2::QueryParameter;
@@ -117,9 +118,9 @@ where
     /// Runs the job in this location. Leave it unset unless needed: BigQuery finds the
     /// location from the tables the statement reads, and a wrong one fails with
     /// [`DataNotFoundError`](crate::errors::BigQueryError::DataNotFoundError).
-    pub fn location(self, location: impl Into<String>) -> Self {
+    pub fn location(self, location: BigQueryLocation) -> Self {
         Self {
-            params: self.params.with_location(location.into()),
+            params: self.params.with_location(location),
             ..self
         }
     }
@@ -140,15 +141,10 @@ where
     }
 
     /// Attaches labels to the job, in addition to those already set.
-    pub fn labels<I, K, V>(mut self, labels: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.params
-            .labels
-            .extend(labels.into_iter().map(|(k, v)| (k.into(), v.into())));
+    pub fn labels(mut self, labels: impl Into<BigQueryLabels>) -> Self {
+        for (key, value) in labels.into() {
+            self.params.labels.insert(key, value);
+        }
         self
     }
 
@@ -188,9 +184,9 @@ where
     /// Sets the idempotency key of the `Query` call. Without it each terminal call sends a
     /// fresh random key, repeated by its retries, so that a retried DML statement is not run
     /// twice.
-    pub fn request_id(self, request_id: impl Into<String>) -> Self {
+    pub fn request_id(self, request_id: BigQueryRequestId) -> Self {
         Self {
-            params: self.params.with_request_id(request_id.into()),
+            params: self.params.with_request_id(request_id),
             ..self
         }
     }

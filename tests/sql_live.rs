@@ -117,7 +117,7 @@ async fn filter_matches_hostile_values_literally() -> TestResult {
                 s.db.fluent()
                     .query("CREATE TABLE hostile AS SELECT * FROM UNNEST(@rows)")
                     .default_dataset(BigQueryDatasetRef::new(&s.project, s.dataset.clone())?)
-                    .location("US")
+                    .location(BigQueryLocation::from_static("US"))
                     .param("rows", &rows)
                     .execute()
                     .await?;
@@ -166,7 +166,7 @@ async fn filter_matches_hostile_values_literally() -> TestResult {
                 s.db.fluent()
                     .query("SELECT COUNT(*) AS n FROM hostile")
                     .default_dataset(BigQueryDatasetRef::new(&s.project, s.dataset.clone())?)
-                    .location("US")
+                    .location(BigQueryLocation::from_static("US"))
                     .obj::<Count>()
                     .query()
                     .await?;

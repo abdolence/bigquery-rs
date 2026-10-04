@@ -218,7 +218,7 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
         eprintln!("LIVE stats inline: {inline:?}");
         assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
         assert!(inline.job.is_some(), "{inline:?}");
-        assert_eq!(inline.statement_type.as_deref(), Some("SELECT"));
+        assert_eq!(inline.statement_type, Some(BigQueryStatementType::Select));
         assert_eq!(inline.total_rows, Some(1000));
         assert_eq!(inline.total_bytes_processed, Some(0));
         assert_eq!(inline.total_bytes_billed, Some(0));
@@ -237,7 +237,7 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
         let rows: Vec<Row> = rows.try_collect().await?;
         eprintln!("LIVE stats storage read: {read:?}");
         assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
-        assert_eq!(read.statement_type.as_deref(), Some("SELECT"));
+        assert_eq!(read.statement_type, Some(BigQueryStatementType::Select));
         assert_eq!(read.total_rows, Some(1000));
         assert_eq!(read.total_bytes_processed, Some(0));
         assert_eq!(read.total_bytes_billed, Some(0));
@@ -263,12 +263,15 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
             let created = run("CREATE TABLE t (id INT64, name STRING)")
                 .execute()
                 .await?;
-            assert_eq!(created.statement_type.as_deref(), Some("CREATE_TABLE"));
+            assert_eq!(
+                created.statement_type,
+                Some(BigQueryStatementType::CreateTable)
+            );
 
             let inserted = run("INSERT t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')")
                 .execute()
                 .await?;
-            assert_eq!(inserted.statement_type.as_deref(), Some("INSERT"));
+            assert_eq!(inserted.statement_type, Some(BigQueryStatementType::Insert));
             assert_eq!(inserted.num_dml_affected_rows, Some(3));
             assert_eq!(
                 inserted.dml_stats,
@@ -295,8 +298,12 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 l.db.job_client()
                     .get_job(bq::GetJobRequest {
                         project_id: job.project_id.clone(),
-                        job_id: job.job_id.clone(),
-                        location: job.location.clone().unwrap_or_default(),
+                        job_id: job.job_id.to_string(),
+                        location: job
+                            .location
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
                     })
                     .await
                     .map_err(errors::BigQueryError::from)?

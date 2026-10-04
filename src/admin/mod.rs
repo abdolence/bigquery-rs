@@ -15,6 +15,7 @@ pub use job::*;
 
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::types::error::CodecError;
+use crate::BigQueryInstant;
 use crate::BigQueryResult;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -71,11 +72,11 @@ where
 }
 
 /// A v2 timestamp in milliseconds since the epoch; 0 is unset.
-pub(crate) fn timestamp_ms(field: &str, ms: i64) -> BigQueryResult<Option<jiff::Timestamp>> {
+pub(crate) fn timestamp_ms(field: &str, ms: i64) -> BigQueryResult<Option<BigQueryInstant>> {
     if ms == 0 {
         return Ok(None);
     }
-    jiff::Timestamp::from_millisecond(ms)
+    BigQueryInstant::from_millisecond(ms)
         .map(Some)
         .map_err(|err| out_of_range(field, format!("{ms} ms is not a timestamp: {err}")))
 }

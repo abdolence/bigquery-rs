@@ -1,7 +1,9 @@
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::types::error::CodecError;
-use crate::BigQueryTableRef;
+use crate::BigQueryInstant;
+use crate::{BigQueryResult, BigQueryTableRef};
 use rsb_derive::Builder;
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -42,7 +44,91 @@ pub struct BigQueryStreamingWriteOptions {
     /// What BigQuery stores for a field a row leaves out.
     pub missing_value: Option<BigQueryMissingValue>,
     /// The `trace_id` sent with the stream, for BigQuery's own diagnostics.
-    pub trace_id: Option<String>,
+    pub trace_id: Option<BigQueryTraceId>,
+}
+
+/// The `trace_id` a writer sends with its stream, which BigQuery keeps for its own diagnostics;
+/// Google suggests the client's name and version.
+///
+/// Checked only for being non-empty, since an empty one means none.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BigQueryTraceId(String);
+
+impl BigQueryTraceId {
+    /// Checks `id` and wraps it.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for the field `trace_id` if it is empty.
+    pub fn new(id: impl Into<String>) -> BigQueryResult<Self> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(BigQueryError::invalid_parameters(
+                "trace_id",
+                "must not be empty",
+            ));
+        }
+        Ok(Self(id))
+    }
+
+    /// The ID.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for BigQueryTraceId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<&str> for BigQueryTraceId {
+    type Error = BigQueryError;
+
+    fn try_from(id: &str) -> Result<Self, Self::Error> {
+        Self::new(id)
+    }
+}
+
+impl TryFrom<String> for BigQueryTraceId {
+    type Error = BigQueryError;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        Self::new(id)
+    }
+}
+
+impl FromStr for BigQueryTraceId {
+    type Err = BigQueryError;
+
+    fn from_str(id: &str) -> Result<Self, Self::Err> {
+        Self::new(id)
+    }
+}
+
+/// The name of a write stream, as `CreateWriteStream` returned it:
+/// `projects/{p}/datasets/{d}/tables/{t}/streams/{id}`.
+///
+/// Only BigQuery makes one, so there is no public constructor; a stream is reachable only
+/// through the writer that created it.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BigQueryWriteStreamName(String);
+
+impl BigQueryWriteStreamName {
+    pub(crate) fn reported(name: String) -> Self {
+        Self(name)
+    }
+
+    /// The name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for BigQueryWriteStreamName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The write stream a writer uses.
@@ -90,9 +176,9 @@ pub struct BigQueryWriteSummary {
     /// Bytes of every `AppendRows` request sent, resent ones included, before gRPC framing.
     pub bytes_sent: u64,
     /// The write stream's name; `None` for the default stream.
-    pub stream: Option<String>,
+    pub stream: Option<BigQueryWriteStreamName>,
     /// When a pending stream was committed.
-    pub commit_time: Option<jiff::Timestamp>,
+    pub commit_time: Option<BigQueryInstant>,
 }
 
 /// A finalized pending stream, ready for a commit together with other streams.
@@ -101,7 +187,7 @@ pub struct BigQueryFinalizedStream {
     /// The table the stream writes.
     pub table: BigQueryTableRef,
     /// The write stream's name.
-    pub name: String,
+    pub name: BigQueryWriteStreamName,
     /// The rows the stream holds, as `FinalizeWriteStream` reported them.
     pub row_count: i64,
 }

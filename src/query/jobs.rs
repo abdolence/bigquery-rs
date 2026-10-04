@@ -25,8 +25,8 @@ impl BigQueryDb {
         );
         let request = CancelJobRequest {
             project_id: job.project_id.clone(),
-            job_id: job.job_id.clone(),
-            location: job.location.clone().unwrap_or_default(),
+            job_id: job.job_id.to_string(),
+            location: job.location_field(),
         };
         self.retry(&span, "cancel a job", &request, &MetadataMap::new(), |r| {
             let mut client = self.job_client();
@@ -47,10 +47,10 @@ pub(crate) async fn wait_for_job(
 ) -> BigQueryResult<GetQueryResultsResponse> {
     let request = GetQueryResultsRequest {
         project_id: job.project_id.clone(),
-        job_id: job.job_id.clone(),
+        job_id: job.job_id.to_string(),
         max_results: Some(0),
         timeout_ms: Some(timeout_ms),
-        location: job.location.clone().unwrap_or_default(),
+        location: job.location_field(),
         ..Default::default()
     };
     loop {
@@ -81,8 +81,8 @@ pub(crate) async fn get_job(
 ) -> BigQueryResult<Job> {
     let request = GetJobRequest {
         project_id: job.project_id.clone(),
-        job_id: job.job_id.clone(),
-        location: job.location.clone().unwrap_or_default(),
+        job_id: job.job_id.to_string(),
+        location: job.location_field(),
     };
     let details = db
         .retry(

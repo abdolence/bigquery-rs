@@ -3,6 +3,8 @@
 //! The entry point is [`BigQueryExprBuilder::schema`](crate::BigQueryExprBuilder::schema).
 
 use crate::schema::BigQueryTableDeclarationDraft;
+use crate::BigQueryInstant;
+use crate::BigQueryLabels;
 use crate::{
     BigQueryDatasetBuilder, BigQueryDatasetListBuilder, BigQueryDatasetRef, BigQueryDb,
     BigQueryPartitionUnit, BigQueryPartitioning, BigQueryRecreatePolicy, BigQueryResult,
@@ -51,13 +53,14 @@ impl<'a> BigQuerySchemaBuilder<'a, BigQueryDb> {
     /// # use bigquery::*;
     /// # async fn example(db: BigQueryDb) -> BigQueryResult<()> {
     /// const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    /// const EU: BigQueryLocation = BigQueryLocation::from_static("EU");
     ///
     /// let shop = db
     ///     .fluent()
     ///     .schema()
     ///     .dataset(SHOP)
     ///     .create()
-    ///     .location("EU")
+    ///     .location(EU)
     ///     .labels([("team", "shop")])
     ///     .execute()
     ///     .await?;
@@ -221,22 +224,14 @@ where
     /// [`prune_undeclared`](Self::prune_undeclared) is set. Each call replaces the labels of a
     /// previous one.
     #[inline]
-    pub fn labels<I, K, V>(mut self, labels: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.draft.labels = labels
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
+    pub fn labels(mut self, labels: impl Into<BigQueryLabels>) -> Self {
+        self.draft.labels = labels.into();
         self
     }
 
     /// When the table expires and BigQuery deletes it, at millisecond precision.
     #[inline]
-    pub fn expiration(mut self, at: jiff::Timestamp) -> Self {
+    pub fn expiration(mut self, at: BigQueryInstant) -> Self {
         self.draft.expiration = Some(at);
         self
     }

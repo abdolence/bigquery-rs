@@ -1,3 +1,4 @@
+use crate::BigQueryInstant;
 use crate::BigQueryTableRef;
 use rsb_derive::Builder;
 
@@ -12,7 +13,7 @@ pub struct BigQueryReadParams {
     /// A GoogleSQL filter such as `n > 10`, sent as the session's `row_restriction`.
     pub row_restriction: Option<String>,
     /// Reads the table as of this time instead of now.
-    pub snapshot_time: Option<jiff::Timestamp>,
+    pub snapshot_time: Option<BigQueryInstant>,
     /// The percentage of the table to sample, from 0 to 100.
     pub sample_percentage: Option<f64>,
     /// How the session is opened.

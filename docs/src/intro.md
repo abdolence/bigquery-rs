@@ -39,7 +39,7 @@ let db = BigQueryDb::with_options(
 
 Clones of `BigQueryDb` are cheap and share the same channels, so create it once.
 
-Leave `location` empty unless you need it. BigQuery finds the location of a dataset or a job
+Leave `location` unset unless you need it. BigQuery finds the location of a dataset or a job
 by itself, and a wrong location fails with `NotFound`.
 
 ## Crypto provider error

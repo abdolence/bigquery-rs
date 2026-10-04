@@ -1,4 +1,5 @@
 use crate::query::ParamFailure;
+use crate::BigQueryInstant;
 use crate::{
     BigQueryFilter, BigQueryFilterBuilder, BigQueryReadOptions, BigQueryReadParams,
     BigQueryReadSupport, BigQueryResult, BigQueryTableRef,
@@ -161,7 +162,7 @@ where
     }
 
     /// Reads the table as it was at this time instead of now.
-    pub fn snapshot_time(self, snapshot_time: jiff::Timestamp) -> Self {
+    pub fn snapshot_time(self, snapshot_time: BigQueryInstant) -> Self {
         Self {
             params: self.params.with_snapshot_time(snapshot_time),
             ..self

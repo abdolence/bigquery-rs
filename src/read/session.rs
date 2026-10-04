@@ -4,6 +4,7 @@ use crate::errors::{
     BigQueryError, BigQueryErrorPublicGenericDetails, BigQuerySchemaMismatchError,
 };
 use crate::read::projection::intersect;
+use crate::BigQueryInstant;
 use crate::{
     BigQueryDb, BigQueryReadCompression, BigQueryReadParams, BigQueryResult, BigQueryTableRef,
 };
@@ -148,7 +149,7 @@ fn compression_codec(compression: BigQueryReadCompression) -> CompressionCodec {
     }
 }
 
-fn proto_timestamp(t: jiff::Timestamp) -> gcloud_sdk::prost_types::Timestamp {
+fn proto_timestamp(t: BigQueryInstant) -> gcloud_sdk::prost_types::Timestamp {
     let (mut seconds, mut nanos) = (t.as_second(), t.subsec_nanosecond());
     // protobuf's nanos are never negative; jiff's take the sign of the timestamp.
     if nanos < 0 {

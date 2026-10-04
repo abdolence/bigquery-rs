@@ -4,17 +4,20 @@
 use crate::admin::{non_empty, paged, timestamp_ms};
 use crate::errors::BigQueryError;
 use crate::schema::table_partitioning;
+use crate::BigQueryInstant;
 use crate::{
     BigQueryDatasetRef, BigQueryDb, BigQueryPartitioning, BigQueryResult, BigQueryTableRef,
     BigQueryTableSchema,
 };
+use crate::{BigQueryLabels, BigQueryLocation};
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2;
 use gcloud_sdk::tonic::metadata::MetadataMap;
-use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 use tracing::Span;
 
-/// What kind of table a table is.
+/// What kind of table a table is, as BigQuery names it in `Table.type`: `TABLE`, `VIEW`,
+/// `MATERIALIZED_VIEW`, `EXTERNAL` or `SNAPSHOT`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BigQueryTableType {
     /// A table that stores its rows.
@@ -28,19 +31,49 @@ pub enum BigQueryTableType {
     /// A table snapshot.
     Snapshot,
     /// A type this crate does not know, as BigQuery named it.
-    Unrecognised(String),
+    Other(String),
 }
 
-impl From<String> for BigQueryTableType {
-    fn from(name: String) -> Self {
-        match name.as_str() {
+impl BigQueryTableType {
+    /// The name as BigQuery writes it, such as `MATERIALIZED_VIEW`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Table => "TABLE",
+            Self::View => "VIEW",
+            Self::MaterializedView => "MATERIALIZED_VIEW",
+            Self::External => "EXTERNAL",
+            Self::Snapshot => "SNAPSHOT",
+            Self::Other(name) => name,
+        }
+    }
+
+    fn known(name: &str) -> Option<Self> {
+        Some(match name {
             "TABLE" => Self::Table,
             "VIEW" => Self::View,
             "MATERIALIZED_VIEW" => Self::MaterializedView,
             "EXTERNAL" => Self::External,
             "SNAPSHOT" => Self::Snapshot,
-            _ => Self::Unrecognised(name),
-        }
+            _ => return None,
+        })
+    }
+}
+
+impl From<&str> for BigQueryTableType {
+    fn from(name: &str) -> Self {
+        Self::known(name).unwrap_or_else(|| Self::Other(name.to_string()))
+    }
+}
+
+impl From<String> for BigQueryTableType {
+    fn from(name: String) -> Self {
+        Self::known(&name).unwrap_or(Self::Other(name))
+    }
+}
+
+impl Display for BigQueryTableType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -57,7 +90,7 @@ pub struct BigQueryTable {
     /// The description.
     pub description: Option<String>,
     /// The labels.
-    pub labels: BTreeMap<String, String>,
+    pub labels: BigQueryLabels,
     /// The partitioning.
     pub partitioning: Option<BigQueryPartitioning>,
     /// The clustering columns, most important first.
@@ -69,13 +102,13 @@ pub struct BigQueryTable {
     /// The logical bytes, with the same lag as `num_rows`.
     pub num_bytes: Option<i64>,
     /// Where the table is stored.
-    pub location: Option<String>,
+    pub location: Option<BigQueryLocation>,
     /// When the table was created.
-    pub creation_time: Option<jiff::Timestamp>,
+    pub creation_time: Option<BigQueryInstant>,
     /// When the table was last changed.
-    pub last_modified_time: Option<jiff::Timestamp>,
+    pub last_modified_time: Option<BigQueryInstant>,
     /// When BigQuery deletes the table.
-    pub expiration_time: Option<jiff::Timestamp>,
+    pub expiration_time: Option<BigQueryInstant>,
 }
 
 /// A table as `ListTables` returns it, without its schema and sizes: read one with
@@ -87,11 +120,11 @@ pub struct BigQueryTableSummary {
     /// The kind of table.
     pub table_type: Option<BigQueryTableType>,
     /// The labels.
-    pub labels: BTreeMap<String, String>,
+    pub labels: BigQueryLabels,
     /// When the table was created.
-    pub creation_time: Option<jiff::Timestamp>,
+    pub creation_time: Option<BigQueryInstant>,
     /// When BigQuery deletes the table.
-    pub expiration_time: Option<jiff::Timestamp>,
+    pub expiration_time: Option<BigQueryInstant>,
 }
 
 fn table_reference(reference: Option<v2::TableReference>) -> BigQueryResult<BigQueryTableRef> {
@@ -129,7 +162,7 @@ impl TryFrom<v2::Table> for BigQueryTable {
             clustering: table.clustering.map(|c| c.fields).unwrap_or_default(),
             num_rows: table.num_rows,
             num_bytes: table.num_bytes,
-            location: non_empty(table.location),
+            location: BigQueryLocation::reported(table.location),
             creation_time: timestamp_ms("creation_time", table.creation_time)?,
             last_modified_time: timestamp_ms("last_modified_time", last_modified_time)?,
             expiration_time: timestamp_ms("expiration_time", table.expiration_time.unwrap_or(0))?,
@@ -252,4 +285,24 @@ impl BigQueryDb {
 
 fn table_span(table: &BigQueryTableRef) -> Span {
     tracing::debug_span!("BigQuery table", "/bigquery/table" = %table)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_types_map_known_names_and_keep_unknown_ones() {
+        for name in ["TABLE", "VIEW", "MATERIALIZED_VIEW", "EXTERNAL", "SNAPSHOT"] {
+            let parsed = BigQueryTableType::from(name);
+            assert!(
+                !matches!(parsed, BigQueryTableType::Other(_)),
+                "{name} reads as {parsed:?}"
+            );
+            assert_eq!(parsed.as_str(), name);
+        }
+        let unknown = BigQueryTableType::from("CLONE".to_string());
+        assert_eq!(unknown, BigQueryTableType::Other("CLONE".into()));
+        assert_eq!(unknown.to_string(), "CLONE");
+    }
 }

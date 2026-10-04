@@ -10,9 +10,9 @@ use crate::query::jobs::{get_job, wait_for_job};
 use crate::query::params::parameter_mode;
 use crate::read::ArrowIpcDecoder;
 use crate::{
-    BigQueryDb, BigQueryDryRunResult, BigQueryJobRef, BigQueryJobStats, BigQueryQueryOutcome,
-    BigQueryQueryParams, BigQueryReadCompression, BigQueryResult, BigQueryTableRef,
-    BigQueryTableSchema,
+    BigQueryDb, BigQueryDryRunResult, BigQueryJobRef, BigQueryJobStats, BigQueryLocation,
+    BigQueryQueryOutcome, BigQueryQueryParams, BigQueryReadCompression, BigQueryResult,
+    BigQueryStatementType, BigQueryTableRef, BigQueryTableSchema,
 };
 use arrow_array::RecordBatch;
 use gcloud_sdk::google::cloud::bigquery::v2::arrow_serialization_options::CompressionCodec;
@@ -58,13 +58,13 @@ impl From<&QueryResponse> for BigQueryJobStats {
         let job = response.job_reference.clone().map(|reference| {
             let mut job = BigQueryJobRef::from(reference);
             if job.location.is_none() {
-                job.location = non_empty(response.location.clone());
+                job.location = BigQueryLocation::reported(response.location.clone());
             }
             job
         });
         Self {
             job,
-            statement_type: non_empty(response.statement_type.clone()),
+            statement_type: non_empty(response.statement_type.clone()).map(Into::into),
             total_rows: response.total_rows,
             total_bytes_processed: response.total_bytes_processed,
             total_bytes_billed: response.total_bytes_billed,
@@ -95,7 +95,7 @@ impl BigQueryJobStats {
             self.statement_type = self
                 .statement_type
                 .take()
-                .or_else(|| non_empty(query.statement_type.clone()));
+                .or_else(|| non_empty(query.statement_type.clone()).map(Into::into));
             self.total_bytes_processed = self.total_bytes_processed.or(query.total_bytes_processed);
             self.total_bytes_billed = self.total_bytes_billed.or(query.total_bytes_billed);
             self.total_slot_ms = self.total_slot_ms.or(query.total_slot_ms);
@@ -231,8 +231,9 @@ fn query_request(
             query_parameters: params.query_parameters.clone(),
             location: params
                 .location
-                .clone()
-                .or_else(|| db.options().location.clone())
+                .as_ref()
+                .or(db.options().location.as_ref())
+                .map(ToString::to_string)
                 .unwrap_or_default(),
             format_options: Some(DataFormatOptions {
                 use_int64_timestamp: true,
@@ -240,7 +241,10 @@ fn query_request(
             }),
             labels: params.labels.clone().into_iter().collect(),
             maximum_bytes_billed: params.maximum_bytes_billed,
-            request_id: params.request_id.clone().unwrap_or_else(random_request_id),
+            request_id: params
+                .request_id
+                .as_ref()
+                .map_or_else(random_request_id, ToString::to_string),
             query_results_format: QueryResultsFormat::Arrow.into(),
             results_format_serialization_options: Some(
                 ResultsFormatSerializationOptions::ArrowSerializationOptions(
@@ -345,13 +349,15 @@ pub(crate) async fn query_rows(
             })?;
             Ok((Rows::Table(table), stats))
         }
-        None if statement_type_of(&details).as_deref() == Some("SELECT") => Err(system_error(
-            "NO_DESTINATION_TABLE",
-            format!(
-                "The query job {} returned rows but has no destination table to read them from",
-                job.job_id
-            ),
-        )),
+        None if statement_type_of(&details) == Some(BigQueryStatementType::Select) => {
+            Err(system_error(
+                "NO_DESTINATION_TABLE",
+                format!(
+                    "The query job {} returned rows but has no destination table to read them from",
+                    job.job_id
+                ),
+            ))
+        }
         None => {
             span.record("/bigquery/route", "none");
             Ok((Rows::None, stats))
@@ -359,11 +365,12 @@ pub(crate) async fn query_rows(
     }
 }
 
-fn statement_type_of(job: &Job) -> Option<String> {
+fn statement_type_of(job: &Job) -> Option<BigQueryStatementType> {
     job.statistics
         .as_ref()
         .and_then(|s| s.query.as_ref())
         .and_then(|q| non_empty(q.statement_type.clone()))
+        .map(Into::into)
 }
 
 /// Runs the statement, waits for it, and reports what it did.

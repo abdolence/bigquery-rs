@@ -135,8 +135,9 @@ mod tests {
     use crate::db::fake::FakeBigQuery;
     use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
     use crate::{
-        BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobRef, BigQueryJobStats,
-        BigQueryQueryOutcome, BigQueryResult,
+        BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobId, BigQueryJobRef,
+        BigQueryJobStats, BigQueryLocation, BigQueryQueryOutcome, BigQueryRequestId,
+        BigQueryResult, BigQueryStatementType,
     };
     use arrow_array::{ArrayRef, Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
@@ -333,14 +334,14 @@ mod tests {
             .fluent()
             .query("SELECT @a")
             .param("a", 1)
-            .location("EU")
+            .location(BigQueryLocation::from_static("EU"))
             .default_dataset(BigQueryDatasetRef::new("other", DS)?)
             .label("team", "data")
             .maximum_bytes_billed(10)
             .use_query_cache(false)
             .timeout(Duration::from_millis(1500))
             .job_timeout(Duration::from_secs(60))
-            .request_id("req-1")
+            .request_id(BigQueryRequestId::new("req-1")?)
             .inline_rows_limit(100)
             .obj::<Person>()
             .query()
@@ -350,7 +351,7 @@ mod tests {
             .query("SELECT ?")
             .positional_param(1)
             .default_dataset(DS)
-            .request_id("req-2")
+            .request_id(BigQueryRequestId::new("req-2")?)
             .execute()
             .await?;
         assert_eq!(
@@ -575,10 +576,10 @@ mod tests {
             BigQueryQueryOutcome {
                 job: Some(BigQueryJobRef {
                     project_id: "fake-project".into(),
-                    job_id: "job1".into(),
-                    location: Some("US".into()),
+                    job_id: BigQueryJobId::new("job1").expect("a job ID"),
+                    location: Some(BigQueryLocation::from_static("US")),
                 }),
-                statement_type: Some("UPDATE".into()),
+                statement_type: Some(BigQueryStatementType::Update),
                 num_dml_affected_rows: Some(2),
                 dml_stats: Some(BigQueryDmlStats {
                     inserted: 0,
@@ -638,7 +639,7 @@ mod tests {
         })
         .await;
         let outcome = fake.db.fluent().query("INSERT t").execute().await?;
-        assert_eq!(outcome.statement_type.as_deref(), Some("INSERT"));
+        assert_eq!(outcome.statement_type, Some(BigQueryStatementType::Insert));
         assert_eq!(outcome.num_dml_affected_rows, Some(3));
         assert_eq!(
             outcome.dml_stats,
@@ -685,7 +686,7 @@ mod tests {
             stats,
             BigQueryJobStats {
                 job: Some(job_reference().into()),
-                statement_type: Some("SELECT".into()),
+                statement_type: Some(BigQueryStatementType::Select),
                 total_rows: Some(2),
                 total_bytes_processed: Some(100),
                 total_bytes_billed: Some(10_485_760),
@@ -762,7 +763,7 @@ mod tests {
             stats,
             BigQueryJobStats {
                 job: Some(job_reference().into()),
-                statement_type: Some("SELECT".into()),
+                statement_type: Some(BigQueryStatementType::Select),
                 total_rows: Some(3),
                 total_bytes_processed: Some(500),
                 total_bytes_billed: Some(10_485_760),
@@ -853,7 +854,7 @@ mod tests {
             stats,
             BigQueryJobStats {
                 job: Some(job_reference().into()),
-                statement_type: Some("INSERT".into()),
+                statement_type: Some(BigQueryStatementType::Insert),
                 total_rows: None,
                 total_bytes_processed: Some(77),
                 total_bytes_billed: Some(10_485_760),
@@ -949,7 +950,10 @@ mod tests {
         {
             Err(BigQueryError::JobError(err)) => {
                 assert_eq!(err.public.code, "invalidQuery");
-                assert_eq!(err.job.map(|j| j.job_id).as_deref(), Some("job1"));
+                assert_eq!(
+                    err.job.map(|j| j.job_id.to_string()).as_deref(),
+                    Some("job1")
+                );
                 assert!(err.details.contains("boom"), "{}", err.details);
                 assert_eq!(err.errors.len(), 1);
                 assert_eq!(err.errors[0].reason, "invalidQuery");
@@ -1005,8 +1009,8 @@ mod tests {
         fake.db
             .cancel_job(&BigQueryJobRef {
                 project_id: "fake-project".into(),
-                job_id: "job1".into(),
-                location: Some("EU".into()),
+                job_id: BigQueryJobId::new("job1").expect("a job ID"),
+                location: Some(BigQueryLocation::from_static("EU")),
             })
             .await?;
         assert_eq!(fake.calls(), ["CancelJob job1 at EU"]);

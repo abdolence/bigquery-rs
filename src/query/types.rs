@@ -1,7 +1,10 @@
-use crate::{BigQueryDatasetRef, BigQueryFieldType, BigQueryReadOptions, BigQueryTableSchema};
+use crate::{
+    BigQueryDatasetRef, BigQueryFieldType, BigQueryReadOptions, BigQueryStatementType,
+    BigQueryTableSchema,
+};
+use crate::{BigQueryJobId, BigQueryLabels, BigQueryLocation, BigQueryRequestId};
 use gcloud_sdk::google::cloud::bigquery::v2::QueryParameter;
 use rsb_derive::Builder;
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// What a query sends: the statement, its parameters and the job settings, as
@@ -16,12 +19,12 @@ pub struct BigQueryQueryParams {
     /// Where the job runs. Unset, the client's
     /// [`location`](crate::BigQueryDbOptions::location) is sent, and with neither BigQuery
     /// finds the location from the tables the statement reads.
-    pub location: Option<String>,
+    pub location: Option<BigQueryLocation>,
     /// The dataset that unqualified table names resolve in.
     pub default_dataset: Option<BigQueryDatasetRef>,
     /// Labels attached to the job.
-    #[default = "BTreeMap::new()"]
-    pub labels: BTreeMap<String, String>,
+    #[default = "BigQueryLabels::new()"]
+    pub labels: BigQueryLabels,
     /// The job fails without running if it would bill more bytes than this.
     pub maximum_bytes_billed: Option<i64>,
     /// Whether a cached result may be returned. BigQuery's default is `true`.
@@ -33,7 +36,7 @@ pub struct BigQueryQueryParams {
     pub job_timeout: Option<Duration>,
     /// The idempotency key of the `Query` call. Unset, each terminal call sends a fresh random
     /// one, which every retry of that call repeats.
-    pub request_id: Option<String>,
+    pub request_id: Option<BigQueryRequestId>,
     /// The most rows the first response may carry inline. A result with more is read through
     /// the Storage Read API from the job's destination table.
     ///
@@ -79,8 +82,8 @@ impl BigQueryParamType {
 pub struct BigQueryQueryOutcome {
     /// The job that ran the statement.
     pub job: Option<BigQueryJobRef>,
-    /// `SELECT`, `INSERT`, `CREATE_TABLE`, and so on.
-    pub statement_type: Option<String>,
+    /// The kind of statement.
+    pub statement_type: Option<BigQueryStatementType>,
     /// Rows a DML statement changed.
     pub num_dml_affected_rows: Option<i64>,
     /// Rows a DML statement inserted, updated and deleted.
@@ -107,8 +110,8 @@ pub struct BigQueryQueryOutcome {
 pub struct BigQueryJobStats {
     /// The job that ran the query.
     pub job: Option<BigQueryJobRef>,
-    /// `SELECT`, `INSERT`, `CREATE_TABLE`, and so on.
-    pub statement_type: Option<String>,
+    /// The kind of statement.
+    pub statement_type: Option<BigQueryStatementType>,
     /// Rows in the result.
     pub total_rows: Option<u64>,
     /// Bytes the query processed.
@@ -167,17 +170,27 @@ pub struct BigQueryJobRef {
     /// The project that runs the job.
     pub project_id: String,
     /// The job's ID.
-    pub job_id: String,
+    pub job_id: BigQueryJobId,
     /// Where the job runs, when BigQuery reported it.
-    pub location: Option<String>,
+    pub location: Option<BigQueryLocation>,
+}
+
+impl BigQueryJobRef {
+    /// The location as a v2 request field takes it, empty for none.
+    pub(crate) fn location_field(&self) -> String {
+        self.location
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
 }
 
 impl From<gcloud_sdk::google::cloud::bigquery::v2::JobReference> for BigQueryJobRef {
     fn from(job: gcloud_sdk::google::cloud::bigquery::v2::JobReference) -> Self {
         Self {
             project_id: job.project_id,
-            job_id: job.job_id,
-            location: job.location.filter(|l| !l.is_empty()),
+            job_id: BigQueryJobId::reported(job.job_id),
+            location: job.location.and_then(BigQueryLocation::reported),
         }
     }
 }

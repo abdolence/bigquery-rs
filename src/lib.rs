@@ -66,6 +66,27 @@ pub use arrow_array;
 pub use arrow_schema;
 pub use jiff;
 
+/// An exact instant in time, used by this library for the times BigQuery reports about a
+/// dataset, a table, a job or a write: creation and last modified times, a job's start and end,
+/// a table's expiration, a commit time, and a read's snapshot time.
+///
+/// This is an alias for [`jiff::Timestamp`]. Prefer this alias over naming `jiff::Timestamp`
+/// directly, so that your code does not need an explicit `jiff` dependency and stays insulated
+/// from changes of the underlying implementation.
+///
+/// It is not a TIMESTAMP column value: a column in your rows is a [`BigQueryTimestamp`], or a
+/// plain `jiff::Timestamp`, as the type mapping describes.
+///
+/// ```rust
+/// use bigquery::*;
+///
+/// let since: BigQueryInstant = "2026-10-01T00:00:00Z".parse()?;
+/// let params = BigQueryListJobsParams::new().with_min_creation_time(since);
+/// # let _ = params;
+/// # Ok::<(), jiff::Error>(())
+/// ```
+pub type BigQueryInstant = jiff::Timestamp;
+
 use crate::errors::BigQueryError;
 
 /// The result type of every fallible call in this crate.

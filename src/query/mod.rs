@@ -5,6 +5,12 @@
 //! outlived the first call, is read through the Storage Read API from the job's destination
 //! table, with the read path's decoder in both cases.
 
+mod ids;
+pub use ids::*;
+
+mod statement;
+pub use statement::BigQueryStatementType;
+
 mod types;
 pub use types::*;
 

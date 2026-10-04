@@ -7,6 +7,15 @@ pub(crate) use retry::retry_delay;
 mod ids;
 pub use ids::*;
 
+mod labels;
+pub use labels::*;
+
+mod location;
+pub use location::*;
+
+mod endpoint;
+pub use endpoint::*;
+
 mod table_ref;
 pub use table_ref::*;
 
@@ -28,8 +37,7 @@ use gcloud_sdk::google::cloud::bigquery::v2::routine_service_client::RoutineServ
 use gcloud_sdk::google::cloud::bigquery::v2::row_access_policy_service_client::RowAccessPolicyServiceClient;
 use gcloud_sdk::google::cloud::bigquery::v2::table_service_client::TableServiceClient;
 use gcloud_sdk::{
-    GoogleApi, GoogleApiClient, GoogleAuthMiddleware, GoogleAuthTokenGenerator, Source,
-    TokenSourceType, GCP_DEFAULT_SCOPES,
+    GoogleApi, GoogleApiClient, GoogleAuthMiddleware, TokenSourceType, GCP_DEFAULT_SCOPES,
 };
 use std::fmt::Formatter;
 use std::sync::Arc;
@@ -153,9 +161,6 @@ impl BigQueryDb {
             "Creating a new BigQuery client.",
         );
 
-        let token_generator =
-            Arc::new(GoogleAuthTokenGenerator::new(token_source_type, token_scopes.clone()).await?);
-
         let v2 = GoogleApiClient::from_function_with_token_source(
             |channel| {
                 JobServiceClient::new(channel)
@@ -163,22 +168,21 @@ impl BigQueryDb {
             },
             api_url,
             None,
-            token_scopes.clone(),
-            TokenSourceType::ExternalSource(Box::new(SharedTokenSource(token_generator.clone()))),
+            token_scopes,
+            token_source_type,
         )
         .await?;
 
-        let storage = GoogleApiClient::from_function_with_token_source(
-            |channel| {
-                BigQueryReadClient::new(channel)
-                    .max_decoding_message_size(STORAGE_READ_MAX_DECODING_MESSAGE_SIZE)
-            },
-            storage_api_url,
-            None,
-            token_scopes,
-            TokenSourceType::ExternalSource(Box::new(SharedTokenSource(token_generator))),
-        )
-        .await?;
+        let storage = v2
+            .connect_with_endpoint(
+                |channel| {
+                    BigQueryReadClient::new(channel)
+                        .max_decoding_message_size(STORAGE_READ_MAX_DECODING_MESSAGE_SIZE)
+                },
+                storage_api_url,
+                None,
+            )
+            .await?;
 
         Ok(Self {
             inner: Arc::new(BigQueryDbInner {
@@ -266,17 +270,6 @@ impl std::fmt::Debug for BigQueryDb {
         f.debug_struct("BigQueryDb")
             .field("options", &self.inner.options)
             .finish()
-    }
-}
-
-/// Hands each channel the token of one shared generator, which caches it and refreshes it
-/// shortly before it expires.
-struct SharedTokenSource(Arc<GoogleAuthTokenGenerator>);
-
-#[async_trait::async_trait]
-impl Source for SharedTokenSource {
-    async fn token(&self) -> gcloud_sdk::error::Result<gcloud_sdk::Token> {
-        self.0.create_token().await
     }
 }
 

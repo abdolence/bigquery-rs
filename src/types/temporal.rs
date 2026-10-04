@@ -192,6 +192,9 @@ impl<'de, T: Temporal> Visitor<'de> for TemporalVisitor<T> {
 /// Reading a TIMESTAMP above `9999-12-30T22:00:00.999999999Z`, jiff's maximum, fails that row
 /// with [`OutOfRange`](crate::errors::BigQueryCodecErrorKind::OutOfRange); read such values
 /// into a `String` or an `i64`.
+///
+/// This is a column value in your rows. The times BigQuery reports about a dataset, a table, a
+/// job or a write, such as a creation time, are [`BigQueryInstant`](crate::BigQueryInstant)s.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BigQueryTimestamp(pub jiff::Timestamp);
 

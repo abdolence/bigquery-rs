@@ -7,6 +7,7 @@
 use crate::schema::declaration::DeclaredColumn;
 use crate::schema::live::LiveTable;
 use crate::schema::plan::ChangeStep;
+use crate::BigQueryLabels;
 use crate::{
     BigQueryDecimalParams, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType,
     BigQueryRecreate, BigQueryRecreateMethod, BigQueryRecreatePolicy, BigQueryRefusal,
@@ -14,7 +15,7 @@ use crate::{
     BigQueryTableTarget, BigQueryWithheldChange, BigQueryWithheldReason,
 };
 use gcloud_sdk::google::cloud::bigquery::v2;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 /// What `.sync()` would do to `table`, declared as `declaration`, given its current state;
 /// `None` when it does not exist. `row_access_policies` of a recreate are left empty for the
@@ -343,20 +344,21 @@ impl Diff<'_> {
                 });
             }
         }
-        for (key, to) in &declaration.labels {
-            if live.labels.get(key) != Some(to) {
+        for (key, to) in declaration.labels.iter() {
+            let from = live.labels.get(key);
+            if from != Some(to) {
                 self.changes.push(BigQuerySchemaChange::SetLabel {
-                    key: key.clone(),
-                    from: live.labels.get(key).cloned(),
-                    to: to.clone(),
+                    key: key.to_string(),
+                    from: from.map(str::to_string),
+                    to: to.to_string(),
                 });
             }
         }
-        for (key, value) in &live.labels {
-            if !declaration.labels.contains_key(key) {
+        for (key, value) in live.labels.iter() {
+            if declaration.labels.get(key).is_none() {
                 self.undeclared(BigQuerySchemaChange::RemoveLabel {
-                    key: key.clone(),
-                    value: value.clone(),
+                    key: key.to_string(),
+                    value: value.to_string(),
                 });
             }
         }
@@ -476,7 +478,7 @@ fn target(declaration: &BigQueryTableDeclaration, live: Option<&LiveTable>) -> B
         .iter()
         .map(|c| merged_field(&c.field, matched(c, live_fields), prune))
         .collect();
-    let mut labels = BTreeMap::new();
+    let mut labels = BigQueryLabels::new();
     let mut target = BigQueryTableTarget {
         columns: Vec::new(),
         primary_key: declaration.primary_key.clone(),
@@ -484,7 +486,7 @@ fn target(declaration: &BigQueryTableDeclaration, live: Option<&LiveTable>) -> B
         partition_expiration_ms: declaration.partition_expiration_ms,
         clustering: declaration.clustering.clone().unwrap_or_default(),
         description: declaration.description.clone(),
-        labels: BTreeMap::new(),
+        labels: BigQueryLabels::new(),
         expiration_ms: declaration.expiration_ms,
     };
     if let Some(live) = live {
@@ -526,7 +528,9 @@ fn target(declaration: &BigQueryTableDeclaration, live: Option<&LiveTable>) -> B
             target.expiration_ms = live.expiration_ms;
         }
     }
-    labels.extend(declaration.labels.clone());
+    for (key, value) in declaration.labels.iter() {
+        labels.insert(key, value);
+    }
     target.columns = columns;
     target.labels = labels;
     target

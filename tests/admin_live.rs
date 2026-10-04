@@ -31,20 +31,17 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
     let created = schema()
         .dataset(dataset.clone())
         .create()
-        .location("EU")
+        .location(BigQueryLocation::from_static("EU"))
         .description("scratch")
         .labels([("purpose", "bqp6b")])
         .execute()
         .await?;
     assert_eq!(created.reference.project(), Some(project));
-    assert_eq!(created.location.as_deref(), Some("EU"));
+    assert_eq!(created.location, Some(BigQueryLocation::from_static("EU")));
 
     let read = schema().dataset(dataset.clone()).get().await?;
     assert_eq!(read.description.as_deref(), Some("scratch"));
-    assert_eq!(
-        read.labels.get("purpose").map(String::as_str),
-        Some("bqp6b")
-    );
+    assert_eq!(read.labels.get("purpose"), Some("bqp6b"));
     assert!(read.creation_time.is_some());
 
     let listed = schema()
@@ -61,7 +58,7 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         .next()
         .await
         .ok_or("the scratch dataset is not listed")??;
-    assert_eq!(listed.location.as_deref(), Some("EU"));
+    assert_eq!(listed.location, Some(BigQueryLocation::from_static("EU")));
 
     let updated = schema()
         .dataset(dataset.clone())
@@ -108,7 +105,7 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         ]
     );
     assert_eq!(table.num_rows, Some(0));
-    assert_eq!(table.location.as_deref(), Some("EU"));
+    assert_eq!(table.location, Some(BigQueryLocation::from_static("EU")));
     let mut tables: Vec<_> = schema()
         .dataset(dataset.clone())
         .tables()
@@ -130,7 +127,7 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
     let job_ref = outcome.job.ok_or("the query reported no job")?;
     let job = db.get_job(&job_ref).await?;
     assert_eq!(job.state, Some(BigQueryJobState::Done));
-    assert_eq!(job.job_type.as_deref(), Some("QUERY"));
+    assert_eq!(job.job_type, Some(BigQueryJobType::Query));
     assert_eq!(job.error, None);
     eprintln!(
         "LIVE bytes billed admin_crud: {:?} over 1 job",
@@ -154,7 +151,7 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         .next()
         .await
         .ok_or("the query job is not listed")??;
-    assert_eq!(listed.statement_type.as_deref(), Some("SELECT"));
+    assert_eq!(listed.statement_type, Some(BigQueryStatementType::Select));
     db.delete_job(&job_ref).await?;
     assert!(matches!(
         db.get_job(&job_ref).await,

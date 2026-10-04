@@ -1,10 +1,10 @@
 //! The plan `.plan()` returns and `.sync()` follows, and the report of what `.sync()` did.
 
+use crate::BigQueryLabels;
 use crate::{
     BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryPartitioning,
     BigQueryTableRef,
 };
-use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 
 /// One difference between a declaration and the table, and how it is applied.
@@ -394,7 +394,7 @@ pub struct BigQueryTableTarget {
     /// The table description.
     pub description: Option<String>,
     /// The labels.
-    pub labels: BTreeMap<String, String>,
+    pub labels: BigQueryLabels,
     /// The table expiration, in milliseconds since the epoch.
     pub expiration_ms: Option<i64>,
 }

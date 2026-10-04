@@ -2,11 +2,13 @@
 //! it can diff or render a declaration.
 
 use crate::errors::BigQueryError;
+use crate::BigQueryInstant;
+use crate::BigQueryLabels;
 use crate::{
     BigQueryDecimalParams, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType,
     BigQueryRangeElementType, BigQueryResult, BigQueryTableRef,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
@@ -398,8 +400,8 @@ pub(crate) struct BigQueryTableDeclarationDraft {
     pub partition_expiration: Option<Duration>,
     pub clustering: Option<Vec<String>>,
     pub description: Option<String>,
-    pub labels: BTreeMap<String, String>,
-    pub expiration: Option<jiff::Timestamp>,
+    pub labels: BigQueryLabels,
+    pub expiration: Option<BigQueryInstant>,
     pub allow_widening: bool,
     pub prune: bool,
     pub recreate: Option<BigQueryRecreatePolicy>,
@@ -416,7 +418,7 @@ impl BigQueryTableDeclarationDraft {
             partition_expiration: None,
             clustering: None,
             description: None,
-            labels: BTreeMap::new(),
+            labels: BigQueryLabels::new(),
             expiration: None,
             allow_widening: false,
             prune: false,
@@ -439,7 +441,7 @@ pub struct BigQueryTableDeclaration {
     pub(crate) partition_expiration_ms: Option<i64>,
     pub(crate) clustering: Option<Vec<String>>,
     pub(crate) description: Option<String>,
-    pub(crate) labels: BTreeMap<String, String>,
+    pub(crate) labels: BigQueryLabels,
     pub(crate) expiration_ms: Option<i64>,
     pub(crate) allow_widening: bool,
     pub(crate) prune: bool,

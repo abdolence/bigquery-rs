@@ -4,11 +4,11 @@
 
 use super::*;
 use crate::sql::tests::{injection_corpus, lex_identifier, lex_string};
+use crate::BigQueryLabels;
 use crate::{
     BigQueryDatasetId, BigQueryDatasetRef, BigQueryDecimalParams, BigQueryFieldMode,
     BigQueryFieldSchema, BigQueryPartitionUnit, BigQueryPartitioning, BigQueryTableId,
 };
-use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq)]
 enum Token {
@@ -108,7 +108,7 @@ fn target(columns: Vec<BigQueryFieldSchema>) -> BigQueryTableTarget {
         partition_expiration_ms: None,
         clustering: Vec::new(),
         description: None,
-        labels: BTreeMap::new(),
+        labels: BigQueryLabels::new(),
         expiration_ms: None,
     }
 }
@@ -120,7 +120,7 @@ fn hostile_target(value: &str) -> BigQueryTableTarget {
     id.description = Some(value.to_string());
     let mut target = target(vec![id]);
     target.description = Some(value.to_string());
-    target.labels = BTreeMap::from([(value.to_string(), value.to_string())]);
+    target.labels = BigQueryLabels::from([(value, value)]);
     target
 }
 
@@ -250,7 +250,7 @@ fn create_or_replace_restates_columns_key_partitioning_clustering_and_options() 
     target.partition_expiration_ms = Some(86_400_000);
     target.clustering = vec!["id".into()];
     target.description = Some("Orders".into());
-    target.labels = BTreeMap::from([("team".into(), "shop".into())]);
+    target.labels = BigQueryLabels::from([("team", "shop")]);
     target.expiration_ms = Some(1_900_000_000_000);
 
     let sql = create_sql(&table_sql(&orders(), "p"), &target, true).expect("DDL");

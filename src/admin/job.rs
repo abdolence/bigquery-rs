@@ -3,15 +3,18 @@
 
 use crate::admin::{logging_errors, non_empty, paged, timestamp_ms};
 use crate::errors::{BigQueryError, BigQueryJobErrorEntry};
-use crate::{BigQueryDb, BigQueryJobRef, BigQueryResult};
+use crate::BigQueryInstant;
+use crate::{BigQueryDb, BigQueryJobRef, BigQueryResult, BigQueryStatementType};
+use crate::{BigQueryJobId, BigQueryLabels};
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2;
 use gcloud_sdk::tonic::metadata::MetadataMap;
 use rsb_derive::Builder;
-use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 use tracing::Span;
 
-/// Where a job is in its run.
+/// Where a job is in its run, as BigQuery names it in `JobStatus.state`: `PENDING`, `RUNNING`
+/// or `DONE`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BigQueryJobState {
     /// Waiting to run.
@@ -21,17 +24,109 @@ pub enum BigQueryJobState {
     /// Finished, with or without an error.
     Done,
     /// A state this crate does not know, as BigQuery named it.
-    Unrecognised(String),
+    Other(String),
 }
 
-impl From<String> for BigQueryJobState {
-    fn from(state: String) -> Self {
-        match state.as_str() {
+impl BigQueryJobState {
+    /// The name as BigQuery writes it, such as `RUNNING`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Running => "RUNNING",
+            Self::Done => "DONE",
+            Self::Other(name) => name,
+        }
+    }
+
+    fn known(name: &str) -> Option<Self> {
+        Some(match name {
             "PENDING" => Self::Pending,
             "RUNNING" => Self::Running,
             "DONE" => Self::Done,
-            _ => Self::Unrecognised(state),
+            _ => return None,
+        })
+    }
+}
+
+impl From<&str> for BigQueryJobState {
+    fn from(name: &str) -> Self {
+        Self::known(name).unwrap_or_else(|| Self::Other(name.to_string()))
+    }
+}
+
+impl From<String> for BigQueryJobState {
+    fn from(name: String) -> Self {
+        Self::known(&name).unwrap_or(Self::Other(name))
+    }
+}
+
+impl Display for BigQueryJobState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What kind of work a job does, as BigQuery names it in `JobConfiguration.job_type`: `QUERY`,
+/// `LOAD`, `EXTRACT`, `COPY` or `UNKNOWN`.
+///
+/// A name BigQuery adds later reads as [`Other`](Self::Other) with BigQuery's text, so
+/// [`as_str`](Self::as_str) gives back what BigQuery sent for every value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BigQueryJobType {
+    /// A query.
+    Query,
+    /// A load into a table.
+    Load,
+    /// An extract from a table to Cloud Storage.
+    Extract,
+    /// A table copy.
+    Copy,
+    /// BigQuery's own `UNKNOWN`, which it reports for a job whose kind it cannot tell.
+    Unknown,
+    /// A type this crate does not know, as BigQuery named it.
+    Other(String),
+}
+
+impl BigQueryJobType {
+    /// The name as BigQuery writes it, such as `QUERY`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Query => "QUERY",
+            Self::Load => "LOAD",
+            Self::Extract => "EXTRACT",
+            Self::Copy => "COPY",
+            Self::Unknown => "UNKNOWN",
+            Self::Other(name) => name,
         }
+    }
+
+    fn known(name: &str) -> Option<Self> {
+        Some(match name {
+            "QUERY" => Self::Query,
+            "LOAD" => Self::Load,
+            "EXTRACT" => Self::Extract,
+            "COPY" => Self::Copy,
+            "UNKNOWN" => Self::Unknown,
+            _ => return None,
+        })
+    }
+}
+
+impl From<&str> for BigQueryJobType {
+    fn from(name: &str) -> Self {
+        Self::known(name).unwrap_or_else(|| Self::Other(name.to_string()))
+    }
+}
+
+impl From<String> for BigQueryJobType {
+    fn from(name: String) -> Self {
+        Self::known(&name).unwrap_or(Self::Other(name))
+    }
+}
+
+impl Display for BigQueryJobType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -42,8 +137,8 @@ impl From<String> for BigQueryJobState {
 pub struct BigQueryJob {
     /// The job.
     pub reference: BigQueryJobRef,
-    /// `QUERY`, `LOAD`, `EXTRACT`, `COPY` or another kind BigQuery names.
-    pub job_type: Option<String>,
+    /// What kind of work the job does.
+    pub job_type: Option<BigQueryJobType>,
     /// Where the job is in its run.
     pub state: Option<BigQueryJobState>,
     /// Why a finished job failed.
@@ -51,15 +146,15 @@ pub struct BigQueryJob {
     /// Who ran the job.
     pub user_email: Option<String>,
     /// The job's labels.
-    pub labels: BTreeMap<String, String>,
-    /// For a query, `SELECT`, `INSERT`, `CREATE_TABLE`, and so on.
-    pub statement_type: Option<String>,
+    pub labels: BigQueryLabels,
+    /// For a query, the kind of statement it ran.
+    pub statement_type: Option<BigQueryStatementType>,
     /// When the job was created.
-    pub creation_time: Option<jiff::Timestamp>,
+    pub creation_time: Option<BigQueryInstant>,
     /// When the job started running.
-    pub start_time: Option<jiff::Timestamp>,
+    pub start_time: Option<BigQueryInstant>,
     /// When the job finished.
-    pub end_time: Option<jiff::Timestamp>,
+    pub end_time: Option<BigQueryInstant>,
     /// The bytes the job processed.
     pub total_bytes_processed: Option<i64>,
     /// For a query, the bytes billed.
@@ -91,12 +186,12 @@ impl TryFrom<JobParts> for BigQueryJob {
         let status = job.status.unwrap_or_default();
         Ok(Self {
             reference,
-            job_type: non_empty(configuration.job_type),
+            job_type: non_empty(configuration.job_type).map(Into::into),
             state: non_empty(status.state).map(Into::into),
             error: status.error_result.map(Into::into),
             user_email: non_empty(job.user_email),
             labels: configuration.labels.into_iter().collect(),
-            statement_type: non_empty(query.statement_type),
+            statement_type: non_empty(query.statement_type).map(Into::into),
             creation_time: timestamp_ms("creation_time", statistics.creation_time)?,
             start_time: timestamp_ms("start_time", statistics.start_time)?,
             end_time: timestamp_ms("end_time", statistics.end_time)?,
@@ -152,14 +247,14 @@ pub struct BigQueryListJobsParams {
     #[default = "false"]
     pub all_users: bool,
     /// Only jobs created at or after this time.
-    pub min_creation_time: Option<jiff::Timestamp>,
+    pub min_creation_time: Option<BigQueryInstant>,
     /// Only jobs created at or before this time.
-    pub max_creation_time: Option<jiff::Timestamp>,
-    /// Only jobs in one of these states; empty is every state. `Unrecognised` cannot be sent.
+    pub max_creation_time: Option<BigQueryInstant>,
+    /// Only jobs in one of these states; empty is every state. [`Other`](BigQueryJobState::Other) cannot be sent.
     #[default = "Vec::new()"]
     pub states: Vec<BigQueryJobState>,
     /// Only the child jobs of this script job.
-    pub parent_job_id: Option<String>,
+    pub parent_job_id: Option<BigQueryJobId>,
     /// How many jobs one `ListJobs` call returns; unset is BigQuery's default.
     pub page_size: Option<u32>,
 }
@@ -173,8 +268,8 @@ impl BigQueryDb {
     pub async fn get_job(&self, job: &BigQueryJobRef) -> BigQueryResult<BigQueryJob> {
         let request = v2::GetJobRequest {
             project_id: job.project_id.clone(),
-            job_id: job.job_id.clone(),
-            location: job.location.clone().unwrap_or_default(),
+            job_id: job.job_id.to_string(),
+            location: job.location_field(),
         };
         self.retry(
             &job_span(job),
@@ -200,8 +295,8 @@ impl BigQueryDb {
     pub async fn delete_job(&self, job: &BigQueryJobRef) -> BigQueryResult<()> {
         let request = v2::DeleteJobRequest {
             project_id: job.project_id.clone(),
-            job_id: job.job_id.clone(),
-            location: job.location.clone().unwrap_or_default(),
+            job_id: job.job_id.to_string(),
+            location: job.location_field(),
         };
         self.retry(
             &job_span(job),
@@ -222,7 +317,7 @@ impl BigQueryDb {
     ///
     /// # Errors
     /// [`InvalidParametersError`](BigQueryError::InvalidParametersError) for a creation time
-    /// before 1970 or an `Unrecognised` state, before any request.
+    /// before 1970 or an [`Other`](BigQueryJobState::Other) state, before any request.
     pub async fn stream_jobs<'b>(
         &self,
         params: BigQueryListJobsParams,
@@ -277,7 +372,7 @@ fn job_span(job: &BigQueryJobRef) -> Span {
 }
 
 /// Milliseconds since the epoch, as `ListJobs` takes its creation-time bounds.
-fn creation_bound(field: &str, at: jiff::Timestamp) -> BigQueryResult<u64> {
+fn creation_bound(field: &str, at: BigQueryInstant) -> BigQueryResult<u64> {
     u64::try_from(at.as_millisecond())
         .map_err(|_| BigQueryError::invalid_parameters(field, format!("{at} is before 1970")))
 }
@@ -293,7 +388,7 @@ impl BigQueryListJobsParams {
                 BigQueryJobState::Pending => Ok(StateFilter::Pending.into()),
                 BigQueryJobState::Running => Ok(StateFilter::Running.into()),
                 BigQueryJobState::Done => Ok(StateFilter::Done.into()),
-                BigQueryJobState::Unrecognised(name) => Err(BigQueryError::invalid_parameters(
+                BigQueryJobState::Other(name) => Err(BigQueryError::invalid_parameters(
                     "states",
                     format!("{name:?} is not a state ListJobs filters on"),
                 )),
@@ -317,7 +412,45 @@ impl BigQueryListJobsParams {
             page_token: String::new(),
             projection: Projection::Full.into(),
             state_filter,
-            parent_job_id: self.parent_job_id.unwrap_or_default(),
+            parent_job_id: self
+                .parent_job_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_types_map_known_names_and_keep_unknown_ones() {
+        for name in ["QUERY", "LOAD", "EXTRACT", "COPY", "UNKNOWN"] {
+            let parsed = BigQueryJobType::from(name);
+            assert!(
+                !matches!(parsed, BigQueryJobType::Other(_)),
+                "{name} reads as {parsed:?}"
+            );
+            assert_eq!(parsed.as_str(), name);
+        }
+        let unknown = BigQueryJobType::from("SNAPSHOT".to_string());
+        assert_eq!(unknown, BigQueryJobType::Other("SNAPSHOT".into()));
+        assert_eq!(unknown.to_string(), "SNAPSHOT");
+    }
+
+    #[test]
+    fn job_states_map_known_names_and_keep_unknown_ones() {
+        for name in ["PENDING", "RUNNING", "DONE"] {
+            let parsed = BigQueryJobState::from(name);
+            assert!(
+                !matches!(parsed, BigQueryJobState::Other(_)),
+                "{name} reads as {parsed:?}"
+            );
+            assert_eq!(parsed.as_str(), name);
+        }
+        let unknown = BigQueryJobState::from("PAUSED".to_string());
+        assert_eq!(unknown, BigQueryJobState::Other("PAUSED".into()));
+        assert_eq!(unknown.to_string(), "PAUSED");
     }
 }

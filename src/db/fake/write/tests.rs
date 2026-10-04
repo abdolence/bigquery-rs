@@ -2,6 +2,7 @@ use super::*;
 use crate::db::fake::spans::CapturedSpans;
 use crate::db::fake::FakeBigQuery;
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
+use crate::BigQueryWriteStreamName;
 use crate::{
     BigQueryDatasetId, BigQueryStreamingWriteOptions, BigQueryTableId, BigQueryWriteMode,
     BigQueryWriteResponse,
@@ -202,7 +203,10 @@ async fn committed_mode_counts_offset_already_exists_as_written() {
     }
     let summary = within(writer.finish()).await.expect("the writer finishes");
     assert_eq!((summary.rows_written, summary.rows_failed), (3, 0));
-    assert_eq!(summary.stream.as_deref(), Some(CREATED_STREAM));
+    assert_eq!(
+        summary.stream.as_ref().map(BigQueryWriteStreamName::as_str),
+        Some(CREATED_STREAM)
+    );
     let offsets: Vec<Option<i64>> = collect(responses)
         .await
         .into_iter()

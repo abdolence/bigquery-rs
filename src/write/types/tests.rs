@@ -34,3 +34,15 @@ fn sequence_number_format_is_checked() {
     }
     assert_eq!(BigQueryChangeSequenceNumber::from(255).as_str(), "FF");
 }
+
+#[test]
+fn an_empty_trace_id_is_refused() {
+    let err = BigQueryTraceId::new("").expect_err("an empty trace ID");
+    assert!(err.to_string().contains("trace_id"), "{err}");
+    assert_eq!(
+        BigQueryTraceId::new("app:1.0")
+            .expect("a trace ID")
+            .as_str(),
+        "app:1.0"
+    );
+}

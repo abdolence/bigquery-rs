@@ -1,9 +1,9 @@
 //! A table as `GetTable` returns it, in the terms the diff compares.
 
 use crate::errors::BigQueryError;
+use crate::BigQueryLabels;
 use crate::{BigQueryPartitionUnit, BigQueryPartitioning, BigQueryResult, BigQueryTableSchema};
 use gcloud_sdk::google::cloud::bigquery::v2;
-use std::collections::BTreeMap;
 
 /// A table's current state, with the raw `GetTable` body kept for the patch and update bodies,
 /// which must carry everything the crate does not model (policy tags, collation, foreign keys)
@@ -17,7 +17,7 @@ pub(crate) struct LiveTable {
     pub clustering: Vec<String>,
     pub primary_key: Option<Vec<String>>,
     pub description: Option<String>,
-    pub labels: BTreeMap<String, String>,
+    pub labels: BigQueryLabels,
     pub expiration_ms: Option<i64>,
     pub num_rows: Option<u64>,
     pub num_bytes: Option<i64>,

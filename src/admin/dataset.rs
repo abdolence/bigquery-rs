@@ -2,11 +2,12 @@
 
 use crate::admin::{duration_ms, non_empty, paged, timestamp_ms};
 use crate::errors::{BigQueryDataConflictError, BigQueryError};
+use crate::BigQueryInstant;
 use crate::{BigQueryDatasetRef, BigQueryDb, BigQueryResult};
+use crate::{BigQueryLabels, BigQueryLocation};
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2;
 use gcloud_sdk::tonic::metadata::{MetadataMap, MetadataValue};
-use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing::Span;
 
@@ -16,21 +17,21 @@ pub struct BigQueryDataset {
     /// The dataset, with its project.
     pub reference: BigQueryDatasetRef,
     /// Where its data is stored, such as `US` or `europe-west2`.
-    pub location: Option<String>,
+    pub location: Option<BigQueryLocation>,
     /// The display name.
     pub friendly_name: Option<String>,
     /// The description.
     pub description: Option<String>,
     /// The labels.
-    pub labels: BTreeMap<String, String>,
+    pub labels: BigQueryLabels,
     /// How long a new table lives unless it sets its own expiration.
     pub default_table_expiration: Option<Duration>,
     /// How long a partition of a new partitioned table is kept, unless the table sets its own.
     pub default_partition_expiration: Option<Duration>,
     /// When the dataset was created.
-    pub creation_time: Option<jiff::Timestamp>,
+    pub creation_time: Option<BigQueryInstant>,
     /// When the dataset or one of its tables was last changed.
-    pub last_modified_time: Option<jiff::Timestamp>,
+    pub last_modified_time: Option<BigQueryInstant>,
 }
 
 /// A dataset as `ListDatasets` returns it, which is less than [`BigQueryDataset`]: read one with
@@ -40,11 +41,11 @@ pub struct BigQueryDatasetSummary {
     /// The dataset, with its project.
     pub reference: BigQueryDatasetRef,
     /// Where its data is stored.
-    pub location: Option<String>,
+    pub location: Option<BigQueryLocation>,
     /// The display name.
     pub friendly_name: Option<String>,
     /// The labels.
-    pub labels: BTreeMap<String, String>,
+    pub labels: BigQueryLabels,
 }
 
 /// # Errors
@@ -56,7 +57,7 @@ impl TryFrom<v2::Dataset> for BigQueryDataset {
     fn try_from(dataset: v2::Dataset) -> Result<Self, Self::Error> {
         Ok(Self {
             reference: dataset_reference(dataset.dataset_reference)?,
-            location: non_empty(dataset.location),
+            location: BigQueryLocation::reported(dataset.location),
             friendly_name: dataset.friendly_name.and_then(non_empty),
             description: dataset.description.and_then(non_empty),
             labels: dataset.labels.into_iter().collect(),
@@ -82,7 +83,7 @@ impl TryFrom<v2::ListFormatDataset> for BigQueryDatasetSummary {
     fn try_from(dataset: v2::ListFormatDataset) -> Result<Self, Self::Error> {
         Ok(Self {
             reference: dataset_reference(dataset.dataset_reference)?,
-            location: non_empty(dataset.location),
+            location: BigQueryLocation::reported(dataset.location),
             friendly_name: dataset.friendly_name.and_then(non_empty),
             labels: dataset.labels.into_iter().collect(),
         })
@@ -102,15 +103,15 @@ fn dataset_reference(
 /// The settings a new dataset is created with.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DatasetSettings {
-    pub location: Option<String>,
+    pub location: Option<BigQueryLocation>,
     pub description: Option<String>,
-    pub labels: BTreeMap<String, String>,
+    pub labels: BigQueryLabels,
 }
 
 /// One change to a dataset's labels, applied in the order the caller made them.
 #[derive(Debug, Clone)]
 pub(crate) enum LabelEdit {
-    ReplaceAll(BTreeMap<String, String>),
+    ReplaceAll(BigQueryLabels),
     Set(String, String),
     Remove(String),
 }
@@ -171,7 +172,7 @@ impl BigQueryDb {
                     dataset_id: dataset.dataset().to_string(),
                     project_id,
                 }),
-                location: settings.location.unwrap_or_default(),
+                location: settings.location.map(|l| l.to_string()).unwrap_or_default(),
                 description: settings.description,
                 labels: settings.labels.into_iter().collect(),
                 ..Default::default()

@@ -1,24 +1,21 @@
+use crate::{BigQueryEndpoint, BigQueryLocation};
 use gcloud_sdk::GoogleEnvironment;
 use rsb_derive::Builder;
-
-/// The endpoint of the BigQuery v2 API: datasets, tables, jobs and queries.
-pub const BIGQUERY_API_URL: &str = "https://bigquery.googleapis.com";
-
-/// The endpoint of the BigQuery Storage Read and Write APIs.
-pub const BIGQUERY_STORAGE_API_URL: &str = "https://bigquerystorage.googleapis.com";
 
 /// Configuration options for the [`BigQueryDb`](crate::BigQueryDb) client.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use bigquery::BigQueryDbOptions;
+/// use bigquery::{BigQueryDbOptions, BigQueryLocation};
 ///
 /// let options = BigQueryDbOptions::new("my-gcp-project-id".to_string())
-///     .with_location("EU".to_string())
+///     .with_location(BigQueryLocation::from_static("EU"))
+///     .with_bigquery_api_url("https://eu-bigquery.googleapis.com".parse()?)
 ///     .with_max_retries(5);
 ///
-/// assert_eq!(options.location.as_deref(), Some("EU"));
+/// assert_eq!(options.effective_bigquery_api_url().as_str(), "https://eu-bigquery.googleapis.com");
+/// # Ok::<(), bigquery::errors::BigQueryError>(())
 /// ```
 #[derive(Debug, Eq, PartialEq, Clone, Builder)]
 pub struct BigQueryDbOptions {
@@ -29,20 +26,20 @@ pub struct BigQueryDbOptions {
     ///
     /// Leave it `None` unless you need it: BigQuery finds the location of a dataset or a job by
     /// itself, and a wrong location fails with `NotFound` instead of being ignored.
-    pub location: Option<String>,
+    pub location: Option<BigQueryLocation>,
 
     /// The maximum number of times a failed retryable request is sent again. Defaults to `3`.
     #[default = "3"]
     pub max_retries: usize,
 
-    /// Overrides [`BIGQUERY_API_URL`].
-    pub bigquery_api_url: Option<String>,
+    /// Overrides [`BigQueryEndpoint::BIGQUERY`].
+    pub bigquery_api_url: Option<BigQueryEndpoint>,
 
-    /// Overrides [`BIGQUERY_STORAGE_API_URL`].
+    /// Overrides [`BigQueryEndpoint::BIGQUERY_STORAGE`].
     ///
     /// There is no emulator support: the BigQuery emulators speak only the REST API, while this
     /// crate uses gRPC throughout.
-    pub bigquery_storage_api_url: Option<String>,
+    pub bigquery_storage_api_url: Option<BigQueryEndpoint>,
 }
 
 impl BigQueryDbOptions {
@@ -56,15 +53,17 @@ impl BigQueryDbOptions {
     }
 
     /// The v2 API endpoint these options connect to.
-    pub fn effective_bigquery_api_url(&self) -> &str {
-        self.bigquery_api_url.as_deref().unwrap_or(BIGQUERY_API_URL)
+    pub fn effective_bigquery_api_url(&self) -> &BigQueryEndpoint {
+        self.bigquery_api_url
+            .as_ref()
+            .unwrap_or(&BigQueryEndpoint::BIGQUERY)
     }
 
     /// The Storage API endpoint these options connect to.
-    pub fn effective_bigquery_storage_api_url(&self) -> &str {
+    pub fn effective_bigquery_storage_api_url(&self) -> &BigQueryEndpoint {
         self.bigquery_storage_api_url
-            .as_deref()
-            .unwrap_or(BIGQUERY_STORAGE_API_URL)
+            .as_ref()
+            .unwrap_or(&BigQueryEndpoint::BIGQUERY_STORAGE)
     }
 }
 
@@ -86,11 +85,11 @@ mod tests {
     fn default_endpoints_are_the_two_google_hosts() {
         let options = BigQueryDbOptions::new("p".to_string());
         assert_eq!(
-            options.effective_bigquery_api_url(),
+            options.effective_bigquery_api_url().as_str(),
             "https://bigquery.googleapis.com"
         );
         assert_eq!(
-            options.effective_bigquery_storage_api_url(),
+            options.effective_bigquery_storage_api_url().as_str(),
             "https://bigquerystorage.googleapis.com"
         );
     }
@@ -98,11 +97,14 @@ mod tests {
     #[test]
     fn endpoint_overrides_are_used() {
         let options = BigQueryDbOptions::new("p".to_string())
-            .with_bigquery_api_url("http://localhost:1".to_string())
-            .with_bigquery_storage_api_url("http://localhost:2".to_string());
-        assert_eq!(options.effective_bigquery_api_url(), "http://localhost:1");
+            .with_bigquery_api_url("http://localhost:1".parse().expect("a URL"))
+            .with_bigquery_storage_api_url("http://localhost:2".parse().expect("a URL"));
         assert_eq!(
-            options.effective_bigquery_storage_api_url(),
+            options.effective_bigquery_api_url().as_str(),
+            "http://localhost:1"
+        );
+        assert_eq!(
+            options.effective_bigquery_storage_api_url().as_str(),
             "http://localhost:2"
         );
     }
@@ -110,9 +112,9 @@ mod tests {
     #[test]
     fn builder_sets_location_and_retries() {
         let options = BigQueryDbOptions::new("p".to_string())
-            .with_location("EU".to_string())
+            .with_location(BigQueryLocation::from_static("EU"))
             .with_max_retries(0);
-        assert_eq!(options.location.as_deref(), Some("EU"));
+        assert_eq!(options.location, Some(BigQueryLocation::from_static("EU")));
         assert_eq!(options.max_retries, 0);
     }
 }
