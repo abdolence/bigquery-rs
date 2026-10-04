@@ -4,7 +4,9 @@ use crate::errors::{
     BigQueryError, BigQueryErrorPublicGenericDetails, BigQuerySchemaMismatchError,
 };
 use crate::read::projection::intersect;
-use crate::{BigQueryDb, BigQueryReadCompression, BigQueryReadParams, BigQueryResult, BigQueryTableRef};
+use crate::{
+    BigQueryDb, BigQueryReadCompression, BigQueryReadParams, BigQueryResult, BigQueryTableRef,
+};
 use gcloud_sdk::google::cloud::bigquery::storage::v1::arrow_serialization_options::CompressionCodec;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::table_read_options::OutputFormatSerializationOptions;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::{
@@ -203,10 +205,16 @@ async fn create(
             .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
     };
     let session = db
-        .retry(span, "create a read session", &request, &MetadataMap::new(), |r| {
-            let mut client = db.read_client();
-            async move { client.create_read_session(r).await }
-        })
+        .retry(
+            span,
+            "create a read session",
+            &request,
+            &MetadataMap::new(),
+            |r| {
+                let mut client = db.read_client();
+                async move { client.create_read_session(r).await }
+            },
+        )
         .await?;
     let schema = match session.schema {
         Some(Schema::ArrowSchema(schema)) => schema.serialized_schema,

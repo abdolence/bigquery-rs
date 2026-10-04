@@ -118,7 +118,11 @@ impl StreamTask {
     /// Reads the stream to its end, sending one item per batch, and resumes at the offset
     /// after a retryable failure. Consecutive failures are capped by `max_retries`; a batch
     /// that arrives resets the count. Returns early, without error, once the caller is gone.
-    async fn pump<M, F>(&self, tx: &mpsc::Sender<StreamMessage<M>>, on_batch: F) -> BigQueryResult<()>
+    async fn pump<M, F>(
+        &self,
+        tx: &mpsc::Sender<StreamMessage<M>>,
+        on_batch: F,
+    ) -> BigQueryResult<()>
     where
         F: Fn(RecordBatch, u64) -> M,
     {
@@ -201,4 +205,3 @@ fn read_rows_error(status: Status) -> BigQueryError {
     }
     BigQueryError::from(status)
 }
-

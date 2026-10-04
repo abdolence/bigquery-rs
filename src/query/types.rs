@@ -1,11 +1,50 @@
-use crate::{BigQueryFieldType, BigQueryTableSchema};
+use crate::{BigQueryFieldType, BigQueryReadOptions, BigQueryTableSchema};
+use gcloud_sdk::google::cloud::bigquery::v2::QueryParameter;
 use rsb_derive::Builder;
+use std::collections::BTreeMap;
+use std::time::Duration;
 
-/// What a query sends.
+/// What a query sends: the statement, its parameters and the job settings, as
+/// [`BigQueryQueryBuilder`](crate::BigQueryQueryBuilder) collects them.
 #[derive(Debug, PartialEq, Clone, Builder)]
 pub struct BigQueryQueryParams {
     /// The GoogleSQL statement.
     pub sql: String,
+    /// The parameters, encoded. Named ones carry their name, positional ones an empty name.
+    #[default = "Vec::new()"]
+    pub(crate) query_parameters: Vec<QueryParameter>,
+    /// Where the job runs. Unset, the client's
+    /// [`location`](crate::BigQueryDbOptions::location) is sent, and with neither BigQuery
+    /// finds the location from the tables the statement reads.
+    pub location: Option<String>,
+    /// The dataset that unqualified table names resolve in: `dataset` in the client's project,
+    /// or `project.dataset`.
+    pub default_dataset: Option<String>,
+    /// Labels attached to the job.
+    #[default = "BTreeMap::new()"]
+    pub labels: BTreeMap<String, String>,
+    /// The job fails without running if it would bill more bytes than this.
+    pub maximum_bytes_billed: Option<i64>,
+    /// Whether a cached result may be returned. BigQuery's default is `true`.
+    pub use_query_cache: Option<bool>,
+    /// How long the first `Query` call waits for the job before the client polls it. Defaults to
+    /// 10 seconds, BigQuery's own default.
+    pub timeout: Option<Duration>,
+    /// How long BigQuery lets the job run before it cancels it.
+    pub job_timeout: Option<Duration>,
+    /// The idempotency key of the `Query` call. Unset, each terminal call sends a fresh random
+    /// one, which every retry of that call repeats.
+    pub request_id: Option<String>,
+    /// The most rows the first response may carry inline. A result with more is read through
+    /// the Storage Read API from the job's destination table.
+    ///
+    /// Unset by default, so BigQuery decides: it sent results of up to 364 KB of Arrow inline
+    /// and paged results of 485 KB and more, and below that bound the inline result reached
+    /// its last row about 2.7 times sooner than a Storage Read session.
+    pub inline_rows_limit: Option<u32>,
+    /// How a result read through the Storage Read API opens its session.
+    #[default = "BigQueryReadOptions::new()"]
+    pub read_options: BigQueryReadOptions,
 }
 
 /// The type of a query parameter, for a value whose type cannot be inferred.
@@ -84,4 +123,26 @@ pub struct BigQueryJobRef {
     pub job_id: String,
     /// Where the job runs, when BigQuery reported it.
     pub location: Option<String>,
+}
+
+impl From<gcloud_sdk::google::cloud::bigquery::v2::JobReference> for BigQueryJobRef {
+    fn from(job: gcloud_sdk::google::cloud::bigquery::v2::JobReference) -> Self {
+        Self {
+            project_id: job.project_id,
+            job_id: job.job_id,
+            location: job.location.filter(|l| !l.is_empty()),
+        }
+    }
+}
+
+impl From<gcloud_sdk::google::cloud::bigquery::v2::DmlStats> for BigQueryDmlStats {
+    /// BigQuery leaves out the counts of the kinds a statement did not do, so a count missing
+    /// from reported stats is zero.
+    fn from(stats: gcloud_sdk::google::cloud::bigquery::v2::DmlStats) -> Self {
+        Self {
+            inserted: stats.inserted_row_count.unwrap_or(0),
+            updated: stats.updated_row_count.unwrap_or(0),
+            deleted: stats.deleted_row_count.unwrap_or(0),
+        }
+    }
 }

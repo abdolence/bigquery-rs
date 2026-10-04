@@ -1,6 +1,5 @@
 use crate::{
-    BigQueryReadOptions, BigQueryReadParams, BigQueryReadSupport, BigQueryResult,
-    BigQueryTableRef,
+    BigQueryReadOptions, BigQueryReadParams, BigQueryReadSupport, BigQueryResult, BigQueryTableRef,
 };
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;

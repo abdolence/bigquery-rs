@@ -18,7 +18,10 @@ mod stream;
 mod support;
 
 pub(crate) use decoder::decode_rows;
-#[allow(unused_imports, reason = "queries decode their inline Arrow results with it")]
+#[allow(
+    unused_imports,
+    reason = "queries decode their inline Arrow results with it"
+)]
 pub(crate) use ipc::ArrowIpcDecoder;
 
 use crate::{BigQueryDb, BigQueryResult};

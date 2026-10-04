@@ -120,7 +120,11 @@ fn all_types_sql() -> String {
         columns.push(format!("r_{name} {ty} NOT NULL"));
         columns.push(format!("a_{name} ARRAY<{ty}>"));
         first.extend([n.to_string(), r.to_string(), a.to_string()]);
-        second.extend([format!("CAST(NULL AS {ty})"), r.to_string(), format!("ARRAY<{ty}>[]")]);
+        second.extend([
+            format!("CAST(NULL AS {ty})"),
+            r.to_string(),
+            format!("ARRAY<{ty}>[]"),
+        ]);
     }
     columns.push("p_numeric NUMERIC(10, 2)".into());
     first.push("NUMERIC '12345678.91'".into());
@@ -239,8 +243,7 @@ fn expected(id: i64) -> AllTypes {
         ]),
         n_bignumeric: some("1.5".to_string()),
         r_bignumeric:
-            "-578960446186580977117854925043439539266.34992332820282019728792003956564819968"
-                .into(),
+            "-578960446186580977117854925043439539266.34992332820282019728792003956564819968".into(),
         a_bignumeric: arr(vec!["0.00000000000000000000000000000000000001".to_string()]),
         n_bool: if full { Some(true) } else { None },
         r_bool: false,
@@ -374,7 +377,10 @@ fn expected(id: i64) -> AllTypes {
         } else {
             None
         },
-        r_struct: Pair { a: Some(2), b: None },
+        r_struct: Pair {
+            a: Some(2),
+            b: None,
+        },
         a_struct: if full {
             vec![Pair {
                 a: Some(3),
@@ -403,16 +409,15 @@ async fn read_every_type_and_mode() -> TestResult {
         rows.sort_by_key(|r| r.id);
         assert_eq!(rows, [expected(1), expected(2)]);
 
-        let batches: Vec<_> = s
-            .db
-            .fluent()
-            .select()
-            .fields(["p_numeric"])
-            .from(table)
-            .record_batches()
-            .await?
-            .try_collect()
-            .await?;
+        let batches: Vec<_> =
+            s.db.fluent()
+                .select()
+                .fields(["p_numeric"])
+                .from(table)
+                .record_batches()
+                .await?
+                .try_collect()
+                .await?;
         let p_type = batches[0].schema().field(0).data_type().clone();
         eprintln!("LIVE NUMERIC(10, 2) arrives as {p_type}");
         assert_eq!(p_type, DataType::Decimal128(10, 2));
@@ -440,55 +445,59 @@ struct Person {
 
 #[tokio::test]
 async fn read_projection_and_row_restriction() -> TestResult {
-    with_scratch("read_projection_and_row_restriction", async |s: &Scratch| {
-        s.sql(PEOPLE_SQL).await?;
-        let table = (s.dataset.as_str(), "people");
+    with_scratch(
+        "read_projection_and_row_restriction",
+        async |s: &Scratch| {
+            s.sql(PEOPLE_SQL).await?;
+            let table = (s.dataset.as_str(), "people");
 
-        let recent: BTreeSet<Person> = s
-            .db
-            .fluent()
-            .select()
-            .from(table)
-            .filter("year >= 2010 AND county != 'Norrbotten'")
-            .obj::<Person>()
-            .stream_query()
-            .await?
-            .collect()
-            .await;
-        let names: Vec<&str> = recent.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Saga", "Håkan", "Elsa", "Sören", "Maja"]);
+            let recent: BTreeSet<Person> =
+                s.db.fluent()
+                    .select()
+                    .from(table)
+                    .filter("year >= 2010 AND county != 'Norrbotten'")
+                    .obj::<Person>()
+                    .stream_query()
+                    .await?
+                    .collect()
+                    .await;
+            let names: Vec<&str> = recent.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["Saga", "Håkan", "Elsa", "Sören", "Maja"]);
 
-        let batches: Vec<_> = s
-            .db
-            .fluent()
-            .select()
-            .fields(["name", "id"])
-            .from(table)
-            .filter("id <= 2")
-            .record_batches()
-            .await?
-            .try_collect()
-            .await?;
-        let schema = batches[0].schema();
-        let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(columns, ["id", "name"], "the session's column order is the table's");
-        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+            let batches: Vec<_> =
+                s.db.fluent()
+                    .select()
+                    .fields(["name", "id"])
+                    .from(table)
+                    .filter("id <= 2")
+                    .record_batches()
+                    .await?
+                    .try_collect()
+                    .await?;
+            let schema = batches[0].schema();
+            let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            assert_eq!(
+                columns,
+                ["id", "name"],
+                "the session's column order is the table's"
+            );
+            assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 
-        let missing = s
-            .db
-            .fluent()
-            .select()
-            .fields(["id", "no_such_column"])
-            .from(table)
-            .record_batches()
-            .await;
-        assert!(
-            matches!(missing, Err(errors::BigQueryError::SchemaMismatchError(_))),
-            "{:?}",
-            missing.map(|_| ())
-        );
-        Ok(())
-    })
+            let missing =
+                s.db.fluent()
+                    .select()
+                    .fields(["id", "no_such_column"])
+                    .from(table)
+                    .record_batches()
+                    .await;
+            assert!(
+                matches!(missing, Err(errors::BigQueryError::SchemaMismatchError(_))),
+                "{:?}",
+                missing.map(|_| ())
+            );
+            Ok(())
+        },
+    )
     .await
 }
 

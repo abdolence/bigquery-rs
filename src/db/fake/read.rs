@@ -10,7 +10,9 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     read_rows_response, read_session, ArrowRecordBatch, ArrowSchema, CreateReadSessionRequest,
     ReadRowsRequest, ReadRowsResponse, ReadSession, ReadStream,
 };
-use gcloud_sdk::google::cloud::bigquery::v2::{GetTableRequest, Table, TableFieldSchema, TableSchema};
+use gcloud_sdk::google::cloud::bigquery::v2::{
+    GetTableRequest, Table, TableFieldSchema, TableSchema,
+};
 
 /// One table as the fake serves it: the Arrow schema and, per read stream, its batches.
 #[derive(Clone)]
@@ -84,7 +86,10 @@ impl FakeReadTable {
 /// Answers `GetTable` with the table's columns, logging `GetTable ds.t`.
 pub(crate) async fn get_table(mut call: FakeCall, table: &FakeReadTable) {
     let request: GetTableRequest = call.next_request().await.expect("a GetTable request");
-    call.log(format!("GetTable {}.{}", request.dataset_id, request.table_id));
+    call.log(format!(
+        "GetTable {}.{}",
+        request.dataset_id, request.table_id
+    ));
     call.reply(&Table {
         schema: Some(table.table_schema()),
         ..Default::default()
@@ -93,8 +98,10 @@ pub(crate) async fn get_table(mut call: FakeCall, table: &FakeReadTable) {
 
 /// Reads a `CreateReadSession` request and logs it as `CreateReadSession [selected fields]`.
 pub(crate) async fn session_request(call: &mut FakeCall) -> CreateReadSessionRequest {
-    let request: CreateReadSessionRequest =
-        call.next_request().await.expect("a CreateReadSession request");
+    let request: CreateReadSessionRequest = call
+        .next_request()
+        .await
+        .expect("a CreateReadSession request");
     let selected = request
         .read_session
         .as_ref()
@@ -145,7 +152,10 @@ pub(crate) fn open_session(
 /// Reads a `ReadRows` request and logs it as `ReadRows s0 at 2`.
 pub(crate) async fn read_rows_request(call: &mut FakeCall) -> ReadRowsRequest {
     let request: ReadRowsRequest = call.next_request().await.expect("a ReadRows request");
-    call.log(format!("ReadRows {} at {}", request.read_stream, request.offset));
+    call.log(format!(
+        "ReadRows {} at {}",
+        request.read_stream, request.offset
+    ));
     request
 }
 
@@ -154,10 +164,12 @@ pub(crate) fn send_batches(call: &mut FakeCall, batches: &[(Vec<u8>, i64)]) {
     for (bytes, row_count) in batches {
         call.send(&ReadRowsResponse {
             row_count: *row_count,
-            rows: Some(read_rows_response::Rows::ArrowRecordBatch(ArrowRecordBatch {
-                serialized_record_batch: bytes.clone(),
-                ..Default::default()
-            })),
+            rows: Some(read_rows_response::Rows::ArrowRecordBatch(
+                ArrowRecordBatch {
+                    serialized_record_batch: bytes.clone(),
+                    ..Default::default()
+                },
+            )),
             ..Default::default()
         });
     }
@@ -256,9 +268,11 @@ mod tests {
             .obj::<Person>()
             .stream_query_with_errors()
             .await?;
-        Ok(tokio::time::timeout(Duration::from_secs(20), stream.collect::<Vec<_>>())
-            .await
-            .expect("the merged stream ends"))
+        Ok(
+            tokio::time::timeout(Duration::from_secs(20), stream.collect::<Vec<_>>())
+                .await
+                .expect("the merged stream ends"),
+        )
     }
 
     #[tokio::test]
@@ -275,7 +289,11 @@ mod tests {
         assert_eq!(rows, [person(1), person(2)]);
         assert_eq!(
             fake.calls(),
-            ["GetTable ds.t", "CreateReadSession [id,name]", "ReadRows s0 at 0"]
+            [
+                "GetTable ds.t",
+                "CreateReadSession [id,name]",
+                "ReadRows s0 at 0"
+            ]
         );
         Ok(())
     }
@@ -370,7 +388,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_resumes_at_row_offset_after_retryable_error() -> BigQueryResult<()> {
-        let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1, 2]), people(&[3])]]));
+        let table = Arc::new(FakeReadTable::new(vec![vec![
+            people(&[1, 2]),
+            people(&[3]),
+        ]]));
         let attempts = Arc::new(AtomicUsize::new(0));
         let fake = FakeBigQuery::start(move |mut call: FakeCall| {
             let (table, attempts) = (table.clone(), attempts.clone());
@@ -417,7 +438,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_resumes_at_row_offset_after_lost_connection() -> BigQueryResult<()> {
-        let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1, 2]), people(&[3])]]));
+        let table = Arc::new(FakeReadTable::new(vec![vec![
+            people(&[1, 2]),
+            people(&[3]),
+        ]]));
         let attempts = Arc::new(AtomicUsize::new(0));
         let fake = FakeBigQuery::start(move |mut call: FakeCall| {
             let (table, attempts) = (table.clone(), attempts.clone());
@@ -499,7 +523,11 @@ mod tests {
             "{last:?}"
         );
         assert!(rows.iter().all(Result::is_ok), "{rows:?}");
-        let s0_reads = fake.calls().iter().filter(|c| *c == "ReadRows s0 at 0").count();
+        let s0_reads = fake
+            .calls()
+            .iter()
+            .filter(|c| *c == "ReadRows s0 at 0")
+            .count();
         assert_eq!(s0_reads, 1);
         Ok(())
     }
@@ -619,7 +647,11 @@ mod tests {
             .collect();
         ids.sort_unstable();
         assert_eq!(ids, [1, 2, 3, 4, 5, 6]);
-        assert_eq!(batches[0].num_columns(), 3, "record batches read every column");
+        assert_eq!(
+            batches[0].num_columns(),
+            3,
+            "record batches read every column"
+        );
         Ok(())
     }
 

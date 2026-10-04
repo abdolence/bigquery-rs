@@ -168,7 +168,6 @@ pub(crate) fn task_ended() -> BigQueryError {
     ))
 }
 
-
 /// The `StorageError` BigQuery attaches to an in-band append error.
 fn storage_error(status: &gcloud_sdk::google::rpc::Status) -> Option<StorageError> {
     status

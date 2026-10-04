@@ -13,8 +13,10 @@ pub(crate) const TAG_JSON: &str = "BigQueryJson";
 /// `BigQueryJson<String>` holds a JSON string parsed into a `String`, not the text, and in other
 /// serde formats the value is the JSON text as a string.
 ///
-/// SQL NULL and JSON `null` stay apart: `None` against `Some(BigQueryJson(Value::Null))`. Text
-/// that does not parse into `T` fails its row with
+/// In an `Option`, SQL NULL is `None`. JSON `null` is `Some(BigQueryJson(Value::Null))` for a
+/// `T` that can hold `null`, such as `serde_json::Value`, so the two stay apart; for any other
+/// `T`, such as a typed struct, the crate's decoder reads JSON `null` as `None`, the same as it
+/// does for a bare `Option<T>` field. Text that does not parse into `T` fails its row with
 /// [`Custom`](crate::errors::BigQueryCodecErrorKind::Custom).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BigQueryJson<T>(pub T);

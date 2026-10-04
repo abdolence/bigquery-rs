@@ -15,8 +15,8 @@
 //! the attribute tests in `decoder` pin it. A struct whose last field is itself `IgnoredAny`
 //! looks aliased and is read with name keys, which is correct and slightly slower.
 
-use crate::read::decoder::{Node, ValueDe};
 use crate::errors::BigQueryCodecErrorKind;
+use crate::read::decoder::{Node, ValueDe};
 use crate::types::error::CodecError;
 use serde::de::value::{BorrowedStrDeserializer, U64Deserializer};
 use serde::de::{DeserializeSeed, MapAccess, Visitor};
@@ -395,4 +395,3 @@ impl<'a> serde::Deserializer<'a> for Unknown<'_, '_, 'a> {
         option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier
     }
 }
-

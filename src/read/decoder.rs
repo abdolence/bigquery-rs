@@ -47,8 +47,9 @@ enum Cells<'a> {
     Bool(&'a BooleanArray),
     /// STRING and GEOGRAPHY.
     Str(&'a StringArray),
-    /// JSON: the text for a string target, parsed for any other.
-    Json(&'a StringArray),
+    /// JSON: the text for a string target, parsed for any other. The batch's state is kept for
+    /// the cells holding JSON `null` that an `Option` target reads as `None`.
+    Json(&'a StringArray, Rc<Ctx>),
     Bin(&'a BinaryArray),
     Date(&'a [i32]),
     Time(&'a [i64]),
@@ -107,7 +108,7 @@ impl<'a> Column<'a> {
             BqKind::Float64 => Cells::F64(array.as_primitive::<Float64Type>().values()),
             BqKind::Bool => Cells::Bool(array.as_boolean()),
             BqKind::String | BqKind::Geography => Cells::Str(array.as_string::<i32>()),
-            BqKind::Json => Cells::Json(array.as_string::<i32>()),
+            BqKind::Json => Cells::Json(array.as_string::<i32>(), ctx.clone()),
             BqKind::Bytes => Cells::Bin(array.as_binary::<i32>()),
             BqKind::Date => Cells::Date(array.as_primitive::<Date32Type>().values()),
             BqKind::Time => Cells::Time(array.as_primitive::<Time64MicrosecondType>().values()),
@@ -159,7 +160,12 @@ fn parse_json<'a, T>(
     let mut de = serde_json::Deserializer::from_str(text);
     read(&mut de)
         .and_then(|value| de.end().map(|()| value))
-        .map_err(|err| codec_error(BigQueryCodecErrorKind::Custom, format!("JSON column: {err}")))
+        .map_err(|err| {
+            codec_error(
+                BigQueryCodecErrorKind::Custom,
+                format!("JSON column: {err}"),
+            )
+        })
 }
 
 fn decimal_scale(data_type: &DataType, default: u32) -> u32 {
@@ -188,6 +194,9 @@ struct Ctx {
     /// Set when a key probe found an alias: the row being decoded is decoded again, whatever
     /// its result, since a target may have swallowed the probe's error.
     redo: Cell<bool>,
+    /// JSON `null` cells, as `(column address, index)`, whose `Option` target could not read
+    /// the `null` on an earlier pass over the current row, and that are `None` on the next.
+    json_nones: RefCell<Vec<(usize, usize)>>,
 }
 
 /// A row-shaped set of columns: the batch itself, or one STRUCT column.
@@ -561,7 +570,9 @@ impl<'c, 'a> ValueDe<'c, 'a> {
             Cells::F64(a) => v.visit_f64(a[r]),
             Cells::Bool(a) => v.visit_bool(a.value(r)),
             Cells::Str(a) => v.visit_borrowed_str(a.value(r)),
-            Cells::Json(a) => parse_json(a.value(r), |de| de::Deserializer::deserialize_any(de, v)),
+            Cells::Json(a, _) => {
+                parse_json(a.value(r), |de| de::Deserializer::deserialize_any(de, v))
+            }
             Cells::Bin(a) => v.visit_borrowed_bytes(a.value(r)),
             Cells::List { offsets, child } => {
                 let (start, end) = (offsets[r] as usize, offsets[r + 1] as usize);
@@ -585,7 +596,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
     /// and its parse error would read as a bad text; it is reported as the range error it is.
     fn string<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        if let Cells::Json(a) = &self.col.cells {
+        if let Cells::Json(a, _) = &self.col.cells {
             return v.visit_borrowed_str(a.value(self.row));
         }
         if let Cells::Ts(a) = &self.col.cells {
@@ -620,12 +631,29 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
         self.any_non_null(v)
     }
 
+    /// SQL NULL is `None`. JSON `null` is offered to the target as `Some` first, so that a
+    /// target that holds `null`, such as `serde_json::Value`, keeps it apart from SQL NULL; a
+    /// target that cannot read it fails, and the row is decoded again with that cell as `None`.
     fn deserialize_option<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         if self.is_null() {
-            v.visit_none()
-        } else {
-            v.visit_some(self)
+            return v.visit_none();
         }
+        let col = self.col;
+        if let Cells::Json(a, ctx) = &col.cells {
+            if a.value(self.row).trim_ascii() == "null" {
+                let cell = (std::ptr::from_ref(col) as usize, self.row);
+                if ctx.json_nones.borrow().contains(&cell) {
+                    return v.visit_none();
+                }
+                let some = v.visit_some(self);
+                if some.is_err() {
+                    ctx.json_nones.borrow_mut().push(cell);
+                    ctx.redo.set(true);
+                }
+                return some;
+            }
+        }
+        v.visit_some(self)
     }
 
     fn deserialize_unit<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
@@ -798,7 +826,7 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
         self.non_null()?;
         match &self.col.cells {
             Cells::Str(a) => v.visit_enum(BorrowedStrDeserializer::new(a.value(self.row))),
-            Cells::Json(a) => parse_json(a.value(self.row), |de| {
+            Cells::Json(a, _) => parse_json(a.value(self.row), |de| {
                 de::Deserializer::deserialize_enum(de, name, variants, v)
             }),
             _ => self.any_non_null(v),
@@ -923,6 +951,7 @@ impl<'a> BatchDecoder<'a> {
         let ctx = Rc::new(Ctx {
             plans_built: Cell::new(0),
             redo: Cell::new(false),
+            json_nones: RefCell::new(Vec::new()),
         });
         let fields = batch
             .schema_ref()
@@ -950,13 +979,14 @@ impl<'a> BatchDecoder<'a> {
                 format!("row {i} of a batch with {} rows", self.rows),
             ));
         }
+        self.ctx.json_nones.borrow_mut().clear();
         loop {
             let result = T::deserialize(RowDe {
                 node: &self.root,
                 row: i,
             });
-            // A probe switches one plan to name keys at most once per batch, so this loop
-            // runs at most once per struct plan.
+            // Every pass that asks for another adds a name-key plan or a `None` cell, and
+            // neither is undone within the row, so the loop ends.
             if !self.ctx.redo.replace(false) {
                 return result;
             }

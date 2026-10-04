@@ -94,7 +94,9 @@ fn wide_batch(seed: usize) -> RecordBatch {
             Arc::new(StringArray::from_iter_values(
                 (0..n).map(|k| format!("Storgatan {}", k % 97)),
             )) as ArrayRef,
-            Arc::new(Int64Array::from_iter((0..n).map(|k| (k % 5 != 0).then_some(i(k))))),
+            Arc::new(Int64Array::from_iter(
+                (0..n).map(|k| (k % 5 != 0).then_some(i(k))),
+            )),
         ],
         None,
     );
@@ -140,7 +142,9 @@ fn wide_batch(seed: usize) -> RecordBatch {
         ),
         (
             Field::new("day", DataType::Date32, false),
-            Arc::new(Date32Array::from_iter_values((0..n).map(|k| 19_000 + (k % 3000) as i32))),
+            Arc::new(Date32Array::from_iter_values(
+                (0..n).map(|k| 19_000 + (k % 3000) as i32),
+            )),
         ),
         {
             let a = TimestampMicrosecondArray::from_iter_values((0..n).map(micros))
@@ -154,7 +158,9 @@ fn wide_batch(seed: usize) -> RecordBatch {
                 false,
             )
             .with_metadata(ext("google:sqlType:datetime")),
-            Arc::new(TimestampMicrosecondArray::from_iter_values((0..n).map(micros))),
+            Arc::new(TimestampMicrosecondArray::from_iter_values(
+                (0..n).map(micros),
+            )),
         ),
         (
             Field::new(
@@ -170,7 +176,10 @@ fn wide_batch(seed: usize) -> RecordBatch {
             let a = Decimal128Array::from_iter_values((0..n).map(|k| k as i128 * 1_250_000_000))
                 .with_precision_and_scale(38, 9)
                 .expect("NUMERIC's Arrow type");
-            (Field::new("amount", a.data_type().clone(), false), Arc::new(a))
+            (
+                Field::new("amount", a.data_type().clone(), false),
+                Arc::new(a),
+            )
         },
         {
             let a = Decimal256Array::from_iter_values(
@@ -193,13 +202,12 @@ fn wide_batch(seed: usize) -> RecordBatch {
                 false,
             )
             .with_metadata(ext("google:sqlType:interval")),
-            Arc::new(IntervalMonthDayNanoArray::from_iter_values((0..n).map(|k| {
-                IntervalMonthDayNano::new(k as i32 % 24, k as i32 % 30, k as i64 * 1_000_000)
-            }))),
+            Arc::new(IntervalMonthDayNanoArray::from_iter_values((0..n).map(
+                |k| IntervalMonthDayNano::new(k as i32 % 24, k as i32 % 30, k as i64 * 1_000_000),
+            ))),
         ),
         (
-            Field::new("geo", DataType::Utf8, false)
-                .with_metadata(ext("google:sqlType:geography")),
+            Field::new("geo", DataType::Utf8, false).with_metadata(ext("google:sqlType:geography")),
             Arc::new(StringArray::from_iter_values(
                 (0..n).map(|k| format!("POINT({} {})", k % 180, k % 90)),
             )),

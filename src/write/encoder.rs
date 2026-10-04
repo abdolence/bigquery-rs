@@ -1350,7 +1350,10 @@ struct JsonCompound<'r, 'e, 'p, C> {
 }
 
 impl<'r, 'e, 'p, C> JsonCompound<'r, 'e, 'p, C> {
-    fn new(target: JsonSer<'r, 'e, 'p>, inner: Result<C, serde_json::Error>) -> Result<Self, CodecError> {
+    fn new(
+        target: JsonSer<'r, 'e, 'p>,
+        inner: Result<C, serde_json::Error>,
+    ) -> Result<Self, CodecError> {
         Ok(JsonCompound {
             target,
             inner: inner.map_err(json_error)?,
