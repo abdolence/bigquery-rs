@@ -5,7 +5,7 @@
 //! classification here is by [`tonic::Code`](gcloud_sdk::tonic::Code), plus the message for the
 //! rate-limit errors that BigQuery sends under non-retryable codes.
 
-use crate::{BigQueryJobRef, BigQueryTableRef};
+use crate::{BigQueryJobRef, BigQueryTablePlan, BigQueryTableRef};
 use rsb_derive::Builder;
 use std::error::Error;
 use std::fmt::Display;
@@ -19,7 +19,8 @@ pub enum BigQueryError {
     SystemError(BigQuerySystemError),
     /// An error reported by BigQuery that has no more specific variant.
     DatabaseError(BigQueryDatabaseError),
-    /// The resource already exists (`ALREADY_EXISTS`).
+    /// The resource already exists (`ALREADY_EXISTS`), or a schema sync found the table
+    /// changed since it read it (`FAILED_PRECONDITION` on its `if-match`).
     DataConflictError(BigQueryDataConflictError),
     /// The resource was not found (`NOT_FOUND`). A dataset or job looked up in the wrong
     /// `location` is reported this way too.
@@ -39,6 +40,8 @@ pub enum BigQueryError {
     /// A job that finished with errors. Boxed, since its details would make every
     /// `BigQueryResult` larger.
     JobError(Box<BigQueryJobError>),
+    /// A schema sync refused its plan and wrote nothing. Boxed, since it carries the plan.
+    SchemaChangeRefused(Box<BigQuerySchemaChangeRefusedError>),
 }
 
 impl BigQueryError {
@@ -70,6 +73,7 @@ impl Display for BigQueryError {
             BigQueryError::SchemaMismatchError(ref err) => err.fmt(f),
             BigQueryError::WriteStreamError(ref err) => err.fmt(f),
             BigQueryError::JobError(ref err) => err.fmt(f),
+            BigQueryError::SchemaChangeRefused(ref err) => err.fmt(f),
         }
     }
 }
@@ -88,6 +92,7 @@ impl Error for BigQueryError {
             BigQueryError::SchemaMismatchError(ref err) => Some(err),
             BigQueryError::WriteStreamError(ref err) => Some(err),
             BigQueryError::JobError(ref err) => Some(err.as_ref()),
+            BigQueryError::SchemaChangeRefused(ref err) => Some(err.as_ref()),
         }
     }
 }
@@ -150,7 +155,7 @@ impl Display for BigQueryDatabaseError {
 
 impl Error for BigQueryDatabaseError {}
 
-/// The resource already exists.
+/// The resource already exists, or changed since it was read.
 #[derive(Debug, Eq, PartialEq, Clone, Builder)]
 pub struct BigQueryDataConflictError {
     /// Generic public details about the error.
@@ -426,6 +431,32 @@ impl Display for BigQueryJobError {
 }
 
 impl Error for BigQueryJobError {}
+
+/// A schema sync's plan has changes that are impossible in place, and the declaration does not
+/// opt in to recreating the table, or opts in with `recreate_if_empty()` and the table is not
+/// empty. Nothing was written.
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct BigQuerySchemaChangeRefusedError {
+    /// The plan, with its `impossible` changes and its `refusal`.
+    pub plan: BigQueryTablePlan,
+}
+
+impl Display for BigQuerySchemaChangeRefusedError {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "Schema sync of {} refused, nothing was written: {} changes are impossible in place",
+            self.plan.table,
+            self.plan.impossible.len()
+        )?;
+        if let Some(refusal) = &self.plan.refusal {
+            write!(f, " and {refusal}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for BigQuerySchemaChangeRefusedError {}
 
 /// One error a job reported, as in the v2 `ErrorProto`.
 #[derive(Debug, Eq, PartialEq, Clone, Builder)]

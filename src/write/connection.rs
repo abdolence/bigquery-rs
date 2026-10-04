@@ -157,6 +157,7 @@ pub(crate) fn clone_error(err: &BigQueryError) -> BigQueryError {
         BigQueryError::SchemaMismatchError(e) => BigQueryError::SchemaMismatchError(e.clone()),
         BigQueryError::WriteStreamError(e) => BigQueryError::WriteStreamError(e.clone()),
         BigQueryError::JobError(e) => BigQueryError::JobError(e.clone()),
+        BigQueryError::SchemaChangeRefused(e) => BigQueryError::SchemaChangeRefused(e.clone()),
     }
 }
 

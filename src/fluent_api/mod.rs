@@ -3,15 +3,19 @@
 //! Start from [`BigQueryDb::fluent()`](crate::BigQueryDb::fluent).
 
 use crate::{BigQueryDb, BigQueryQueryParams};
-use crate::{BigQueryQuerySupport, BigQueryReadSupport, BigQueryWriteSupport};
+use crate::{
+    BigQueryQuerySupport, BigQueryReadSupport, BigQuerySchemaSupport, BigQueryWriteSupport,
+};
 
 mod insert_builder;
 mod query_builder;
+mod schema_builder;
 mod select_builder;
 mod select_filter_builder;
 
 pub use insert_builder::*;
 pub use query_builder::*;
+pub use schema_builder::*;
 pub use select_builder::*;
 pub use select_filter_builder::*;
 
@@ -65,6 +69,51 @@ where
     #[inline]
     pub fn insert(self) -> BigQueryInsertInitialBuilder<'a, D> {
         BigQueryInsertInitialBuilder::new(self.db)
+    }
+}
+
+impl<'a, D> BigQueryExprBuilder<'a, D>
+where
+    D: BigQuerySchemaSupport + Clone + Send + Sync + 'static,
+{
+    /// Starts a schema declaration. Continue with `.table()` to declare one table's columns
+    /// and settings, then `.plan()` or `.sync()`.
+    ///
+    /// ```rust,no_run
+    /// # use bigquery::*;
+    /// # async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+    /// const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    /// const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+    ///
+    /// struct Order {
+    ///     id: i64,
+    ///     customer: String,
+    ///     placed_at: jiff::Timestamp,
+    /// }
+    ///
+    /// let report = db
+    ///     .fluent()
+    ///     .schema()
+    ///     .table(SHOP.table(ORDERS))
+    ///     .columns(|c| {
+    ///         c.fields([
+    ///             c.field(path!(Order::id)).int64().required(),
+    ///             c.field(path!(Order::customer)).string(),
+    ///             c.field(path!(Order::placed_at)).timestamp(),
+    ///         ])
+    ///     })
+    ///     .primary_key([path!(Order::id)])
+    ///     .partition_by_day(path!(Order::placed_at))
+    ///     .cluster_by([path!(Order::customer)])
+    ///     .sync()
+    ///     .await?;
+    /// println!("{report}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    pub fn schema(self) -> BigQuerySchemaBuilder<'a, D> {
+        BigQuerySchemaBuilder::new(self.db)
     }
 }
 

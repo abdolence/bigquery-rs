@@ -7,6 +7,7 @@
 
 mod query;
 mod read;
+mod table;
 mod write;
 
 use crate::{BigQueryDb, BigQueryDbOptions};
@@ -100,6 +101,7 @@ impl FakeBigQuery {
 /// One RPC as the server sees it: the request messages as they arrive, and the response.
 pub(crate) struct FakeCall {
     method: String,
+    headers: hyper::HeaderMap,
     body: RecvStream,
     received: Vec<u8>,
     respond: SendResponse<Bytes>,
@@ -112,6 +114,14 @@ impl FakeCall {
     /// The RPC's method name, such as `ReadRows`, without its service.
     pub fn method(&self) -> &str {
         &self.method
+    }
+
+    /// The request header `name` as text, if the call carries it.
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
     }
 
     /// Appends one line to the server's call log.
@@ -271,8 +281,10 @@ async fn serve_connection(
                 .next()
                 .unwrap_or_default()
                 .to_string();
+            let headers = request.headers().clone();
             let call = FakeCall {
                 method,
+                headers,
                 body: request.into_body(),
                 received: Vec::new(),
                 respond,

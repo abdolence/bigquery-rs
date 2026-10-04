@@ -152,6 +152,13 @@ pub(crate) fn lex_string(token: &str) -> String {
     }
 }
 
+pub(crate) fn lex_identifier(token: &str) -> String {
+    match lex(token, '`') {
+        Decoded::Text(s) => s,
+        other => panic!("a quoted identifier, got {other:.80?}"),
+    }
+}
+
 /// The keyword and the text of a `KEYWORD '...'` literal.
 fn lex_keyword_string(token: &str) -> (&str, String) {
     let (keyword, string) = token.split_once(' ').expect("a keyword, a space, a string");
