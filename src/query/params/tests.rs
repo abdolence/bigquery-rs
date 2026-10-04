@@ -486,3 +486,52 @@ fn parameter_names_must_be_googlesql_identifiers() {
     let map: std::collections::BTreeMap<&str, i64> = [("ok", 1), ("bad name", 2)].into();
     assert!(matches!(struct_params(&map), Err(ParamFailure::Invalid(_))));
 }
+
+/// A value that serializes as one of the shapes a parameter error describes.
+enum Malformed {
+    JsonWrapper,
+    DecimalWrapper,
+    IntegerMapKey,
+    IntervalPart,
+}
+
+impl Serialize for Malformed {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeStruct};
+        match self {
+            Malformed::JsonWrapper => serializer.serialize_newtype_struct(TAG_JSON, &271828i64),
+            Malformed::DecimalWrapper => {
+                serializer.serialize_newtype_struct(TAG_DECIMAL, &271828i64)
+            }
+            Malformed::IntegerMapKey => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry(&271828i64, "v")?;
+                map.end()
+            }
+            Malformed::IntervalPart => {
+                let mut interval = serializer.serialize_struct(TAG_INTERVAL, 3)?;
+                interval.serialize_field("months", "s3cr3t")?;
+                interval.serialize_field("days", &0i64)?;
+                interval.serialize_field("nanos", &0i64)?;
+                interval.end()
+            }
+        }
+    }
+}
+
+#[test]
+fn a_parameter_error_names_the_kind_of_value_and_not_the_value() {
+    for (value, kind, text) in [
+        (Malformed::JsonWrapper, "integer", "271828"),
+        (Malformed::DecimalWrapper, "integer", "271828"),
+        (Malformed::IntegerMapKey, "integer", "271828"),
+        (Malformed::IntervalPart, "string", "s3cr3t"),
+    ] {
+        let message = match infer(&value) {
+            Err(err) => err.to_string(),
+            Ok(param) => panic!("{kind}: expected an error, got {param:?}"),
+        };
+        assert!(message.contains(kind), "{message}");
+        assert!(!message.contains(text), "{message}");
+    }
+}

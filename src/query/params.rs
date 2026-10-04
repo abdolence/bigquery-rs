@@ -405,11 +405,17 @@ impl ser::Serializer for NodeSerializer {
         match name {
             TAG_JSON => match value.serialize(self)? {
                 Node::Str(text) => Ok(Node::Json(text)),
-                other => Err(mismatch(format!("JSON text expected, got {other:?}"))),
+                other => Err(mismatch(format!(
+                    "JSON text expected, got {}",
+                    describe(&other)
+                ))),
             },
             TAG_DECIMAL => match value.serialize(self)? {
                 Node::Str(text) => Ok(Node::Decimal(text)),
-                other => Err(mismatch(format!("decimal text expected, got {other:?}"))),
+                other => Err(mismatch(format!(
+                    "decimal text expected, got {}",
+                    describe(&other)
+                ))),
             },
             _ => value.serialize(self),
         }
@@ -548,7 +554,8 @@ impl ser::SerializeMap for MapNode {
                 Ok(())
             }
             other => Err(mismatch(format!(
-                "a map parameter needs string keys, got {other:?}"
+                "a map parameter needs string keys, got {}",
+                describe(&other)
             ))),
         }
     }
@@ -585,10 +592,11 @@ impl StructNode {
         match self.take_field(name) {
             Node::Int(v) => T::try_from(v)
                 .map_err(|_| out_of_range(format!("INTERVAL {name} {v} is out of range"))),
-            other => Err(
-                mismatch(format!("INTERVAL {name} must be an integer, got {other:?}"))
-                    .at_field(name),
-            ),
+            other => Err(mismatch(format!(
+                "INTERVAL {name} must be an integer, got {}",
+                describe(&other)
+            ))
+            .at_field(name)),
         }
     }
 }

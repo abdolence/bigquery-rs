@@ -392,6 +392,49 @@ async fn recreate_if_empty_replaces_an_empty_table() -> TestResult {
     .await
 }
 
+/// A recreate copies the defaults the declaration leaves out from the live table into the
+/// `CREATE OR REPLACE`. A live default may end in a `--` comment, which `PatchTable` and
+/// `InsertTable` store as given, so the statement only parses if the default is its own operand.
+#[tokio::test]
+async fn a_recreate_keeps_live_defaults() -> TestResult {
+    with_scratch("a_recreate_keeps_live_defaults", |s| async move {
+        let declare = |n_is_string: bool, with_defaults: bool| {
+            s.db.fluent().schema().table(s.table()).columns(move |c| {
+                let mut ts = c.field("ts").timestamp();
+                let mut k = c.field("k").int64();
+                if with_defaults {
+                    ts = ts.default_value("CURRENT_TIMESTAMP()");
+                    k = k.default_value("1 -- one");
+                }
+                let n = c.field("n");
+                c.fields([
+                    c.field("id").int64().required(),
+                    ts,
+                    k,
+                    if n_is_string { n.string() } else { n.int64() },
+                ])
+            })
+        };
+        declare(false, true).sync().await?;
+        let default = |f: Option<bq::TableFieldSchema>| f.and_then(|f| f.default_value_expression);
+        assert_eq!(default(s.field("k").await?).as_deref(), Some("1 -- one"));
+
+        let report = declare(true, false).recreate_if_empty().sync().await?;
+        assert!(report.recreated.is_some(), "{report}");
+        assert_eq!(
+            s.field("n").await?.map(|f| f.r#type),
+            Some("STRING".to_string())
+        );
+        assert_eq!(
+            default(s.field("ts").await?).as_deref(),
+            Some("CURRENT_TIMESTAMP()")
+        );
+        assert_eq!(default(s.field("k").await?).as_deref(), Some("1"));
+        Ok(())
+    })
+    .await
+}
+
 /// Corpus values a table or column description can hold, joined: quotes, backslashes,
 /// comments, statement terminators, newlines and look-alike quotes.
 fn hostile_description() -> String {

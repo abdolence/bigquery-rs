@@ -6,13 +6,14 @@
 //! per-API answers live in the sibling `read`, `write` and `query` modules.
 
 mod admin;
+pub(crate) mod events;
 mod query;
 mod read;
 pub(crate) mod spans;
 mod table;
 mod write;
 
-use crate::{BigQueryDb, BigQueryDbOptions, BigQueryEndpoint};
+use crate::{BigQueryDb, BigQueryDbOptions};
 use futures::future::BoxFuture;
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Code;
@@ -56,14 +57,13 @@ impl FakeBigQuery {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a free loopback port for the fake server");
-        let endpoint: BigQueryEndpoint = format!(
+        let endpoint = url::Url::parse(&format!(
             "http://{}",
             listener
                 .local_addr()
                 .expect("a bound listener has a local address")
-        )
-        .parse()
-        .expect("a loopback URL is an endpoint");
+        ))
+        .expect("a loopback address is a URL");
         let handler: Arc<Handler> = Arc::new(move |call| Box::pin(handler(call)));
         let calls = Arc::new(watch::Sender::new(Vec::new()));
         let accepted = calls.clone();

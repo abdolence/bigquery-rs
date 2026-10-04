@@ -49,6 +49,7 @@ arrow-array = "60"
 arrow-schema = "60"
 arrow-buffer = "60"
 arrow-ipc = { version = "60", default-features = false, features = ["lz4", "zstd"] }
+url = { version = "2.5", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

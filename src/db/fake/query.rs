@@ -128,6 +128,7 @@ pub(crate) fn done_job(dataset: &str, table: &str) -> Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fake::events::CapturedEvents;
     use crate::db::fake::read::{
         get_table, open_session, read_rows_request, send_batches, session_request, FakeReadTable,
     };
@@ -1204,6 +1205,70 @@ mod tests {
                 assert_eq!(carried_values(&request), [p; 4], "{what}: the values");
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_skipped_row_log_line_names_the_row_and_field_and_not_the_cell() -> BigQueryResult<()>
+    {
+        #[derive(Deserialize, Debug)]
+        enum Plan {
+            Basic,
+        }
+        #[derive(Deserialize, Debug)]
+        struct Subscription {
+            #[allow(dead_code, reason = "the row only has to decode")]
+            name: Plan,
+        }
+        const CELL: &str = "s3cr3t-cell";
+        let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+            query_request(&mut call).await;
+            let names = vec![Some("Basic".to_string()), Some(CELL.to_string())];
+            call.reply(&inline_response(&people_named(&[1, 2], names), 2));
+        })
+        .await;
+
+        let mut with_errors = fake
+            .db
+            .fluent()
+            .query("SELECT 1")
+            .obj::<Subscription>()
+            .stream_query_with_errors()
+            .await?;
+        assert!(with_errors.next().await.expect("the first row").is_ok());
+        let err = match with_errors.next().await.expect("the second row") {
+            Err(BigQueryError::DeserializeError(err)) => err,
+            other => panic!("expected a DeserializeError, got {other:?}"),
+        };
+        assert!(err.message.contains(CELL), "{err}");
+
+        let (events, _guard) = CapturedEvents::capture();
+        let rows: Vec<Subscription> = fake
+            .db
+            .fluent()
+            .query("SELECT 1")
+            .obj::<Subscription>()
+            .stream_query()
+            .await?
+            .collect()
+            .await;
+        assert_eq!(rows.len(), 1);
+        let logged = events.at(tracing::Level::ERROR);
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let fields = &logged[0];
+        assert_eq!(
+            fields.get("kind").map(String::as_str),
+            Some(err.kind.code())
+        );
+        assert_eq!(
+            fields.get("row"),
+            Some(&err.row.expect("a decoded row has an index").to_string())
+        );
+        assert_eq!(fields.get("path"), Some(&err.path));
+        assert!(
+            fields.values().all(|value| !value.contains(CELL)),
+            "{fields:?}"
+        );
         Ok(())
     }
 }

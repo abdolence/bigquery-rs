@@ -23,6 +23,7 @@ pub(crate) use decoder::decode_rows;
     reason = "queries decode their inline Arrow results with it"
 )]
 pub(crate) use ipc::ArrowIpcDecoder;
+pub(crate) use support::skip_failed_row;
 
 use crate::{BigQueryDb, BigQueryResult};
 use arrow_array::RecordBatch;

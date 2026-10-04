@@ -49,12 +49,7 @@ impl CapturedSpans {
     /// Captures the spans this thread creates until the guard drops. Fields recorded later on
     /// such a span, from any task or thread, still arrive.
     pub fn capture() -> (Self, CaptureGuard) {
-        static INSTALL: Once = Once::new();
-        INSTALL.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(
-                tracing_subscriber::registry().with(Router),
-            );
-        });
+        install_global_subscriber();
         let spans = Self::default();
         ACTIVE.with(|active| *active.borrow_mut() = Some(spans.clone()));
         (spans, CaptureGuard)
@@ -103,7 +98,20 @@ impl CapturedSpans {
     }
 }
 
-struct Visitor<'a>(&'a mut Fields);
+/// Installs the one global subscriber that both this capture and
+/// [`CapturedEvents`](super::events::CapturedEvents) route through, the first time either asks.
+pub(super) fn install_global_subscriber() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(
+            tracing_subscriber::registry()
+                .with(Router)
+                .with(super::events::EventRouter),
+        );
+    });
+}
+
+pub(super) struct Visitor<'a>(pub(super) &'a mut Fields);
 
 impl Visit for Visitor<'_> {
     fn record_str(&mut self, field: &Field, value: &str) {

@@ -245,10 +245,12 @@ where
         db.read_obj(self.checked_params()?).await
     }
 
-    /// Streams the rows. A row that fails to decode is logged at `error!` and skipped. A read
-    /// stream that fails for good is logged too and ends the stream, so a stream that ends
-    /// does not mean every row was read; use
-    /// [`stream_query_with_errors`](Self::stream_query_with_errors) to tell the two apart.
+    /// Streams the rows. A row that fails to decode is logged at `error!` and skipped; the log
+    /// line names the error's kind, row and field path and leaves out its message, which can
+    /// hold the cell's text. A read stream that fails for good is logged too and ends the
+    /// stream, so a stream that ends does not mean every row was read; use
+    /// [`stream_query_with_errors`](Self::stream_query_with_errors) to tell the two apart and to
+    /// get each error in full.
     pub async fn stream_query<'b>(self) -> BigQueryResult<BoxStream<'b, T>> {
         let db = self.db;
         db.stream_read_obj(self.checked_params()?).await

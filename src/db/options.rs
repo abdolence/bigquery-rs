@@ -1,6 +1,13 @@
-use crate::{BigQueryEndpoint, BigQueryLocation};
+use crate::BigQueryLocation;
 use gcloud_sdk::GoogleEnvironment;
 use rsb_derive::Builder;
+use url::Url;
+
+/// Google's BigQuery v2 API endpoint: datasets, tables, jobs and queries.
+pub const BIGQUERY_API_URL: &str = "https://bigquery.googleapis.com";
+
+/// Google's BigQuery Storage Read and Write API endpoint.
+pub const BIGQUERY_STORAGE_API_URL: &str = "https://bigquerystorage.googleapis.com";
 
 /// Configuration options for the [`BigQueryDb`](crate::BigQueryDb) client.
 ///
@@ -14,8 +21,8 @@ use rsb_derive::Builder;
 ///     .with_bigquery_api_url("https://eu-bigquery.googleapis.com".parse()?)
 ///     .with_max_retries(5);
 ///
-/// assert_eq!(options.effective_bigquery_api_url().as_str(), "https://eu-bigquery.googleapis.com");
-/// # Ok::<(), bigquery::errors::BigQueryError>(())
+/// assert_eq!(options.effective_bigquery_api_url().host_str(), Some("eu-bigquery.googleapis.com"));
+/// # Ok::<(), bigquery::url::ParseError>(())
 /// ```
 #[derive(Debug, Eq, PartialEq, Clone, Builder)]
 pub struct BigQueryDbOptions {
@@ -32,14 +39,17 @@ pub struct BigQueryDbOptions {
     #[default = "3"]
     pub max_retries: usize,
 
-    /// Overrides [`BigQueryEndpoint::BIGQUERY`].
-    pub bigquery_api_url: Option<BigQueryEndpoint>,
+    /// Overrides [`BIGQUERY_API_URL`].
+    ///
+    /// The client connects to the URL's scheme, host and port; a path, query or fragment is not
+    /// used. Client construction refuses a scheme other than `http` or `https`, or no host.
+    pub bigquery_api_url: Option<Url>,
 
-    /// Overrides [`BigQueryEndpoint::BIGQUERY_STORAGE`].
+    /// Overrides [`BIGQUERY_STORAGE_API_URL`], under the same rules as `bigquery_api_url`.
     ///
     /// There is no emulator support: the BigQuery emulators speak only the REST API, while this
     /// crate uses gRPC throughout.
-    pub bigquery_storage_api_url: Option<BigQueryEndpoint>,
+    pub bigquery_storage_api_url: Option<Url>,
 }
 
 impl BigQueryDbOptions {
@@ -53,17 +63,18 @@ impl BigQueryDbOptions {
     }
 
     /// The v2 API endpoint these options connect to.
-    pub fn effective_bigquery_api_url(&self) -> &BigQueryEndpoint {
-        self.bigquery_api_url
-            .as_ref()
-            .unwrap_or(&BigQueryEndpoint::BIGQUERY)
+    pub fn effective_bigquery_api_url(&self) -> Url {
+        self.bigquery_api_url.clone().unwrap_or_else(|| {
+            Url::parse(BIGQUERY_API_URL).expect("BIGQUERY_API_URL is an absolute https URL")
+        })
     }
 
     /// The Storage API endpoint these options connect to.
-    pub fn effective_bigquery_storage_api_url(&self) -> &BigQueryEndpoint {
-        self.bigquery_storage_api_url
-            .as_ref()
-            .unwrap_or(&BigQueryEndpoint::BIGQUERY_STORAGE)
+    pub fn effective_bigquery_storage_api_url(&self) -> Url {
+        self.bigquery_storage_api_url.clone().unwrap_or_else(|| {
+            Url::parse(BIGQUERY_STORAGE_API_URL)
+                .expect("BIGQUERY_STORAGE_API_URL is an absolute https URL")
+        })
     }
 }
 
@@ -85,12 +96,12 @@ mod tests {
     fn default_endpoints_are_the_two_google_hosts() {
         let options = BigQueryDbOptions::new("p".to_string());
         assert_eq!(
-            options.effective_bigquery_api_url().as_str(),
-            "https://bigquery.googleapis.com"
+            options.effective_bigquery_api_url().host_str(),
+            Some("bigquery.googleapis.com")
         );
         assert_eq!(
-            options.effective_bigquery_storage_api_url().as_str(),
-            "https://bigquerystorage.googleapis.com"
+            options.effective_bigquery_storage_api_url().host_str(),
+            Some("bigquerystorage.googleapis.com")
         );
     }
 
@@ -99,14 +110,8 @@ mod tests {
         let options = BigQueryDbOptions::new("p".to_string())
             .with_bigquery_api_url("http://localhost:1".parse().expect("a URL"))
             .with_bigquery_storage_api_url("http://localhost:2".parse().expect("a URL"));
-        assert_eq!(
-            options.effective_bigquery_api_url().as_str(),
-            "http://localhost:1"
-        );
-        assert_eq!(
-            options.effective_bigquery_storage_api_url().as_str(),
-            "http://localhost:2"
-        );
+        assert_eq!(options.effective_bigquery_api_url().port(), Some(1));
+        assert_eq!(options.effective_bigquery_storage_api_url().port(), Some(2));
     }
 
     #[test]

@@ -13,9 +13,6 @@ pub use labels::*;
 mod location;
 pub use location::*;
 
-mod endpoint;
-pub use endpoint::*;
-
 mod table_ref;
 pub use table_ref::*;
 
@@ -138,20 +135,18 @@ impl BigQueryDb {
     ///
     /// # Errors
     /// [`BigQueryError::InvalidParametersError`] for the field `google_project_id` if it is
-    /// empty, before any credentials are read.
+    /// empty or contains `/` or a control character, before any credentials are read.
     pub async fn with_options_token_source(
         options: BigQueryDbOptions,
         token_scopes: Vec<String>,
         token_source_type: TokenSourceType,
     ) -> BigQueryResult<Self> {
-        if options.google_project_id.is_empty() {
-            return Err(BigQueryError::invalid_parameters(
-                "google_project_id",
-                "must not be empty",
-            ));
-        }
-        let api_url = options.effective_bigquery_api_url().to_string();
-        let storage_api_url = options.effective_bigquery_storage_api_url().to_string();
+        table_ref::check_project_id("google_project_id", &options.google_project_id)?;
+        let api_url = grpc_origin("bigquery_api_url", &options.effective_bigquery_api_url())?;
+        let storage_api_url = grpc_origin(
+            "bigquery_storage_api_url",
+            &options.effective_bigquery_storage_api_url(),
+        )?;
 
         info!(
             google_project_id = options.google_project_id,
@@ -273,20 +268,87 @@ impl std::fmt::Debug for BigQueryDb {
     }
 }
 
+/// The `scheme://host[:port]` that a channel to `url` connects to, with `field` naming the option
+/// in the error.
+///
+/// gcloud-sdk takes the TLS server name from this text with the `https://` cut off, so it must
+/// carry no path, not even the `/` that [`Url`] adds to every `http` and `https` URL.
+///
+/// # Errors
+/// [`BigQueryError::InvalidParametersError`] if the scheme is not `http` or `https`, or the URL
+/// has no host.
+fn grpc_origin(field: &'static str, url: &url::Url) -> BigQueryResult<String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(BigQueryError::invalid_parameters(
+            field,
+            format!("must start with http:// or https://, was \"{url}\""),
+        ));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(BigQueryError::invalid_parameters(
+            field,
+            format!("must name a host, was \"{url}\""),
+        ));
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::errors::BigQueryInvalidParametersError;
 
     #[tokio::test]
-    async fn an_empty_project_id_fails_client_construction() {
-        let result = BigQueryDb::with_options(BigQueryDbOptions::new(String::new())).await;
-        match result {
-            Err(BigQueryError::InvalidParametersError(BigQueryInvalidParametersError {
-                public,
-            })) => assert_eq!(public.field, "google_project_id"),
-            Err(other) => panic!("expected an invalid-parameters error, got {other:?}"),
-            Ok(_) => panic!("expected an invalid-parameters error, got a client"),
+    async fn an_endpoint_that_is_not_http_or_https_with_a_host_fails_client_construction() {
+        for (url, field) in [
+            ("ftp://example.com", "bigquery_api_url"),
+            ("unix:/run/bigquery.sock", "bigquery_storage_api_url"),
+            ("data:text/plain,x", "bigquery_api_url"),
+        ] {
+            let url = url::Url::parse(url).expect("a URL");
+            let options = BigQueryDbOptions::new("p".into());
+            let options = if field == "bigquery_api_url" {
+                options.with_bigquery_api_url(url)
+            } else {
+                options.with_bigquery_storage_api_url(url)
+            };
+            match BigQueryDb::with_options(options).await {
+                Err(BigQueryError::InvalidParametersError(BigQueryInvalidParametersError {
+                    public,
+                })) => assert_eq!(public.field, field),
+                Err(other) => panic!("{field}: expected invalid parameters, got {other:?}"),
+                Ok(_) => panic!("{field}: expected invalid parameters, got a client"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_channel_connects_to_the_origin_without_a_path() -> BigQueryResult<()> {
+        let options = BigQueryDbOptions::new("p".into());
+        assert_eq!(
+            grpc_origin("f", &options.effective_bigquery_api_url())?,
+            BIGQUERY_API_URL
+        );
+        assert_eq!(
+            grpc_origin("f", &options.effective_bigquery_storage_api_url())?,
+            BIGQUERY_STORAGE_API_URL
+        );
+        let local = url::Url::parse("http://127.0.0.1:9050/some/path?q=1").expect("a URL");
+        assert_eq!(grpc_origin("f", &local)?, "http://127.0.0.1:9050");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_invalid_project_id_fails_client_construction() {
+        for project in ["", "p/x", "p\nx"] {
+            let result = BigQueryDb::with_options(BigQueryDbOptions::new(project.into())).await;
+            match result {
+                Err(BigQueryError::InvalidParametersError(BigQueryInvalidParametersError {
+                    public,
+                })) => assert_eq!(public.field, "google_project_id", "{project:?}"),
+                Err(other) => panic!("{project:?}: expected invalid parameters, got {other:?}"),
+                Ok(_) => panic!("{project:?}: expected invalid parameters, got a client"),
+            }
         }
     }
 }

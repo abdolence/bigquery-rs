@@ -1,6 +1,7 @@
 //! The DDL `.sync()` runs, rendered only through `src/sql`: every name a quoted identifier and
 //! every description, label and option value an escaped literal. The one exception is a
-//! column's default value, which is a trusted SQL expression by contract.
+//! column's default value, which is a trusted SQL expression by contract, declared or copied
+//! from the live table, and is written as one parenthesized operand.
 //!
 //! Numbers in the text (type parameters, range bounds) come from integer fields, never from
 //! caller text.
@@ -188,8 +189,13 @@ fn column_sql(field: &BigQueryFieldSchema) -> String {
         moded_type_sql(field)
     );
     if let Some(default) = &field.default_value_expression {
-        sql.push_str(" DEFAULT ");
+        // One operand whatever the text holds: the newline ends a `--` or `#` comment before
+        // the closing parenthesis, and a `;`, an unbalanced `)` or an unclosed `/*` becomes a
+        // syntax error in this statement rather than a second one. BigQuery stores the
+        // expression without the parentheses and the comment, so the next plan compares equal.
+        sql.push_str(" DEFAULT (");
         sql.push_str(default);
+        sql.push_str("\n)");
     }
     push_not_null_and_options(&mut sql, field);
     sql

@@ -65,6 +65,7 @@ pub extern crate struct_path;
 pub use arrow_array;
 pub use arrow_schema;
 pub use jiff;
+pub use url;
 
 /// An exact instant in time, used by this library for the times BigQuery reports about a
 /// dataset, a table, a job or a write: creation and last modified times, a job's start and end,

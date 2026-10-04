@@ -204,8 +204,11 @@ impl BigQuerySchemaColumn {
     /// `'none'`.
     ///
     /// **The expression is trusted SQL.** It is sent to BigQuery as it is and written into
-    /// generated DDL as it is, so it must never carry caller-supplied text; a string default is
-    /// written as its own quoted literal, `"'none'"`.
+    /// generated DDL as one parenthesized operand, `DEFAULT (expr)`, so it must never carry
+    /// caller-supplied text; a string default is written as its own quoted literal, `"'none'"`.
+    /// A recreate writes the live table's default for every column the declaration gives none,
+    /// and that text is trusted the same way: anyone allowed to update the table's metadata
+    /// can have written it.
     ///
     /// BigQuery cannot add a column with a default in one step: `.sync()` adds the column and
     /// then sets the default in a second `PatchTable`, and the rows already in the table stay

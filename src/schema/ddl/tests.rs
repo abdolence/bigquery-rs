@@ -132,10 +132,18 @@ fn orders() -> BigQueryTableRef {
 
 #[test]
 fn table_path_quotes_each_part_whatever_the_project_holds() {
-    for project in injection_corpus().into_iter().filter(|p| !p.is_empty()) {
-        let table = BigQueryDatasetRef::new(project.clone(), BigQueryDatasetId::from_static("ds"))
-            .expect("a project")
-            .table(BigQueryTableId::from_static("t"));
+    let accepted: Vec<(String, BigQueryTableRef)> = injection_corpus()
+        .into_iter()
+        .filter_map(|p| {
+            let dataset = BigQueryDatasetRef::new(p.clone(), BigQueryDatasetId::from_static("ds"));
+            Some((p, dataset.ok()?.table(BigQueryTableId::from_static("t"))))
+        })
+        .collect();
+    assert!(
+        accepted.iter().any(|(p, _)| p == "`backtick`"),
+        "a backtick project must reach the renderer, or this test checks nothing"
+    );
+    for (project, table) in accepted {
         let sql = table_sql(&table, "unused");
         assert_eq!(
             tokens(&sql),
@@ -261,7 +269,7 @@ fn create_or_replace_restates_columns_key_partitioning_clustering_and_options() 
          `ts` TIMESTAMP,\n  \
          `tags` ARRAY<STRING>,\n  \
          `addr` STRUCT<`city` STRING NOT NULL OPTIONS(description='c')>,\n  \
-         `total` NUMERIC(10, 2) DEFAULT 0,\n  \
+         `total` NUMERIC(10, 2) DEFAULT (0\n),\n  \
          PRIMARY KEY (`id`) NOT ENFORCED\n)\n\
          PARTITION BY DATE(`ts`)\n\
          CLUSTER BY `id`\n\
@@ -393,4 +401,160 @@ fn alter_statements_name_the_table_and_the_column() {
         snapshot_sql("`p`.`ds`.`t_snap`", &table),
         "CREATE SNAPSHOT TABLE `p`.`ds`.`t_snap` CLONE `p`.`ds`.`t`"
     );
+}
+
+/// `sql` with every `--`, `#` and `/* */` comment outside a quoted token removed, which is what
+/// BigQuery's parser sees.
+fn without_comments(sql: &str) -> String {
+    let mut out = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' {
+                out.extend(chars.next());
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('`' | '\'' | '"', _) => {
+                quote = Some(c);
+                out.push(c);
+            }
+            ('#', _) | ('-', Some('-')) => while chars.next_if(|&d| d != '\n').is_some() {},
+            ('/', Some('*')) => {
+                chars.next();
+                while let Some(d) = chars.next() {
+                    if d == '*' && chars.next_if_eq(&'/').is_some() {
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[test]
+fn a_default_is_one_parenthesized_operand() {
+    let table = table_sql(&orders(), "p");
+    let rendered = |expression: &str, code: &str| {
+        let mut c = column("c", BigQueryFieldType::Int64, BigQueryFieldMode::Nullable);
+        c.default_value_expression = Some(expression.into());
+        let target = target(vec![
+            c,
+            column("n", BigQueryFieldType::Int64, BigQueryFieldMode::Nullable),
+        ]);
+        let sql = create_sql(&table, &target, false).expect("DDL");
+        let parsed = without_comments(&sql).replacen(code, "E", 1);
+        skeleton(&parsed.split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let plain = rendered("0", "0");
+    for (expression, code) in [
+        ("CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP()"),
+        ("1 -- x", "1"),
+        ("1 # x", "1"),
+        ("1 /* x */", "1"),
+    ] {
+        assert_eq!(rendered(expression, code), plain, "{expression:?}");
+    }
+    assert!(
+        plain.contains("`I` INT64 DEFAULT (E ), `I` INT64"),
+        "{plain}"
+    );
+}
+
+#[test]
+fn a_nested_field_name_stays_one_identifier() {
+    let table = table_sql(&orders(), "p");
+    let nested = |name: &str| {
+        let inner = column(name, STRING, BigQueryFieldMode::Nullable);
+        let outer = column(
+            name,
+            BigQueryFieldType::Struct(vec![inner]),
+            BigQueryFieldMode::Repeated,
+        );
+        BigQueryFieldType::Struct(vec![outer])
+    };
+    let create = |name: &str| {
+        let target = target(vec![column("s", nested(name), BigQueryFieldMode::Nullable)]);
+        create_sql(&table, &target, false).expect("DDL")
+    };
+    let plain_create = skeleton(&create("c"));
+    let plain_widen = skeleton(&widen_sql(&table, "s", &nested("c")));
+    for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {
+        let segments = ["s".to_string(), name.clone(), name.clone()];
+        let create = create(&name);
+        assert_eq!(skeleton(&create), plain_create, "{name:.80?}");
+        assert_eq!(idents(&create)[3..], segments, "{name:.80?}");
+
+        let widen = widen_sql(&table, "s", &nested(&name));
+        assert_eq!(skeleton(&widen), plain_widen, "{name:.80?}");
+        assert_eq!(idents(&widen)[3..], segments, "{name:.80?}");
+    }
+}
+
+#[test]
+fn hostile_key_clustering_and_partitioning_columns_render_as_single_identifiers() {
+    let table = table_sql(&orders(), "p");
+    // `None` stands for range partitioning on an INT64 column.
+    let partitionings = [
+        (BigQueryFieldType::Date, Some(BigQueryPartitionUnit::Day)),
+        (BigQueryFieldType::Date, Some(BigQueryPartitionUnit::Month)),
+        (
+            BigQueryFieldType::Timestamp,
+            Some(BigQueryPartitionUnit::Day),
+        ),
+        (
+            BigQueryFieldType::Timestamp,
+            Some(BigQueryPartitionUnit::Hour),
+        ),
+        (
+            BigQueryFieldType::DateTime,
+            Some(BigQueryPartitionUnit::Day),
+        ),
+        (
+            BigQueryFieldType::DateTime,
+            Some(BigQueryPartitionUnit::Year),
+        ),
+        (BigQueryFieldType::Int64, None),
+    ];
+    for (field_type, unit) in partitionings {
+        let create = |name: &str| {
+            let mut target = target(vec![column(
+                name,
+                field_type.clone(),
+                BigQueryFieldMode::Required,
+            )]);
+            target.primary_key = Some(vec![name.into()]);
+            target.clustering = vec![name.into()];
+            target.partitioning = Some(match unit {
+                Some(unit) => BigQueryPartitioning::Time {
+                    unit,
+                    column: Some(name.into()),
+                },
+                None => BigQueryPartitioning::Range {
+                    column: name.into(),
+                    start: 0,
+                    end: 10,
+                    interval: 1,
+                },
+            });
+            create_sql(&table, &target, false).expect("DDL")
+        };
+        let plain = skeleton(&create("c"));
+        for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {
+            let sql = create(&name);
+            assert_eq!(skeleton(&sql), plain, "{field_type}: {name:.80?}");
+            assert_eq!(
+                idents(&sql)[3..],
+                [name.clone(), name.clone(), name.clone(), name.clone()],
+                "column, primary key, partitioning and clustering, {field_type}: {name:.80?}"
+            );
+        }
+    }
 }

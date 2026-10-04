@@ -1,5 +1,5 @@
 use crate::query::routing::{dry_run, execute, query_rows, query_span, Rows};
-use crate::read::{decode_rows, read_table_batches, read_table_rows};
+use crate::read::{decode_rows, read_table_batches, read_table_rows, skip_failed_row};
 use crate::{
     BigQueryDb, BigQueryDryRunResult, BigQueryJobStats, BigQueryQueryOutcome, BigQueryQueryParams,
     BigQueryQuerySupport, BigQueryReadParams, BigQueryResult,
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use serde::de::DeserializeOwned;
-use tracing::{error, Instrument};
+use tracing::Instrument;
 
 #[async_trait]
 impl BigQueryQuerySupport for BigQueryDb {
@@ -40,15 +40,7 @@ impl BigQueryQuerySupport for BigQueryDb {
     {
         let rows = self.stream_query_obj_with_errors(params).await?;
         Ok(rows
-            .filter_map(|row| {
-                futures::future::ready(match row {
-                    Ok(row) => Some(row),
-                    Err(err) => {
-                        error!(%err, "Failed to read a query result row. It is skipped.");
-                        None
-                    }
-                })
-            })
+            .filter_map(|row| futures::future::ready(skip_failed_row(row)))
             .boxed())
     }
 

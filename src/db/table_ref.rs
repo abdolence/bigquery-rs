@@ -4,16 +4,33 @@ use gcloud_sdk::google::cloud::bigquery::v2::{DatasetReference, TableReference};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-/// Checks the one rule a project ID has here: that it is not empty. Project IDs are shared by
-/// every Google Cloud product, so their full rules are left to the server.
-fn check_project_id(project: String) -> BigQueryResult<String> {
+/// Checks a project ID, reported under `field`: not empty, and free of `/` and of control
+/// characters (as [`char::is_control`]).
+///
+/// Project IDs are shared by every Google Cloud product, so their naming rules are left to the
+/// server. This refuses only what would add a segment to a resource path such as
+/// `projects/{p}/datasets/{d}` or forge a line in a log or span field. `.` and `:` stay, since
+/// a domain-scoped project is `example.com:project`.
+pub(crate) fn check_project_id(field: &'static str, project: &str) -> BigQueryResult<()> {
     if project.is_empty() {
         return Err(BigQueryError::invalid_parameters(
-            "project_id",
+            field,
             "must not be empty",
         ));
     }
-    Ok(project)
+    if let Some((at, ch)) = project
+        .char_indices()
+        .find(|&(_, ch)| ch == '/' || ch.is_control())
+    {
+        return Err(BigQueryError::invalid_parameters(
+            field,
+            format!(
+                "must not contain control characters or /; got {ch:?} at byte {at} of \"{}\"",
+                project.escape_debug()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// A dataset, by project and dataset ID.
@@ -42,10 +59,12 @@ impl BigQueryDatasetRef {
     ///
     /// # Errors
     /// [`BigQueryError::InvalidParametersError`] for the field `project_id` if `project` is
-    /// empty.
+    /// empty or contains `/` or a control character.
     pub fn new(project: impl Into<String>, dataset: BigQueryDatasetId) -> BigQueryResult<Self> {
+        let project = project.into();
+        check_project_id("project_id", &project)?;
         Ok(Self {
-            project: Some(check_project_id(project.into())?),
+            project: Some(project),
             dataset,
         })
     }
@@ -79,6 +98,10 @@ impl From<BigQueryDatasetId> for BigQueryDatasetRef {
 
 /// Parses `dataset` or `project.dataset`. A domain-scoped project such as `example.com:project`
 /// keeps its dot, since the dataset is the last part.
+///
+/// Text that is not trusted should not be parsed, since the text picks the project. Build the
+/// reference from [`BigQueryDatasetId::new`] instead, which converts into the client's project,
+/// or check [`project()`](BigQueryDatasetRef::project)`.is_none()` after parsing.
 ///
 /// # Errors
 /// [`BigQueryError::InvalidParametersError`] naming the part that is invalid: `project_id` or
@@ -144,7 +167,7 @@ pub struct BigQueryTableRef {
 }
 
 impl BigQueryTableRef {
-    /// Callers have checked that `project` is not empty.
+    /// Callers have checked `project` with [`check_project_id`].
     pub(crate) fn new(
         project: Option<String>,
         dataset: BigQueryDatasetId,
@@ -193,8 +216,9 @@ impl TryFrom<TableReference> for BigQueryTableRef {
     type Error = BigQueryError;
 
     fn try_from(table: TableReference) -> Result<Self, Self::Error> {
+        check_project_id("project_id", &table.project_id)?;
         Ok(Self::new(
-            Some(check_project_id(table.project_id)?),
+            Some(table.project_id),
             table.dataset_id.try_into()?,
             table.table_id.try_into()?,
         ))
@@ -203,6 +227,10 @@ impl TryFrom<TableReference> for BigQueryTableRef {
 
 /// Parses `dataset.table` or `project.dataset.table`. A domain-scoped project such as
 /// `example.com:project` keeps its dot, since the dataset and the table are the last two parts.
+///
+/// Text that is not trusted should not be parsed, since the text picks the project. Build the
+/// reference from [`BigQueryTableId::new`] and a fixed dataset instead, or check
+/// [`project()`](BigQueryTableRef::project)`.is_none()` after parsing.
 ///
 /// # Errors
 /// [`BigQueryError::InvalidParametersError`] for the field `table` when the text has fewer than
@@ -334,6 +362,38 @@ mod tests {
             ..good
         };
         assert_eq!(invalid_field(BigQueryTableRef::try_from(bad)), "dataset_id");
+    }
+
+    #[test]
+    fn a_project_id_with_a_path_separator_or_control_character_is_refused() {
+        for project in ["p/x", "/p", "p\nx", "p\rx", "p\0", "p\u{85}x"] {
+            assert_eq!(
+                invalid_field(BigQueryDatasetRef::new(project, SHOP)),
+                "project_id",
+                "{project:?}"
+            );
+            assert_eq!(
+                invalid_field(format!("{project}.shop.orders").parse::<BigQueryTableRef>()),
+                "project_id",
+                "{project:?}"
+            );
+            let reference = TableReference {
+                project_id: project.into(),
+                dataset_id: "shop".into(),
+                table_id: "orders".into(),
+            };
+            assert_eq!(
+                invalid_field(BigQueryTableRef::try_from(reference)),
+                "project_id",
+                "{project:?}"
+            );
+        }
+        let domain_scoped =
+            BigQueryDatasetRef::new("example.com:proj-1", SHOP).expect("valid test input");
+        assert_eq!(
+            domain_scoped.table(ORDERS).table_path("default-p"),
+            "projects/example.com:proj-1/datasets/shop/tables/orders"
+        );
     }
 
     #[test]
