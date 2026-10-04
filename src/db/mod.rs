@@ -2,6 +2,7 @@ mod options;
 pub use options::*;
 
 mod retry;
+pub(crate) use retry::retry_delay;
 
 mod table_ref;
 pub use table_ref::*;

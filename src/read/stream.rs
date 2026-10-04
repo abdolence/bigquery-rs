@@ -10,9 +10,7 @@ use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::read_rows_response::Rows;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::ReadRowsRequest;
 use gcloud_sdk::tonic::Status;
-use rand::RngExt;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{warn, Span};
@@ -171,7 +169,7 @@ impl StreamTask {
             if !err.retry_possible() || failures >= max_retries {
                 return Err(err);
             }
-            let delay = resume_delay(failures);
+            let delay = crate::db::retry_delay(failures);
             failures += 1;
             self.span.in_scope(|| {
                 warn!(
@@ -204,12 +202,3 @@ fn read_rows_error(status: Status) -> BigQueryError {
     BigQueryError::from(status)
 }
 
-/// A random delay of up to `2^failures` seconds ("full jitter"), as the client's retries use.
-// TODO: call `crate::db::retry::retry_delay` instead once `db` re-exports it; the `retry`
-// module is private to `db`, so the function is not reachable from here.
-fn resume_delay(failures: usize) -> Duration {
-    let max_millis = 2u64
-        .saturating_pow(u32::try_from(failures).unwrap_or(u32::MAX))
-        .saturating_mul(1000);
-    Duration::from_millis(rand::rng().random_range(0..=max_millis))
-}

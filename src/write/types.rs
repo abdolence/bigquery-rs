@@ -1,5 +1,8 @@
+use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
+use crate::types::error::CodecError;
 use crate::BigQueryTableRef;
 use rsb_derive::Builder;
+use std::str::FromStr;
 use std::time::Duration;
 
 /// What an insert or a streaming writer writes to and how.
@@ -123,6 +126,41 @@ impl From<u64> for BigQueryChangeSequenceNumber {
     }
 }
 
+impl BigQueryChangeSequenceNumber {
+    /// The text written to `_CHANGE_SEQUENCE_NUMBER`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for BigQueryChangeSequenceNumber {
+    type Err = BigQueryError;
+
+    /// Parses one to four `/`-separated sections of one to sixteen hex digits.
+    ///
+    /// # Errors
+    /// [`BigQueryError::SerializeError`] with kind
+    /// [`InvalidText`](crate::errors::BigQueryCodecErrorKind::InvalidText) for any other text.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let sections = s.split('/');
+        let valid = s.split('/').count() <= 4
+            && sections.into_iter().all(|section| {
+                (1..=16).contains(&section.len()) && section.bytes().all(|b| b.is_ascii_hexdigit())
+            });
+        if !valid {
+            return Err(CodecError::new(
+                BigQueryCodecErrorKind::InvalidText,
+                format!(
+                    "invalid _CHANGE_SEQUENCE_NUMBER `{s}`, expected one to four `/`-separated \
+                     sections of one to sixteen hex digits"
+                ),
+            )
+            .into_serialize());
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
 /// One CDC change of a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigQueryChange<T> {
@@ -133,3 +171,6 @@ pub struct BigQueryChange<T> {
     /// The row; for a delete only its primary key columns matter.
     pub row: T,
 }
+
+#[cfg(test)]
+mod tests;

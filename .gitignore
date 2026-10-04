@@ -6,3 +6,4 @@
 *.orig
 *.swp
 docs/output/
+/target-*/

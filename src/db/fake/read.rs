@@ -415,6 +415,46 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn stream_resumes_at_row_offset_after_lost_connection() -> BigQueryResult<()> {
+        let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1, 2]), people(&[3])]]));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fake = FakeBigQuery::start(move |mut call: FakeCall| {
+            let (table, attempts) = (table.clone(), attempts.clone());
+            async move {
+                match call.method() {
+                    "GetTable" => get_table(call, &table).await,
+                    "CreateReadSession" => {
+                        let request = session_request(&mut call).await;
+                        open_session(call, &request, &table);
+                    }
+                    "ReadRows" => {
+                        let request = read_rows_request(&mut call).await;
+                        let (_, streams) = table.encode(CompressionCodec::Lz4Frame);
+                        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            send_batches(&mut call, &[(streams[0][0].clone(), 2)]);
+                            // Lets the batch reach the client before the connection closes.
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            call.drop_connection().await;
+                        } else {
+                            assert_eq!(request.offset, 2);
+                            send_batches(&mut call, &[(streams[0][1].clone(), 1)]);
+                            call.finish();
+                        }
+                    }
+                    other => panic!("unexpected call {other}"),
+                }
+            }
+        })
+        .await;
+        let rows: Vec<Person> = collect_with_errors(&fake)
+            .await?
+            .into_iter()
+            .collect::<BigQueryResult<_>>()?;
+        assert_eq!(rows, [person(1), person(2), person(3)]);
+        Ok(())
+    }
+
     /// Stream `s0` sends one batch and fails with `code` and `message`; `s1` sends one batch
     /// and then never ends.
     async fn failing_stream(code: Code, message: &'static str) -> FakeBigQuery {

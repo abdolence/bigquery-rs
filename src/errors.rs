@@ -485,8 +485,10 @@ fn is_rate_limit(status: &gcloud_sdk::tonic::Status) -> bool {
         .contains("exceeded rate limits")
 }
 
-/// Classifies an `Unknown` status by the transport error underneath it: a closed connection or
-/// a timeout is worth retrying, anything else is not.
+/// Classifies an `Unknown` status by the transport error underneath it. A connection that
+/// closed, timed out or broke mid-body ("error reading a body from connection") is worth
+/// retrying: a stream resumes from its offset and a unary call is sent again. A request hyper
+/// refused to send, or a response it could not parse, is not.
 fn check_hyper_errors(status: gcloud_sdk::tonic::Status) -> BigQueryError {
     let hyper_error = status
         .source()
@@ -494,7 +496,10 @@ fn check_hyper_errors(status: gcloud_sdk::tonic::Status) -> BigQueryError {
     match hyper_error {
         Some(err) if err.is_closed() => connection_error("CONNECTION_CLOSED", err),
         Some(err) if err.is_timeout() => connection_error("CONNECTION_TIMEOUT", err),
-        Some(err) => database_error(&status, format!("Hyper error: {err}"), false),
+        Some(err) if err.is_user() || err.is_parse() => {
+            database_error(&status, format!("Hyper error: {err}"), false)
+        }
+        Some(err) => connection_error("CONNECTION_LOST", err),
         None if status.message().contains("transport error") => {
             BigQueryError::DatabaseError(BigQueryDatabaseError::new(
                 BigQueryErrorPublicGenericDetails::new("CONNECTION_ERROR".into()),
