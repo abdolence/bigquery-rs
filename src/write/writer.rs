@@ -55,10 +55,10 @@ impl BigQueryDb {
     pub(crate) async fn get_write_stream(
         &self,
         span: &Span,
-        name: &str,
+        name: &BigQueryWriteStreamName,
     ) -> BigQueryResult<WriteStream> {
         let request = GetWriteStreamRequest {
-            name: name.to_string(),
+            name: name.as_str().to_string(),
             view: WriteStreamView::Full.into(),
         };
         self.retry(span, "get the write stream", &request, |request| {
@@ -92,10 +92,10 @@ impl BigQueryDb {
     pub(crate) async fn finalize_write_stream(
         &self,
         span: &Span,
-        name: &str,
+        name: &BigQueryWriteStreamName,
     ) -> BigQueryResult<i64> {
         let request = FinalizeWriteStreamRequest {
-            name: name.to_string(),
+            name: name.as_str().to_string(),
         };
         let response = self
             .retry(span, "finalize the write stream", &request, |request| {
@@ -111,11 +111,11 @@ impl BigQueryDb {
         &self,
         span: &Span,
         table_path: &str,
-        streams: Vec<String>,
+        streams: &[BigQueryWriteStreamName],
     ) -> BigQueryResult<BigQueryInstant> {
         let request = BatchCommitWriteStreamsRequest {
             parent: table_path.to_string(),
-            write_streams: streams,
+            write_streams: streams.iter().map(|s| s.as_str().to_string()).collect(),
         };
         let response = self
             .retry(span, "commit the write streams", &request, |request| {
@@ -206,7 +206,7 @@ pub(crate) struct WriterCore {
     db: BigQueryDb,
     span: Span,
     table: BigQueryTableRef,
-    stream: String,
+    stream: BigQueryWriteStreamName,
     mode: BigQueryWriteMode,
     cdc: bool,
     refresh_interval: Duration,
@@ -241,8 +241,9 @@ impl WriterCore {
         );
         let stream = match options.mode {
             BigQueryWriteMode::Default => {
-                db.get_write_stream(&span, &format!("{table_path}/streams/_default"))
-                    .await?
+                let default =
+                    BigQueryWriteStreamName::reported(format!("{table_path}/streams/_default"));
+                db.get_write_stream(&span, &default).await?
             }
             BigQueryWriteMode::Committed => {
                 db.create_write_stream(&span, &table_path, WriteStreamType::Committed)
@@ -254,6 +255,7 @@ impl WriterCore {
             }
         };
         let schema = BigQueryTableSchema::try_from(&stream)?;
+        let stream_name = BigQueryWriteStreamName::reported(stream.name.clone());
         let plan = Arc::new(WritePlan::new(&schema, cdc));
         let target = RequestTarget {
             write_stream: stream.name.clone(),
@@ -279,6 +281,7 @@ impl WriterCore {
                 span: span.clone(),
                 mode: options.mode,
                 target,
+                stream: stream_name.clone(),
                 table: table.clone(),
                 table_path,
                 batch_delay: options.max_batch_delay,
@@ -292,7 +295,7 @@ impl WriterCore {
             db: db.clone(),
             span,
             table,
-            stream: stream.name,
+            stream: stream_name,
             mode: options.mode,
             cdc,
             refresh_interval: options.schema_refresh_interval,
@@ -311,7 +314,7 @@ impl WriterCore {
         self.mode
     }
 
-    pub(crate) fn stream_name(&self) -> &str {
+    pub(crate) fn stream_name(&self) -> &BigQueryWriteStreamName {
         &self.stream
     }
 
@@ -579,13 +582,13 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
         let finished = self.core.finish(FinishKind::Finalize).await?;
         Ok(BigQueryFinalizedStream {
             table: self.core.table().clone(),
-            name: BigQueryWriteStreamName::reported(self.core.stream_name().to_string()),
+            name: self.core.stream_name().clone(),
             row_count: finished.finalized_rows.unwrap_or_default(),
         })
     }
 
     /// The write stream's name; `None` for the default stream.
-    pub fn stream_name(&self) -> Option<&str> {
+    pub fn stream_name(&self) -> Option<&BigQueryWriteStreamName> {
         (self.core.mode() != BigQueryWriteMode::Default).then(|| self.core.stream_name())
     }
 }
@@ -667,7 +670,7 @@ impl BigQueryDb {
         self.batch_commit(
             &span,
             &table_path,
-            streams.into_iter().map(|s| s.name.to_string()).collect(),
+            &streams.into_iter().map(|s| s.name).collect::<Vec<_>>(),
         )
         .await
     }

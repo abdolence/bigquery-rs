@@ -2,7 +2,7 @@
 //! [`BigQueryDb::cancel_job`].
 
 use crate::admin::{logging_errors, paged};
-use crate::db::proto::{timestamp_ms, NonEmpty};
+use crate::db::proto::timestamp_ms;
 use crate::errors::{BigQueryError, BigQueryJobErrorEntry};
 use crate::BigQueryInstant;
 use crate::{BigQueryDb, BigQueryJobRef, BigQueryResult, BigQueryStatementType};
@@ -186,12 +186,16 @@ impl TryFrom<JobParts> for BigQueryJob {
         let status = job.status.unwrap_or_default();
         Ok(Self {
             reference,
-            job_type: configuration.job_type.non_empty().map(Into::into),
-            state: status.state.non_empty().map(Into::into),
+            job_type: Some(configuration.job_type)
+                .filter(|v| !v.is_empty())
+                .map(Into::into),
+            state: Some(status.state).filter(|v| !v.is_empty()).map(Into::into),
             error: status.error_result.map(Into::into),
-            user_email: job.user_email.non_empty(),
+            user_email: Some(job.user_email).filter(|v| !v.is_empty()),
             labels: configuration.labels.into_iter().collect(),
-            statement_type: query.statement_type.non_empty().map(Into::into),
+            statement_type: Some(query.statement_type)
+                .filter(|v| !v.is_empty())
+                .map(Into::into),
             creation_time: timestamp_ms("creation_time", statistics.creation_time)?,
             start_time: timestamp_ms("start_time", statistics.start_time)?,
             end_time: timestamp_ms("end_time", statistics.end_time)?,

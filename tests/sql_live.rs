@@ -7,6 +7,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+#[path = "support/common.rs"]
 mod common;
 use common::{with_scratch, Scratch, TestResult};
 

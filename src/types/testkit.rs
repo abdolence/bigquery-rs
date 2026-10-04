@@ -5,7 +5,7 @@ use crate::types::civil::{
     DATE_MAX_DAYS, DATE_MIN_DAYS, MICROS_PER_DAY, TIMESTAMP_MAX_MICROS, TIMESTAMP_MIN_MICROS,
 };
 use crate::types::interval::BigQueryInterval;
-use crate::types::kind::BqKind;
+use crate::types::kind::FieldKind;
 use crate::types::schema::BigQueryRangeElementType;
 use arrow_buffer::i256;
 use proptest::prelude::*;
@@ -53,97 +53,99 @@ const INTERVAL_MAX_MONTHS: i32 = 120_000;
 const INTERVAL_MAX_DAYS: i32 = 3_660_000;
 const INTERVAL_MAX_MICROS: i64 = i64::MAX / 1000;
 
-/// Values of `kind` inside BigQuery's range.
-///
-/// # Panics
-/// For [`BqKind::Struct`], whose values are built from their fields' strategies by the test that
-/// knows the fields.
-pub(crate) fn canonical(kind: BqKind) -> BoxedStrategy<Canonical> {
-    match kind {
-        BqKind::Int64 => any::<i64>().prop_map(Canonical::Int64).boxed(),
-        BqKind::Float64 => any::<f64>()
-            .prop_map(|x| Canonical::Float64(x.to_bits()))
-            .boxed(),
-        BqKind::Bool => any::<bool>().prop_map(Canonical::Bool).boxed(),
-        BqKind::String => "\\PC{0,24}".prop_map(Canonical::String).boxed(),
-        BqKind::Bytes => proptest::collection::vec(any::<u8>(), 0..32)
-            .prop_map(Canonical::Bytes)
-            .boxed(),
-        BqKind::Date => (DATE_MIN_DAYS..=DATE_MAX_DAYS)
-            .prop_map(Canonical::Date)
-            .boxed(),
-        BqKind::Time => (0..MICROS_PER_DAY).prop_map(Canonical::Time).boxed(),
-        BqKind::DateTime => (TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS)
-            .prop_map(Canonical::DateTime)
-            .boxed(),
-        BqKind::Timestamp => (TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS)
-            .prop_map(Canonical::Timestamp)
-            .boxed(),
-        BqKind::Numeric => (-NUMERIC_MAX_UNSCALED..=NUMERIC_MAX_UNSCALED)
-            .prop_map(Canonical::Numeric)
-            .boxed(),
-        BqKind::BigNumeric => any::<[u8; 32]>()
-            .prop_map(|bytes| Canonical::BigNumeric(i256::from_le_bytes(bytes)))
-            .boxed(),
-        BqKind::Geography => (-180i32..=180, -90i32..=90)
-            .prop_map(|(lon, lat)| Canonical::Geography(format!("POINT({lon} {lat})")))
-            .boxed(),
-        BqKind::Json => json_value().prop_map(Canonical::Json).boxed(),
-        BqKind::Interval => (
-            -INTERVAL_MAX_MONTHS..=INTERVAL_MAX_MONTHS,
-            -INTERVAL_MAX_DAYS..=INTERVAL_MAX_DAYS,
-            -INTERVAL_MAX_MICROS..=INTERVAL_MAX_MICROS,
-        )
-            .prop_map(|(months, days, micros)| {
-                Canonical::Interval(BigQueryInterval {
-                    months,
-                    days,
-                    nanos: micros * 1000,
+impl Canonical {
+    /// Values of `kind` inside BigQuery's range.
+    ///
+    /// # Panics
+    /// For [`FieldKind::Struct`], whose values are built from their fields' strategies by the test that
+    /// knows the fields.
+    pub(crate) fn strategy(kind: FieldKind) -> BoxedStrategy<Canonical> {
+        match kind {
+            FieldKind::Int64 => any::<i64>().prop_map(Canonical::Int64).boxed(),
+            FieldKind::Float64 => any::<f64>()
+                .prop_map(|x| Canonical::Float64(x.to_bits()))
+                .boxed(),
+            FieldKind::Bool => any::<bool>().prop_map(Canonical::Bool).boxed(),
+            FieldKind::String => "\\PC{0,24}".prop_map(Canonical::String).boxed(),
+            FieldKind::Bytes => proptest::collection::vec(any::<u8>(), 0..32)
+                .prop_map(Canonical::Bytes)
+                .boxed(),
+            FieldKind::Date => (DATE_MIN_DAYS..=DATE_MAX_DAYS)
+                .prop_map(Canonical::Date)
+                .boxed(),
+            FieldKind::Time => (0..MICROS_PER_DAY).prop_map(Canonical::Time).boxed(),
+            FieldKind::DateTime => (TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS)
+                .prop_map(Canonical::DateTime)
+                .boxed(),
+            FieldKind::Timestamp => (TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS)
+                .prop_map(Canonical::Timestamp)
+                .boxed(),
+            FieldKind::Numeric => (-NUMERIC_MAX_UNSCALED..=NUMERIC_MAX_UNSCALED)
+                .prop_map(Canonical::Numeric)
+                .boxed(),
+            FieldKind::BigNumeric => any::<[u8; 32]>()
+                .prop_map(|bytes| Canonical::BigNumeric(i256::from_le_bytes(bytes)))
+                .boxed(),
+            FieldKind::Geography => (-180i32..=180, -90i32..=90)
+                .prop_map(|(lon, lat)| Canonical::Geography(format!("POINT({lon} {lat})")))
+                .boxed(),
+            FieldKind::Json => json_value().prop_map(Canonical::Json).boxed(),
+            FieldKind::Interval => (
+                -INTERVAL_MAX_MONTHS..=INTERVAL_MAX_MONTHS,
+                -INTERVAL_MAX_DAYS..=INTERVAL_MAX_DAYS,
+                -INTERVAL_MAX_MICROS..=INTERVAL_MAX_MICROS,
+            )
+                .prop_map(|(months, days, micros)| {
+                    Canonical::Interval(BigQueryInterval {
+                        months,
+                        days,
+                        nanos: micros * 1000,
+                    })
                 })
-            })
+                .boxed(),
+            FieldKind::Range => prop_oneof![
+                Canonical::range_strategy(BigQueryRangeElementType::Date),
+                Canonical::range_strategy(BigQueryRangeElementType::DateTime),
+                Canonical::range_strategy(BigQueryRangeElementType::Timestamp),
+            ]
             .boxed(),
-        BqKind::Range => prop_oneof![
-            canonical_range(BigQueryRangeElementType::Date),
-            canonical_range(BigQueryRangeElementType::DateTime),
-            canonical_range(BigQueryRangeElementType::Timestamp),
-        ]
-        .boxed(),
-        BqKind::Struct => {
-            panic!("STRUCT values are built from their fields' strategies, not from a kind")
+            FieldKind::Struct => {
+                panic!("STRUCT values are built from their fields' strategies, not from a kind")
+            }
         }
     }
-}
 
-/// RANGE values of one element type, with either end unbounded at times.
-pub(crate) fn canonical_range(element: BigQueryRangeElementType) -> BoxedStrategy<Canonical> {
-    let bound = match element {
-        BigQueryRangeElementType::Date => {
-            (i64::from(DATE_MIN_DAYS)..=i64::from(DATE_MAX_DAYS)).boxed()
-        }
-        BigQueryRangeElementType::DateTime | BigQueryRangeElementType::Timestamp => {
-            (TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).boxed()
-        }
-    };
-    (
-        proptest::option::of(bound.clone()),
-        proptest::option::of(bound),
-    )
-        .prop_filter(
-            "a bounded range needs start < end",
-            |(start, end)| !matches!((start, end), (Some(s), Some(e)) if s == e),
-        )
-        .prop_map(move |(a, b)| {
-            let (start, end) = match (a, b) {
-                (Some(a), Some(b)) => (Some(a.min(b)), Some(a.max(b))),
-                other => other,
-            };
-            Canonical::Range {
-                element,
-                start,
-                end,
+    /// RANGE values of one element type, with either end unbounded at times.
+    pub(crate) fn range_strategy(element: BigQueryRangeElementType) -> BoxedStrategy<Canonical> {
+        let bound = match element {
+            BigQueryRangeElementType::Date => {
+                (i64::from(DATE_MIN_DAYS)..=i64::from(DATE_MAX_DAYS)).boxed()
             }
-        })
-        .boxed()
+            BigQueryRangeElementType::DateTime | BigQueryRangeElementType::Timestamp => {
+                (TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).boxed()
+            }
+        };
+        (
+            proptest::option::of(bound.clone()),
+            proptest::option::of(bound),
+        )
+            .prop_filter(
+                "a bounded range needs start < end",
+                |(start, end)| !matches!((start, end), (Some(s), Some(e)) if s == e),
+            )
+            .prop_map(move |(a, b)| {
+                let (start, end) = match (a, b) {
+                    (Some(a), Some(b)) => (Some(a.min(b)), Some(a.max(b))),
+                    other => other,
+                };
+                Canonical::Range {
+                    element,
+                    start,
+                    end,
+                }
+            })
+            .boxed()
+    }
 }
 
 /// JSON documents without floats, whose text BigQuery may print differently.
@@ -167,22 +169,22 @@ fn json_value() -> impl Strategy<Value = serde_json::Value> {
 mod tests {
     use super::*;
 
-    const KINDS: [BqKind; 15] = [
-        BqKind::Int64,
-        BqKind::Float64,
-        BqKind::Bool,
-        BqKind::String,
-        BqKind::Bytes,
-        BqKind::Date,
-        BqKind::Time,
-        BqKind::DateTime,
-        BqKind::Timestamp,
-        BqKind::Numeric,
-        BqKind::BigNumeric,
-        BqKind::Geography,
-        BqKind::Json,
-        BqKind::Interval,
-        BqKind::Range,
+    const KINDS: [FieldKind; 15] = [
+        FieldKind::Int64,
+        FieldKind::Float64,
+        FieldKind::Bool,
+        FieldKind::String,
+        FieldKind::Bytes,
+        FieldKind::Date,
+        FieldKind::Time,
+        FieldKind::DateTime,
+        FieldKind::Timestamp,
+        FieldKind::Numeric,
+        FieldKind::BigNumeric,
+        FieldKind::Geography,
+        FieldKind::Json,
+        FieldKind::Interval,
+        FieldKind::Range,
     ];
 
     fn in_element_range(element: BigQueryRangeElementType, v: i64) -> bool {
@@ -196,33 +198,33 @@ mod tests {
         }
     }
 
-    fn assert_in_range(kind: BqKind, value: &Canonical) {
+    fn assert_in_range(kind: FieldKind, value: &Canonical) {
         let numeric_max = NUMERIC_MAX_UNSCALED;
         let ok = match (kind, value) {
-            (BqKind::Int64, Canonical::Int64(_))
-            | (BqKind::Float64, Canonical::Float64(_))
-            | (BqKind::Bool, Canonical::Bool(_))
-            | (BqKind::String, Canonical::String(_))
-            | (BqKind::Bytes, Canonical::Bytes(_))
-            | (BqKind::BigNumeric, Canonical::BigNumeric(_))
-            | (BqKind::Json, Canonical::Json(_)) => true,
-            (BqKind::Date, Canonical::Date(d)) => (DATE_MIN_DAYS..=DATE_MAX_DAYS).contains(d),
-            (BqKind::Time, Canonical::Time(t)) => (0..MICROS_PER_DAY).contains(t),
-            (BqKind::DateTime, Canonical::DateTime(v))
-            | (BqKind::Timestamp, Canonical::Timestamp(v)) => {
+            (FieldKind::Int64, Canonical::Int64(_))
+            | (FieldKind::Float64, Canonical::Float64(_))
+            | (FieldKind::Bool, Canonical::Bool(_))
+            | (FieldKind::String, Canonical::String(_))
+            | (FieldKind::Bytes, Canonical::Bytes(_))
+            | (FieldKind::BigNumeric, Canonical::BigNumeric(_))
+            | (FieldKind::Json, Canonical::Json(_)) => true,
+            (FieldKind::Date, Canonical::Date(d)) => (DATE_MIN_DAYS..=DATE_MAX_DAYS).contains(d),
+            (FieldKind::Time, Canonical::Time(t)) => (0..MICROS_PER_DAY).contains(t),
+            (FieldKind::DateTime, Canonical::DateTime(v))
+            | (FieldKind::Timestamp, Canonical::Timestamp(v)) => {
                 (TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(v)
             }
-            (BqKind::Numeric, Canonical::Numeric(v)) => (-numeric_max..=numeric_max).contains(v),
-            (BqKind::Geography, Canonical::Geography(wkt)) => {
+            (FieldKind::Numeric, Canonical::Numeric(v)) => (-numeric_max..=numeric_max).contains(v),
+            (FieldKind::Geography, Canonical::Geography(wkt)) => {
                 wkt.starts_with("POINT(") && wkt.ends_with(')')
             }
-            (BqKind::Interval, Canonical::Interval(iv)) => {
+            (FieldKind::Interval, Canonical::Interval(iv)) => {
                 iv.nanos % 1000 == 0
                     && (-120_000..=120_000).contains(&iv.months)
                     && (-3_660_000..=3_660_000).contains(&iv.days)
             }
             (
-                BqKind::Range,
+                FieldKind::Range,
                 Canonical::Range {
                     element,
                     start,
@@ -246,21 +248,21 @@ mod tests {
         fn testkit_values_stay_in_bigquery_range(
             values in proptest::collection::vec(
                 prop_oneof![
-                    canonical(BqKind::Int64).prop_map(|v| (BqKind::Int64, v)),
-                    canonical(BqKind::Float64).prop_map(|v| (BqKind::Float64, v)),
-                    canonical(BqKind::Bool).prop_map(|v| (BqKind::Bool, v)),
-                    canonical(BqKind::String).prop_map(|v| (BqKind::String, v)),
-                    canonical(BqKind::Bytes).prop_map(|v| (BqKind::Bytes, v)),
-                    canonical(BqKind::Date).prop_map(|v| (BqKind::Date, v)),
-                    canonical(BqKind::Time).prop_map(|v| (BqKind::Time, v)),
-                    canonical(BqKind::DateTime).prop_map(|v| (BqKind::DateTime, v)),
-                    canonical(BqKind::Timestamp).prop_map(|v| (BqKind::Timestamp, v)),
-                    canonical(BqKind::Numeric).prop_map(|v| (BqKind::Numeric, v)),
-                    canonical(BqKind::BigNumeric).prop_map(|v| (BqKind::BigNumeric, v)),
-                    canonical(BqKind::Geography).prop_map(|v| (BqKind::Geography, v)),
-                    canonical(BqKind::Json).prop_map(|v| (BqKind::Json, v)),
-                    canonical(BqKind::Interval).prop_map(|v| (BqKind::Interval, v)),
-                    canonical(BqKind::Range).prop_map(|v| (BqKind::Range, v)),
+                    Canonical::strategy(FieldKind::Int64).prop_map(|v| (FieldKind::Int64, v)),
+                    Canonical::strategy(FieldKind::Float64).prop_map(|v| (FieldKind::Float64, v)),
+                    Canonical::strategy(FieldKind::Bool).prop_map(|v| (FieldKind::Bool, v)),
+                    Canonical::strategy(FieldKind::String).prop_map(|v| (FieldKind::String, v)),
+                    Canonical::strategy(FieldKind::Bytes).prop_map(|v| (FieldKind::Bytes, v)),
+                    Canonical::strategy(FieldKind::Date).prop_map(|v| (FieldKind::Date, v)),
+                    Canonical::strategy(FieldKind::Time).prop_map(|v| (FieldKind::Time, v)),
+                    Canonical::strategy(FieldKind::DateTime).prop_map(|v| (FieldKind::DateTime, v)),
+                    Canonical::strategy(FieldKind::Timestamp).prop_map(|v| (FieldKind::Timestamp, v)),
+                    Canonical::strategy(FieldKind::Numeric).prop_map(|v| (FieldKind::Numeric, v)),
+                    Canonical::strategy(FieldKind::BigNumeric).prop_map(|v| (FieldKind::BigNumeric, v)),
+                    Canonical::strategy(FieldKind::Geography).prop_map(|v| (FieldKind::Geography, v)),
+                    Canonical::strategy(FieldKind::Json).prop_map(|v| (FieldKind::Json, v)),
+                    Canonical::strategy(FieldKind::Interval).prop_map(|v| (FieldKind::Interval, v)),
+                    Canonical::strategy(FieldKind::Range).prop_map(|v| (FieldKind::Range, v)),
                 ],
                 KINDS.len()..=4 * KINDS.len(),
             )
@@ -280,7 +282,7 @@ mod tests {
             BigQueryRangeElementType::Timestamp,
         ] {
             for _ in 0..50 {
-                let value = canonical_range(element)
+                let value = Canonical::range_strategy(element)
                     .new_tree(&mut runner)
                     .expect("valid test input")
                     .current();
@@ -288,7 +290,7 @@ mod tests {
                     matches!(value, Canonical::Range { element: got, .. } if got == element),
                     "{element:?} gave {value:?}"
                 );
-                assert_in_range(BqKind::Range, &value);
+                assert_in_range(FieldKind::Range, &value);
             }
         }
     }
@@ -298,7 +300,7 @@ mod tests {
         let mut runner = proptest::test_runner::TestRunner::deterministic();
         let mut seen_negative_numeric = false;
         for _ in 0..200 {
-            if let Canonical::Numeric(v) = canonical(BqKind::Numeric)
+            if let Canonical::Numeric(v) = Canonical::strategy(FieldKind::Numeric)
                 .new_tree(&mut runner)
                 .expect("valid test input")
                 .current()

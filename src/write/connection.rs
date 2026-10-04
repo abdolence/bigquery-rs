@@ -187,6 +187,7 @@ pub(crate) struct TaskSettings {
     pub(crate) span: Span,
     pub(crate) mode: BigQueryWriteMode,
     pub(crate) target: RequestTarget,
+    pub(crate) stream: BigQueryWriteStreamName,
     pub(crate) table: BigQueryTableRef,
     pub(crate) table_path: String,
     pub(crate) batch_delay: Duration,
@@ -515,24 +516,24 @@ impl ConnectionTask {
             self.batch_not_written(sent, err);
             return;
         }
-        use StorageErrorCode as S;
-        let schema_mismatch = storage == Some(S::SchemaMismatchExtraFields)
+        let schema_mismatch = storage == Some(StorageErrorCode::SchemaMismatchExtraFields)
             || status
                 .message
                 .contains("Input schema has more fields than BigQuery schema");
         match (storage, code) {
-            (Some(S::OffsetAlreadyExists), _) | (None, Code::AlreadyExists)
+            (Some(StorageErrorCode::OffsetAlreadyExists), _) | (None, Code::AlreadyExists)
                 if self.uses_offsets() =>
             {
                 let offset = sent.offset;
                 self.acknowledge(sent, offset);
             }
-            (Some(S::OffsetOutOfRange), _) | (_, Code::OutOfRange | Code::Aborted) => {
+            (Some(StorageErrorCode::OffsetOutOfRange), _)
+            | (_, Code::OutOfRange | Code::Aborted) => {
                 self.requeue(sent, Status::new(code, status.message));
             }
             _ if schema_mismatch => {
                 let err = BigQueryError::schema_mismatch(
-                    S::SchemaMismatchExtraFields.as_str_name(),
+                    StorageErrorCode::SchemaMismatchExtraFields.as_str_name(),
                     self.settings.table.clone(),
                     status.message,
                 );
@@ -542,22 +543,22 @@ impl ConnectionTask {
             (_, Code::Internal) => self.requeue(sent, Status::new(code, status.message)),
             (
                 Some(
-                    storage @ (S::StreamFinalized
-                    | S::StreamNotFound
-                    | S::StreamAlreadyCommitted
-                    | S::InvalidStreamState
-                    | S::InvalidStreamType),
+                    storage @ (StorageErrorCode::StreamFinalized
+                    | StorageErrorCode::StreamNotFound
+                    | StorageErrorCode::StreamAlreadyCommitted
+                    | StorageErrorCode::InvalidStreamState
+                    | StorageErrorCode::InvalidStreamType),
                 ),
                 _,
             ) => {
                 self.inflight.push_front(sent);
                 self.fail_writer(BigQueryError::write_stream(
                     storage.as_str_name(),
-                    self.settings.target.write_stream.clone(),
+                    self.settings.stream.to_string(),
                     status.message,
                 ));
             }
-            (Some(S::TableNotFound), _) => {
+            (Some(StorageErrorCode::TableNotFound), _) => {
                 self.inflight.push_front(sent);
                 self.fail_writer(BigQueryError::from(Status::not_found(status.message)));
             }
@@ -574,7 +575,7 @@ impl ConnectionTask {
         let fetched = self
             .settings
             .db
-            .get_write_stream(&self.settings.span, &self.settings.target.write_stream)
+            .get_write_stream(&self.settings.span, &self.settings.stream)
             .await
             .and_then(|stream| BigQueryTableSchema::try_from(&stream));
         match fetched {
@@ -731,9 +732,7 @@ impl ConnectionTask {
             rows_failed: self.rows_failed,
             batches: self.batches,
             bytes_sent: self.bytes_sent,
-            stream: self.uses_offsets().then(|| {
-                BigQueryWriteStreamName::reported(self.settings.target.write_stream.clone())
-            }),
+            stream: self.uses_offsets().then(|| self.settings.stream.clone()),
             commit_time,
         }
     }
@@ -751,7 +750,7 @@ impl ConnectionTask {
     }
 
     async fn close_stream(&mut self, kind: FinishKind) -> BigQueryResult<Finished> {
-        let stream = self.settings.target.write_stream.clone();
+        let stream = self.settings.stream.clone();
         let first_error = self.first_error.as_ref().cloned();
         match self.settings.mode {
             BigQueryWriteMode::Default => Ok(Finished {
@@ -775,7 +774,7 @@ impl ConnectionTask {
                 if self.rows_failed > 0 {
                     return Err(BigQueryError::write_stream(
                         "NOT_COMMITTED",
-                        stream,
+                        stream.to_string(),
                         format!(
                             "{} rows were in failed batches, so the pending stream was not \
                              committed and none of its rows are visible; the first failure: {}",
@@ -797,11 +796,7 @@ impl ConnectionTask {
                     FinishKind::Close => Some(
                         self.settings
                             .db
-                            .batch_commit(
-                                &self.settings.span,
-                                &self.settings.table_path,
-                                vec![stream],
-                            )
+                            .batch_commit(&self.settings.span, &self.settings.table_path, &[stream])
                             .await?,
                     ),
                 };

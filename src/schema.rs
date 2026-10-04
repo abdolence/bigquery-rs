@@ -13,8 +13,7 @@ pub use declaration::*;
 mod plan;
 pub use plan::*;
 
-mod live;
-pub(crate) use live::table_partitioning;
+mod existing;
 
 mod diff;
 

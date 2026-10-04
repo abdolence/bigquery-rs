@@ -6,7 +6,7 @@
 
 use crate::db::proto::millis;
 use crate::schema::declaration::DeclaredColumn;
-use crate::schema::live::LiveTable;
+use crate::schema::existing::ExistingTable;
 use crate::schema::plan::ChangeStep;
 use crate::BigQueryLabels;
 use crate::{
@@ -25,7 +25,7 @@ impl BigQueryTableDeclaration {
     pub(crate) fn plan(
         &self,
         table: BigQueryTableRef,
-        live: Option<&LiveTable>,
+        existing: Option<&ExistingTable>,
     ) -> BigQueryTablePlan {
         let mut plan = BigQueryTablePlan {
             table,
@@ -36,7 +36,7 @@ impl BigQueryTableDeclaration {
             impossible: Vec::new(),
             refusal: None,
         };
-        let Some(live) = live else {
+        let Some(existing) = existing else {
             plan.create = Some(self.target(None));
             return plan;
         };
@@ -47,8 +47,8 @@ impl BigQueryTableDeclaration {
             withheld: Vec::new(),
             impossible: Vec::new(),
         };
-        diff.columns(&live.schema.fields);
-        diff.settings(live);
+        diff.columns(&existing.schema.fields);
+        diff.settings(existing);
         // A stable sort keeps the column changes ahead of the table settings within a step.
         diff.changes.sort_by_key(BigQuerySchemaChange::step);
         plan.withheld = diff.withheld;
@@ -59,12 +59,12 @@ impl BigQueryTableDeclaration {
         }
         let dangerous = match self.recreate {
             Some(BigQueryRecreatePolicy::DangerouslyWithDataLoss) => true,
-            Some(BigQueryRecreatePolicy::IfEmpty) if live.num_rows == Some(0) => false,
+            Some(BigQueryRecreatePolicy::IfEmpty) if existing.num_rows == Some(0) => false,
             Some(BigQueryRecreatePolicy::IfEmpty) => {
                 plan.changes = diff.changes;
                 plan.impossible = diff.impossible;
                 plan.refusal = Some(BigQueryRefusal::NotEmpty {
-                    num_rows: live.num_rows,
+                    num_rows: existing.num_rows,
                 });
                 return plan;
             }
@@ -75,14 +75,15 @@ impl BigQueryTableDeclaration {
                 return plan;
             }
         };
-        let target = self.target(Some(live));
-        let same_partitioning = match (&target.partitioning, &live.partitioning) {
+        let target = self.target(Some(existing));
+        let same_partitioning = match (&target.partitioning, &existing.partitioning) {
             (Some(a), Some(b)) => a.same_as(b),
             (None, None) => true,
             _ => false,
         };
         // `CREATE OR REPLACE` must restate the partitioning and clustering exactly.
-        let method = if same_partitioning && same_columns(&target.clustering, &live.clustering) {
+        let method = if same_partitioning && same_columns(&target.clustering, &existing.clustering)
+        {
             BigQueryRecreateMethod::CreateOrReplace
         } else {
             BigQueryRecreateMethod::DropAndCreate
@@ -91,8 +92,8 @@ impl BigQueryTableDeclaration {
             method,
             reasons: diff.impossible,
             target,
-            num_rows: live.num_rows,
-            num_bytes: live.num_bytes,
+            num_rows: existing.num_rows,
+            num_bytes: existing.num_bytes,
             row_access_policies: Vec::new(),
             dangerous,
             snapshot_first: self.snapshot_first,
@@ -123,11 +124,14 @@ fn join(prefix: &str, name: &str) -> String {
 }
 
 impl DeclaredColumn {
-    /// The live column a declared top-level column matches: the one with its name, or else the
+    /// The existing column a declared top-level column matches: the one with its name, or else the
     /// one it is renamed from.
-    fn matched<'f>(&self, live: &'f [BigQueryFieldSchema]) -> Option<&'f BigQueryFieldSchema> {
-        find(live, &self.field.name)
-            .or_else(|| self.renamed_from.as_deref().and_then(|old| find(live, old)))
+    fn matched<'f>(&self, existing: &'f [BigQueryFieldSchema]) -> Option<&'f BigQueryFieldSchema> {
+        find(existing, &self.field.name).or_else(|| {
+            self.renamed_from
+                .as_deref()
+                .and_then(|old| find(existing, old))
+        })
     }
 }
 
@@ -204,11 +208,11 @@ impl Diff<'_> {
         }
     }
 
-    fn columns(&mut self, live: &[BigQueryFieldSchema]) {
+    fn columns(&mut self, existing: &[BigQueryFieldSchema]) {
         let declaration = self.declaration;
         let mut matched_names = HashSet::new();
         for column in &declaration.columns {
-            let Some(current) = column.matched(live) else {
+            let Some(current) = column.matched(existing) else {
                 self.add(column.field.name.clone(), &column.field);
                 continue;
             };
@@ -226,7 +230,7 @@ impl Diff<'_> {
                 current,
             );
         }
-        for current in live {
+        for current in existing {
             if !matched_names.contains(&current.name.to_ascii_lowercase()) {
                 self.undeclared(BigQuerySchemaChange::DropColumn {
                     column: current.name.clone(),
@@ -236,7 +240,7 @@ impl Diff<'_> {
         }
     }
 
-    /// Compares one declared column or field with the live one at `path`. `ddl_name` is the
+    /// Compares one declared column or field with the existing one at `path`. `ddl_name` is the
     /// top-level column's name after any rename, `None` for a nested field, which no DDL can
     /// alter.
     fn compare(
@@ -315,16 +319,16 @@ impl Diff<'_> {
         &mut self,
         prefix: &str,
         declared: &[BigQueryFieldSchema],
-        live: &[BigQueryFieldSchema],
+        existing: &[BigQueryFieldSchema],
     ) {
         for field in declared {
             let path = join(prefix, &field.name);
-            match find(live, &field.name) {
+            match find(existing, &field.name) {
                 Some(current) => self.compare(&path, None, field, current),
                 None => self.add(path, field),
             }
         }
-        for current in live {
+        for current in existing {
             if find(declared, &current.name).is_none() {
                 self.undeclared(BigQuerySchemaChange::DropNestedField {
                     path: join(prefix, &current.name),
@@ -334,18 +338,18 @@ impl Diff<'_> {
         }
     }
 
-    fn settings(&mut self, live: &LiveTable) {
+    fn settings(&mut self, existing: &ExistingTable) {
         let declaration = self.declaration;
         if let Some(to) = &declaration.description {
-            if live.description.as_deref().unwrap_or("") != to {
+            if existing.description.as_deref().unwrap_or("") != to {
                 self.changes.push(BigQuerySchemaChange::SetDescription {
-                    from: live.description.clone(),
+                    from: existing.description.clone(),
                     to: to.clone(),
                 });
             }
         }
         for (key, to) in declaration.labels.iter() {
-            let from = live.labels.get(key);
+            let from = existing.labels.get(key);
             if from != Some(to) {
                 self.changes.push(BigQuerySchemaChange::SetLabel {
                     key: key.to_string(),
@@ -354,7 +358,7 @@ impl Diff<'_> {
                 });
             }
         }
-        for (key, value) in live.labels.iter() {
+        for (key, value) in existing.labels.iter() {
             if declaration.labels.get(key).is_none() {
                 self.undeclared(BigQuerySchemaChange::RemoveLabel {
                     key: key.to_string(),
@@ -363,20 +367,20 @@ impl Diff<'_> {
             }
         }
         if let Some(to) = declaration.expiration {
-            if live.expiration != Some(to) {
+            if existing.expiration != Some(to) {
                 self.changes.push(BigQuerySchemaChange::SetExpiration {
-                    from: live.expiration,
+                    from: existing.expiration,
                     to,
                 });
             }
         }
-        match (&declaration.partitioning, &live.partitioning) {
+        match (&declaration.partitioning, &existing.partitioning) {
             (Some(declared), Some(current)) if declared.same_as(current) => {
                 if let Some(to) = declaration.partition_expiration {
-                    if live.partition_expiration != Some(to) {
+                    if existing.partition_expiration != Some(to) {
                         self.changes
                             .push(BigQuerySchemaChange::SetPartitionExpiration {
-                                from: live.partition_expiration,
+                                from: existing.partition_expiration,
                                 to,
                             });
                     }
@@ -396,21 +400,21 @@ impl Diff<'_> {
             (None, None) => {}
         }
         match &declaration.clustering {
-            Some(to) if !same_columns(to, &live.clustering) => {
+            Some(to) if !same_columns(to, &existing.clustering) => {
                 self.changes.push(BigQuerySchemaChange::SetClustering {
-                    from: live.clustering.clone(),
+                    from: existing.clustering.clone(),
                     to: to.clone(),
                 })
             }
             Some(_) => {}
-            None if !live.clustering.is_empty() => {
+            None if !existing.clustering.is_empty() => {
                 self.undeclared(BigQuerySchemaChange::RemoveClustering {
-                    from: live.clustering.clone(),
+                    from: existing.clustering.clone(),
                 })
             }
             None => {}
         }
-        match (&declaration.primary_key, &live.primary_key) {
+        match (&declaration.primary_key, &existing.primary_key) {
             (Some(to), current)
                 if current
                     .as_ref()
@@ -475,9 +479,9 @@ impl BigQueryFieldSchema {
 impl BigQueryTableDeclaration {
     /// The whole table as `.sync()` creates or recreates it: the declaration, plus what it leaves
     /// undeclared and does not prune.
-    fn target(&self, live: Option<&LiveTable>) -> BigQueryTableTarget {
+    fn target(&self, existing: Option<&ExistingTable>) -> BigQueryTableTarget {
         let prune = self.prune;
-        let live_fields = live.map_or(&[][..], |l| &l.schema.fields[..]);
+        let live_fields = existing.map_or(&[][..], |l| &l.schema.fields[..]);
         let mut columns: Vec<BigQueryFieldSchema> = self
             .columns
             .iter()
@@ -494,7 +498,7 @@ impl BigQueryTableDeclaration {
             labels: BigQueryLabels::new(),
             expiration: self.expiration,
         };
-        if let Some(live) = live {
+        if let Some(existing) = existing {
             if !prune {
                 let declared_live: HashSet<String> = self
                     .columns
@@ -508,29 +512,29 @@ impl BigQueryTableDeclaration {
                         .filter(|f| !declared_live.contains(&f.name.to_ascii_lowercase()))
                         .cloned(),
                 );
-                labels.clone_from(&live.labels);
+                labels.clone_from(&existing.labels);
                 if target.primary_key.is_none() {
-                    target.primary_key.clone_from(&live.primary_key);
+                    target.primary_key.clone_from(&existing.primary_key);
                 }
                 if target.partitioning.is_none() {
-                    target.partitioning.clone_from(&live.partitioning);
+                    target.partitioning.clone_from(&existing.partitioning);
                 }
                 if self.clustering.is_none() {
-                    target.clustering.clone_from(&live.clustering);
+                    target.clustering.clone_from(&existing.clustering);
                 }
             }
-            let same_partitioning = match (&target.partitioning, &live.partitioning) {
+            let same_partitioning = match (&target.partitioning, &existing.partitioning) {
                 (Some(a), Some(b)) => a.same_as(b),
                 _ => false,
             };
             if target.partition_expiration.is_none() && same_partitioning {
-                target.partition_expiration = live.partition_expiration;
+                target.partition_expiration = existing.partition_expiration;
             }
             if target.description.is_none() {
-                target.description.clone_from(&live.description);
+                target.description.clone_from(&existing.description);
             }
             if target.expiration.is_none() {
-                target.expiration = live.expiration;
+                target.expiration = existing.expiration;
             }
         }
         for (key, value) in self.labels.iter() {
@@ -574,21 +578,22 @@ impl BigQueryTablePlan {
     /// The first `PatchTable` body: every `[patch]` change, with new columns added without their
     /// default value, which BigQuery refuses in the same step.
     ///
-    /// A schema in the body replaces the whole schema, so it is the live one with the changes
+    /// A schema in the body replaces the whole schema, so it is the existing one with the changes
     /// edited in, every column and description included, and everything the crate does
     /// not model, such as policy tags, carried back as it was.
     ///
     /// # Errors
     /// [`BigQueryError::InvalidParametersError`] for a partition expiration whose milliseconds do
     /// not fit the request field.
-    pub(crate) fn patch_body(&self, live: &v2::Table) -> BigQueryResult<Option<v2::Table>> {
+    pub(crate) fn patch_body(&self, existing: &v2::Table) -> BigQueryResult<Option<v2::Table>> {
         let changes = &self.changes;
         let mut body = v2::Table::default();
-        let mut schema = live.schema.clone().unwrap_or_default();
+        let mut schema = existing.schema.clone().unwrap_or_default();
         let mut schema_edited = false;
         let mut any = false;
         let foreign_keys = || {
-            live.table_constraints
+            existing
+                .table_constraints
                 .as_ref()
                 .map(|c| c.foreign_keys.clone())
                 .unwrap_or_default()
@@ -637,7 +642,7 @@ impl BigQueryTablePlan {
                 BigQuerySchemaChange::SetPartitionExpiration { to, .. } => {
                     body.time_partitioning = Some(v2::TimePartitioning {
                         expiration_ms: Some(millis("partition_expiration", *to)?),
-                        ..live.time_partitioning.clone().unwrap_or_default()
+                        ..existing.time_partitioning.clone().unwrap_or_default()
                     });
                 }
                 BigQuerySchemaChange::SetClustering { to, .. } => {

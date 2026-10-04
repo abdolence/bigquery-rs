@@ -19,8 +19,9 @@ use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Code;
 
 pub(crate) const DEFAULT_STREAM: &str =
-    "projects/fake-project/datasets/ds/tables/t/streams/_default";
-pub(crate) const CREATED_STREAM: &str = "projects/fake-project/datasets/ds/tables/t/streams/s1";
+    "projects/fake-project/datasets/shop/tables/orders/streams/_default";
+pub(crate) const CREATED_STREAM: &str =
+    "projects/fake-project/datasets/shop/tables/orders/streams/s1";
 
 pub(crate) fn column(name: &str, r#type: Type, mode: Mode) -> TableFieldSchema {
     TableFieldSchema {
@@ -41,62 +42,64 @@ pub(crate) fn schema(extra: &[TableFieldSchema]) -> TableSchema {
     TableSchema { fields }
 }
 
-/// Answers a unary write RPC with `schema`, logging it, and hands back an `AppendRows` call
-/// for the test to answer itself.
-pub(crate) async fn answer_unary(mut call: FakeCall, schema: TableSchema) -> Option<FakeCall> {
-    match call.method() {
-        "AppendRows" => return Some(call),
-        "GetWriteStream" => {
-            let request: Option<GetWriteStreamRequest> = call.next_request().await;
-            let name = request.map(|r| r.name).unwrap_or_default();
-            call.log(format!("GetWriteStream {name}"));
-            call.reply(&WriteStream {
-                name,
-                table_schema: Some(schema),
-                ..Default::default()
-            });
+impl FakeCall {
+    /// Answers a unary write RPC with `schema`, logging it, and hands back an `AppendRows` self
+    /// for the test to answer itself.
+    pub(crate) async fn answer_unary(mut self, schema: TableSchema) -> Option<Self> {
+        match self.method() {
+            "AppendRows" => return Some(self),
+            "GetWriteStream" => {
+                let request: Option<GetWriteStreamRequest> = self.next_request().await;
+                let name = request.map(|r| r.name).unwrap_or_default();
+                self.log(format!("GetWriteStream {name}"));
+                self.reply(&WriteStream {
+                    name,
+                    table_schema: Some(schema),
+                    ..Default::default()
+                });
+            }
+            "CreateWriteStream" => {
+                let request: Option<CreateWriteStreamRequest> = self.next_request().await;
+                let kind = request
+                    .and_then(|r| r.write_stream)
+                    .map(|s| s.r#type().as_str_name().to_string())
+                    .unwrap_or_default();
+                self.log(format!("CreateWriteStream {kind}"));
+                self.reply(&WriteStream {
+                    name: CREATED_STREAM.into(),
+                    table_schema: Some(schema),
+                    ..Default::default()
+                });
+            }
+            "FinalizeWriteStream" => {
+                let request: Option<FinalizeWriteStreamRequest> = self.next_request().await;
+                self.log(format!(
+                    "FinalizeWriteStream {}",
+                    request.map(|r| r.name).unwrap_or_default()
+                ));
+                self.reply(&FinalizeWriteStreamResponse { row_count: 42 });
+            }
+            "BatchCommitWriteStreams" => {
+                let request: Option<BatchCommitWriteStreamsRequest> = self.next_request().await;
+                self.log(format!(
+                    "BatchCommitWriteStreams {:?}",
+                    request.map(|r| r.write_streams).unwrap_or_default()
+                ));
+                self.reply(&BatchCommitWriteStreamsResponse {
+                    commit_time: Some(gcloud_sdk::prost_types::Timestamp {
+                        seconds: 1_791_000_000,
+                        nanos: 0,
+                    }),
+                    stream_errors: Vec::new(),
+                });
+            }
+            other => {
+                let other = other.to_string();
+                self.fail(Code::Unimplemented, &other);
+            }
         }
-        "CreateWriteStream" => {
-            let request: Option<CreateWriteStreamRequest> = call.next_request().await;
-            let kind = request
-                .and_then(|r| r.write_stream)
-                .map(|s| s.r#type().as_str_name().to_string())
-                .unwrap_or_default();
-            call.log(format!("CreateWriteStream {kind}"));
-            call.reply(&WriteStream {
-                name: CREATED_STREAM.into(),
-                table_schema: Some(schema),
-                ..Default::default()
-            });
-        }
-        "FinalizeWriteStream" => {
-            let request: Option<FinalizeWriteStreamRequest> = call.next_request().await;
-            call.log(format!(
-                "FinalizeWriteStream {}",
-                request.map(|r| r.name).unwrap_or_default()
-            ));
-            call.reply(&FinalizeWriteStreamResponse { row_count: 42 });
-        }
-        "BatchCommitWriteStreams" => {
-            let request: Option<BatchCommitWriteStreamsRequest> = call.next_request().await;
-            call.log(format!(
-                "BatchCommitWriteStreams {:?}",
-                request.map(|r| r.write_streams).unwrap_or_default()
-            ));
-            call.reply(&BatchCommitWriteStreamsResponse {
-                commit_time: Some(gcloud_sdk::prost_types::Timestamp {
-                    seconds: 1_791_000_000,
-                    nanos: 0,
-                }),
-                stream_errors: Vec::new(),
-            });
-        }
-        other => {
-            let other = other.to_string();
-            call.fail(Code::Unimplemented, &other);
-        }
+        None
     }
-    None
 }
 
 /// The `id` of each row in `request`: the varint after the key of field 1, which the test

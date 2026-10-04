@@ -77,3 +77,4 @@ harness = false
 
 [lints.clippy]
 unwrap_used = "deny"
+mod_module_files = "deny"

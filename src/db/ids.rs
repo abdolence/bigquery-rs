@@ -13,7 +13,7 @@
 use crate::errors::BigQueryError;
 use crate::{BigQueryResult, BigQueryTableRef};
 use serde::{Deserialize, Serialize, Serializer};
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
@@ -147,10 +147,9 @@ const fn is_forbidden_ascii(b: u8) -> bool {
 /// use bigquery::BigQueryDatasetId;
 ///
 /// let shop = BigQueryDatasetId::new("shop_eu")?;
-/// assert_eq!(shop, "shop_eu");
+/// assert_eq!(shop.to_string(), "shop_eu");
 ///
-/// let err = BigQueryDatasetId::new("shop.eu").unwrap_err();
-/// assert!(err.to_string().contains("dataset_id"));
+/// assert!(BigQueryDatasetId::new("shop.eu").is_err());
 /// # Ok::<(), bigquery::errors::BigQueryError>(())
 /// ```
 ///
@@ -197,25 +196,8 @@ impl BigQueryDatasetId {
         BigQueryTableRef::new(None, self.clone(), table)
     }
 
-    /// The ID. The same as [`as_str`](Self::as_str).
-    pub fn value(&self) -> &str {
-        &self.0
-    }
-
-    /// The ID. The same as [`value`](Self::value).
+    /// The ID, for the crate's wire encoding.
     pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for BigQueryDatasetId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Borrow<str> for BigQueryDatasetId {
-    fn borrow(&self) -> &str {
         &self.0
     }
 }
@@ -250,30 +232,6 @@ impl FromStr for BigQueryDatasetId {
     }
 }
 
-impl PartialEq<str> for BigQueryDatasetId {
-    fn eq(&self, other: &str) -> bool {
-        self.0.as_ref() == other
-    }
-}
-
-impl PartialEq<BigQueryDatasetId> for str {
-    fn eq(&self, other: &BigQueryDatasetId) -> bool {
-        self == other.0.as_ref()
-    }
-}
-
-impl PartialEq<&str> for BigQueryDatasetId {
-    fn eq(&self, other: &&str) -> bool {
-        self.0.as_ref() == *other
-    }
-}
-
-impl PartialEq<BigQueryDatasetId> for &str {
-    fn eq(&self, other: &BigQueryDatasetId) -> bool {
-        *self == other.0.as_ref()
-    }
-}
-
 impl Serialize for BigQueryDatasetId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
@@ -293,13 +251,12 @@ impl Serialize for BigQueryDatasetId {
 /// use bigquery::BigQueryTableId;
 ///
 /// const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
-/// assert_eq!(ORDERS, "orders");
+/// assert_eq!(ORDERS.to_string(), "orders");
 ///
 /// assert!(BigQueryTableId::new("étudiant-01").is_ok());
 /// assert!(BigQueryTableId::new("table 01").is_ok());
 ///
-/// let err = BigQueryTableId::new("orders`; DROP").unwrap_err();
-/// assert!(err.to_string().contains("table_id"));
+/// assert!(BigQueryTableId::new("orders`; DROP").is_err());
 /// ```
 ///
 /// Table IDs are case-sensitive.
@@ -340,25 +297,8 @@ impl BigQueryTableId {
         }
     }
 
-    /// The ID. The same as [`as_str`](Self::as_str).
-    pub fn value(&self) -> &str {
-        &self.0
-    }
-
-    /// The ID. The same as [`value`](Self::value).
+    /// The ID, for the crate's wire encoding.
     pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for BigQueryTableId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Borrow<str> for BigQueryTableId {
-    fn borrow(&self) -> &str {
         &self.0
     }
 }
@@ -393,30 +333,6 @@ impl FromStr for BigQueryTableId {
     }
 }
 
-impl PartialEq<str> for BigQueryTableId {
-    fn eq(&self, other: &str) -> bool {
-        self.0.as_ref() == other
-    }
-}
-
-impl PartialEq<BigQueryTableId> for str {
-    fn eq(&self, other: &BigQueryTableId) -> bool {
-        self == other.0.as_ref()
-    }
-}
-
-impl PartialEq<&str> for BigQueryTableId {
-    fn eq(&self, other: &&str) -> bool {
-        self.0.as_ref() == *other
-    }
-}
-
-impl PartialEq<BigQueryTableId> for &str {
-    fn eq(&self, other: &BigQueryTableId) -> bool {
-        *self == other.0.as_ref()
-    }
-}
-
 impl Serialize for BigQueryTableId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
@@ -424,4 +340,130 @@ impl Serialize for BigQueryTableId {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::errors::BigQueryInvalidParametersError;
+    use proptest::prelude::*;
+
+    /// The field and the message of an invalid-parameters error.
+    fn invalid<T: std::fmt::Debug>(result: BigQueryResult<T>) -> (String, String) {
+        match result {
+            Err(BigQueryError::InvalidParametersError(BigQueryInvalidParametersError {
+                public,
+            })) => (public.field, public.error),
+            other => panic!("expected an invalid-parameters error, got {other:?}"),
+        }
+    }
+
+    /// Each class of ID the crate rejects, for both ID types: the ones that would change how a
+    /// resource path or SQL text is built from the ID.
+    #[test]
+    fn ids_that_could_reshape_a_path_or_sql_are_rejected() {
+        let over_limit = "é".repeat(513);
+        let cases = [
+            ("", "empty"),
+            (over_limit.as_str(), "over 1,024 bytes"),
+            ("ord\0ers", "NUL"),
+            ("ord\ners", "newline"),
+            ("ord\rers", "carriage return"),
+            ("ord\ters", "tab"),
+            ("ord\u{7f}ers", "DEL"),
+            ("ord\u{85}ers", "C1 control"),
+            ("ord`ers", "backtick"),
+            ("ord'ers", "single quote"),
+            ("ord\"ers", "double quote"),
+            ("ord\\ers", "backslash"),
+            ("shop.orders", "part separator"),
+            ("shop/orders", "path separator"),
+            ("orders$20250101", "partition decorator"),
+            ("orders@1700000000000", "snapshot decorator"),
+        ];
+        for (id, class) in cases {
+            assert_eq!(
+                invalid(BigQueryDatasetId::new(id)).0,
+                "dataset_id",
+                "{class}: {id:?}"
+            );
+            assert_eq!(
+                invalid(BigQueryTableId::new(id)).0,
+                "table_id",
+                "{class}: {id:?}"
+            );
+        }
+    }
+
+    /// Anything else is BigQuery's to accept or reject, so the crate lets it through.
+    #[test]
+    fn other_ids_are_left_to_bigquery() {
+        let at_limit = "é".repeat(512);
+        for id in [
+            "orders",
+            "shop-eu",
+            "table 01",
+            "étudiant-01",
+            "00_お客様",
+            "ord😀ers",
+            "a+b;c",
+            at_limit.as_str(),
+        ] {
+            assert!(BigQueryDatasetId::new(id).is_ok(), "{id:?}");
+            assert!(BigQueryTableId::new(id).is_ok(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_character_error_carries_no_raw_control_character() {
+        let (_, message) = invalid(BigQueryDatasetId::new("sh\nop"));
+        assert!(!message.contains('\n'), "{message:?}");
+    }
+
+    #[test]
+    fn an_oversized_id_error_leaves_the_value_out() {
+        let (_, message) = invalid(BigQueryTableId::new("x".repeat(10_000)));
+        assert!(!message.contains(&"x".repeat(10)), "{message}");
+    }
+
+    const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    static ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+
+    #[test]
+    fn from_static_agrees_with_new() {
+        assert_eq!(
+            SHOP,
+            BigQueryDatasetId::new("shop").expect("valid test input")
+        );
+        assert_eq!(
+            ORDERS,
+            BigQueryTableId::new("orders").expect("valid test input")
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn from_static_panics_at_run_time_on_a_bad_literal() {
+        let _ = BigQueryDatasetId::from_static("shop.eu");
+    }
+
+    #[test]
+    fn deserializing_validates() {
+        let shop: BigQueryDatasetId = serde_json::from_str("\"shop\"").expect("valid test input");
+        assert_eq!(shop, BigQueryDatasetId::from_static("shop"));
+        assert!(serde_json::from_str::<BigQueryDatasetId>("\"shop.eu\"").is_err());
+        assert!(serde_json::from_str::<BigQueryTableId>("\"a.b\"").is_err());
+        assert_eq!(
+            serde_json::to_string(&ORDERS).expect("valid test input"),
+            "\"orders\""
+        );
+    }
+
+    proptest! {
+        /// The byte walk in the const check rejects exactly the characters `char` names.
+        #[test]
+        fn the_id_check_agrees_with_char(id in any::<String>()) {
+            let expected = !id.is_empty()
+                && id.len() <= 1024
+                && !id.chars().any(|c| c.is_control() || "`'\"\\./$@".contains(c));
+            prop_assert_eq!(check_id(&id).is_ok(), expected);
+        }
+    }
+}

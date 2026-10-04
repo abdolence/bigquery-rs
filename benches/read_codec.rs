@@ -67,7 +67,7 @@ type JiffRow = Wide<jiff::civil::Date, jiff::Timestamp, jiff::civil::DateTime, j
 type WrapperRow = Wide<BigQueryDate, BigQueryTimestamp, BigQueryDateTime, BigQueryTime>;
 type IntegerRow = Wide<i32, i64, i64, i64>;
 
-fn ext(name: &str) -> HashMap<String, String> {
+fn extension_metadata(name: &str) -> HashMap<String, String> {
     HashMap::from([("ARROW:extension:name".to_string(), name.to_string())])
 }
 
@@ -157,7 +157,7 @@ fn wide_batch(seed: usize) -> RecordBatch {
                 DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
                 false,
             )
-            .with_metadata(ext("google:sqlType:datetime")),
+            .with_metadata(extension_metadata("google:sqlType:datetime")),
             Arc::new(TimestampMicrosecondArray::from_iter_values(
                 (0..n).map(micros),
             )),
@@ -190,7 +190,8 @@ fn wide_batch(seed: usize) -> RecordBatch {
             (Field::new("big", a.data_type().clone(), false), Arc::new(a))
         },
         (
-            Field::new("doc", DataType::Utf8, false).with_metadata(ext("google:sqlType:json")),
+            Field::new("doc", DataType::Utf8, false)
+                .with_metadata(extension_metadata("google:sqlType:json")),
             Arc::new(StringArray::from_iter_values(
                 (0..n).map(|k| format!(r#"{{"k":{k},"tags":["a","b"]}}"#)),
             )),
@@ -201,13 +202,14 @@ fn wide_batch(seed: usize) -> RecordBatch {
                 DataType::Interval(arrow_schema::IntervalUnit::MonthDayNano),
                 false,
             )
-            .with_metadata(ext("google:sqlType:interval")),
+            .with_metadata(extension_metadata("google:sqlType:interval")),
             Arc::new(IntervalMonthDayNanoArray::from_iter_values((0..n).map(
                 |k| IntervalMonthDayNano::new(k as i32 % 24, k as i32 % 30, k as i64 * 1_000_000),
             ))),
         ),
         (
-            Field::new("geo", DataType::Utf8, false).with_metadata(ext("google:sqlType:geography")),
+            Field::new("geo", DataType::Utf8, false)
+                .with_metadata(extension_metadata("google:sqlType:geography")),
             Arc::new(StringArray::from_iter_values(
                 (0..n).map(|k| format!("POINT({} {})", k % 180, k % 90)),
             )),

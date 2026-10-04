@@ -305,7 +305,7 @@ mod tests {
             ("data:text/plain,x", "bigquery_api_url"),
         ] {
             let url = url::Url::parse(url).expect("a URL");
-            let options = BigQueryDbOptions::new("p".into());
+            let options = BigQueryDbOptions::new("acme-prod".into());
             let options = if field == "bigquery_api_url" {
                 options.with_bigquery_api_url(url)
             } else {

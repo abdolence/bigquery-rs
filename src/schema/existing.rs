@@ -1,6 +1,6 @@
 //! A table as `GetTable` returns it, in the terms the diff compares.
 
-use crate::db::proto::{duration_ms, timestamp_ms, NonEmpty};
+use crate::db::proto::{duration_ms, timestamp_ms};
 use crate::errors::BigQueryError;
 use crate::BigQueryLabels;
 use crate::{
@@ -14,7 +14,7 @@ use std::time::Duration;
 /// which must carry everything the crate does not model (policy tags, collation, foreign keys)
 /// back unchanged.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LiveTable {
+pub(crate) struct ExistingTable {
     pub raw: v2::Table,
     pub schema: BigQueryTableSchema,
     pub partitioning: Option<BigQueryPartitioning>,
@@ -28,62 +28,55 @@ pub(crate) struct LiveTable {
     pub num_bytes: Option<i64>,
 }
 
-fn unsupported(table: &v2::Table, what: String) -> BigQueryError {
-    let id = table
-        .table_reference
-        .as_ref()
-        .map(|r| format!("{}.{}.{}", r.project_id, r.dataset_id, r.table_id))
-        .unwrap_or_default();
-    BigQueryError::invalid_parameters("table", format!("{id}: {what}"))
-}
-
 fn range_bound(table: &v2::Table, what: &str, text: &str) -> BigQueryResult<i64> {
     text.parse().map_err(|_| {
-        unsupported(
+        BigQueryError::unsupported_table(
             table,
             format!("range partitioning {what} {text:?} is not an INT64"),
         )
     })
 }
 
-/// The partitioning of `raw` and its partition expiration, as the crate models them.
-///
-/// # Errors
-/// [`BigQueryError::InvalidParametersError`] for partitioning the crate does not model, and
-/// [`BigQueryError::DeserializeError`] for a partition expiration that is not a duration.
-pub(crate) fn table_partitioning(
-    raw: &v2::Table,
-) -> BigQueryResult<(Option<BigQueryPartitioning>, Option<Duration>)> {
-    Ok(match (&raw.time_partitioning, &raw.range_partitioning) {
-        (Some(time), _) => (
-            Some(BigQueryPartitioning::Time {
-                unit: BigQueryPartitionUnit::parse(&time.r#type).ok_or_else(|| {
-                    unsupported(
-                        raw,
-                        format!("time partitioning type {:?} is not supported", time.r#type),
-                    )
-                })?,
-                column: time.field.clone().and_then(NonEmpty::non_empty),
-            }),
-            duration_ms(
-                "time_partitioning.expiration_ms",
-                time.expiration_ms.filter(|ms| *ms > 0),
-            )?,
-        ),
-        (None, Some(range)) => {
-            let bounds = range.range.clone().unwrap_or_default();
-            (
-                Some(BigQueryPartitioning::Range {
-                    column: range.field.clone(),
-                    start: range_bound(raw, "start", &bounds.start)?,
-                    end: range_bound(raw, "end", &bounds.end)?,
-                    interval: range_bound(raw, "interval", &bounds.interval)?,
+impl BigQueryPartitioning {
+    /// The partitioning of `raw` and its partition expiration, as the crate models them.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for partitioning the crate does not model, and
+    /// [`BigQueryError::DeserializeError`] for a partition expiration that is not a duration.
+    pub(crate) fn from_table(
+        raw: &v2::Table,
+    ) -> BigQueryResult<(Option<BigQueryPartitioning>, Option<Duration>)> {
+        Ok(match (&raw.time_partitioning, &raw.range_partitioning) {
+            (Some(time), _) => (
+                Some(BigQueryPartitioning::Time {
+                    unit: BigQueryPartitionUnit::parse(&time.r#type).ok_or_else(|| {
+                        BigQueryError::unsupported_table(
+                            raw,
+                            format!("time partitioning type {:?} is not supported", time.r#type),
+                        )
+                    })?,
+                    column: time.field.clone().filter(|v| !v.is_empty()),
                 }),
-                None,
-            )
-        }
-        (None, None) => (None, None),
-    })
+                duration_ms(
+                    "time_partitioning.expiration_ms",
+                    time.expiration_ms.filter(|ms| *ms > 0),
+                )?,
+            ),
+            (None, Some(range)) => {
+                let bounds = range.range.clone().unwrap_or_default();
+                (
+                    Some(BigQueryPartitioning::Range {
+                        column: range.field.clone(),
+                        start: range_bound(raw, "start", &bounds.start)?,
+                        end: range_bound(raw, "end", &bounds.end)?,
+                        interval: range_bound(raw, "interval", &bounds.interval)?,
+                    }),
+                    None,
+                )
+            }
+            (None, None) => (None, None),
+        })
+    }
 }
 
 /// # Errors
@@ -91,12 +84,12 @@ pub(crate) fn table_partitioning(
 /// table, which a declaration cannot own, and for partitioning the crate does not model; a
 /// column type the crate does not handle, or an expiration out of range, is a
 /// [`BigQueryError::DeserializeError`].
-impl TryFrom<v2::Table> for LiveTable {
+impl TryFrom<v2::Table> for ExistingTable {
     type Error = BigQueryError;
 
     fn try_from(raw: v2::Table) -> Result<Self, Self::Error> {
         if !raw.r#type.is_empty() && raw.r#type != "TABLE" {
-            return Err(unsupported(
+            return Err(BigQueryError::unsupported_table(
                 &raw,
                 format!("a {} cannot be managed as a table", raw.r#type),
             ));
@@ -107,7 +100,7 @@ impl TryFrom<v2::Table> for LiveTable {
             .map(BigQueryTableSchema::try_from)
             .transpose()?
             .unwrap_or(BigQueryTableSchema { fields: Vec::new() });
-        let (partitioning, partition_expiration) = table_partitioning(&raw)?;
+        let (partitioning, partition_expiration) = BigQueryPartitioning::from_table(&raw)?;
         let expiration = match raw.expiration_time.filter(|ms| *ms > 0) {
             Some(ms) => timestamp_ms("expiration_time", ms)?,
             None => None,
@@ -126,8 +119,8 @@ impl TryFrom<v2::Table> for LiveTable {
                 .as_ref()
                 .and_then(|c| c.primary_key.as_ref())
                 .map(|k| k.columns.clone())
-                .and_then(NonEmpty::non_empty),
-            description: raw.description.clone().and_then(NonEmpty::non_empty),
+                .filter(|v| !v.is_empty()),
+            description: raw.description.clone().filter(|v| !v.is_empty()),
             labels: raw.labels.clone().into_iter().collect(),
             expiration,
             num_rows: raw.num_rows,

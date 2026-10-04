@@ -172,8 +172,12 @@ mod tests {
     async fn retries_stop_after_max_retries() {
         let attempts = AtomicUsize::new(0);
         let result = run(2, usize::MAX, Code::Unavailable, &attempts).await;
-        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(err.contains("Unavailable"), "{err}");
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.has_code(Code::Unavailable)),
+            "{result:?}"
+        );
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
 

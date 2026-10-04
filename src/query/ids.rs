@@ -16,7 +16,7 @@ use std::str::FromStr;
 /// use bigquery::BigQueryJobId;
 ///
 /// let job: BigQueryJobId = "bquxjob_1a2b3c".parse()?;
-/// assert_eq!(job, "bquxjob_1a2b3c");
+/// assert_eq!(job.to_string(), "bquxjob_1a2b3c");
 /// assert!(BigQueryJobId::new("a/b").is_err());
 /// # Ok::<(), bigquery::errors::BigQueryError>(())
 /// ```
@@ -87,12 +87,6 @@ impl FromStr for BigQueryJobId {
 
     fn from_str(id: &str) -> Result<Self, Self::Err> {
         Self::new(id)
-    }
-}
-
-impl PartialEq<&str> for BigQueryJobId {
-    fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
     }
 }
 
@@ -189,19 +183,24 @@ mod tests {
     #[test]
     fn a_job_id_that_would_break_its_resource_path_is_refused() {
         for bad in ["", "a/b", "a\nb"] {
-            let err = BigQueryJobId::new(bad).expect_err(bad);
-            assert!(err.to_string().contains("job_id"), "{err}");
+            match BigQueryJobId::new(bad) {
+                Err(BigQueryError::InvalidParametersError(err)) => {
+                    assert_eq!(err.public.field, "job_id", "{bad:?}")
+                }
+                other => panic!("{bad:?}: expected an invalid job ID, got {other:?}"),
+            }
         }
-        assert_eq!(
-            BigQueryJobId::new("bquxjob_1-a").expect("a job ID"),
-            "bquxjob_1-a"
-        );
+        assert!(BigQueryJobId::new("bquxjob_1-a").is_ok());
     }
 
     #[test]
     fn an_empty_request_id_is_refused() {
-        let err = BigQueryRequestId::new("").expect_err("an empty key");
-        assert!(err.to_string().contains("request_id"), "{err}");
+        match BigQueryRequestId::new("") {
+            Err(BigQueryError::InvalidParametersError(err)) => {
+                assert_eq!(err.public.field, "request_id")
+            }
+            other => panic!("expected an invalid request ID, got {other:?}"),
+        }
         assert_eq!(
             BigQueryRequestId::new("req-1").expect("a key").as_str(),
             "req-1"

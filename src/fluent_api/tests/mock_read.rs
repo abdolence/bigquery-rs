@@ -67,20 +67,58 @@ impl BigQueryReadSupport for MockDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fluent_api::BigQueryExprBuilder;
+    use crate::fluent_api::{BigQueryExprBuilder, BigQuerySelectBuilder};
     use crate::paths;
     use crate::{
         BigQueryDatasetId, BigQueryDatasetRef, BigQueryReadCompression, BigQueryReadOptions,
         BigQueryTableId,
     };
 
-    const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
-    const T: BigQueryTableId = BigQueryTableId::from_static("t");
+    const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 
     #[derive(serde::Deserialize)]
     struct Row {
         name: String,
         n: i64,
+    }
+
+    /// A select of `Row` from `acme-prod.shop.orders` with every read setting given.
+    fn full_select<'a>(
+        db: &'a MockDatabase,
+        at: jiff::Timestamp,
+        options: &BigQueryReadOptions,
+    ) -> BigQuerySelectBuilder<'a, MockDatabase> {
+        BigQueryExprBuilder::new(db)
+            .select()
+            .fields(paths!(Row::{name, n}))
+            .from(
+                BigQueryDatasetRef::new("acme-prod", SHOP)
+                    .expect("valid test input")
+                    .table(ORDERS),
+            )
+            .filter_sql("n > 10")
+            .snapshot_time(at)
+            .sample_percentage(50.0)
+            .options(options.clone())
+    }
+
+    /// A select whose filter names a field path the crate refuses.
+    fn refused_filter_select(db: &MockDatabase) -> BigQuerySelectBuilder<'_, MockDatabase> {
+        BigQueryExprBuilder::new(db)
+            .select()
+            .from(SHOP.table(ORDERS))
+            .filter(|f| f.field("n\0").eq(1))
+    }
+
+    fn assert_invalid_parameters(result: BigQueryResult<()>) {
+        assert!(
+            matches!(
+                result,
+                Err(crate::errors::BigQueryError::InvalidParametersError(_))
+            ),
+            "{result:?}"
+        )
     }
 
     #[tokio::test]
@@ -90,43 +128,39 @@ mod tests {
         let options = BigQueryReadOptions::new()
             .with_max_stream_count(4)
             .with_compression(BigQueryReadCompression::Zstd);
-        let select = || {
-            BigQueryExprBuilder::new(&db)
-                .select()
-                .fields(paths!(Row::{name, n}))
-                .from(
-                    BigQueryDatasetRef::new("p", DS)
-                        .expect("valid test input")
-                        .table(T),
-                )
-                .filter_sql("n > 10")
-                .snapshot_time(at)
-                .sample_percentage(50.0)
-                .options(options.clone())
-        };
-        select().obj::<Row>().query().await?;
-        drop(select().obj::<Row>().stream_query().await?);
-        drop(select().obj::<Row>().stream_query_with_errors().await?);
-        drop(select().record_batches().await?);
+        full_select(&db, at, &options).obj::<Row>().query().await?;
+        drop(
+            full_select(&db, at, &options)
+                .obj::<Row>()
+                .stream_query()
+                .await?,
+        );
+        drop(
+            full_select(&db, at, &options)
+                .obj::<Row>()
+                .stream_query_with_errors()
+                .await?,
+        );
+        drop(full_select(&db, at, &options).record_batches().await?);
         drop(
             BigQueryExprBuilder::new(&db)
                 .select()
-                .from(DS.table(T))
+                .from(SHOP.table(ORDERS))
                 .record_batches()
                 .await?,
         );
 
         let full = BigQueryReadParams::new(
-            BigQueryDatasetRef::new("p", DS)
+            BigQueryDatasetRef::new("acme-prod", SHOP)
                 .expect("valid test input")
-                .table(T),
+                .table(ORDERS),
         )
         .with_selected_fields(vec!["name".into(), "n".into()])
         .with_row_restriction("n > 10".into())
         .with_snapshot_time(at)
         .with_sample_percentage(50.0)
         .with_options(options);
-        let bare = BigQueryReadParams::new(DS.table(T));
+        let bare = BigQueryReadParams::new(SHOP.table(ORDERS));
         assert_eq!(
             take_calls(),
             vec![
@@ -145,7 +179,7 @@ mod tests {
         let db = MockDatabase;
         BigQueryExprBuilder::new(&db)
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .filter(|f| {
                 f.for_all([
                     f.field(crate::path!(Row::name)).eq("x' OR TRUE --"),
@@ -157,7 +191,7 @@ mod tests {
             .await?;
         BigQueryExprBuilder::new(&db)
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .filter_sql("n > 10")
             .filter(|f| f.for_all([None::<crate::BigQueryFilter>]))
             .obj::<Row>()
@@ -181,34 +215,34 @@ mod tests {
     #[tokio::test]
     async fn a_refused_filter_fails_every_terminal_before_any_call() {
         let db = MockDatabase;
-        let select = || {
-            BigQueryExprBuilder::new(&db)
-                .select()
-                .from(DS.table(T))
-                .filter(|f| f.field("n\0").eq(1))
-        };
-        let invalid = |result: BigQueryResult<()>| {
-            assert!(
-                matches!(
-                    result,
-                    Err(crate::errors::BigQueryError::InvalidParametersError(_))
-                ),
-                "{result:?}"
-            )
-        };
-        invalid(select().obj::<Row>().query().await.map(drop));
-        invalid(select().obj::<Row>().stream_query().await.map(drop));
-        invalid(
-            select()
+        assert_invalid_parameters(
+            refused_filter_select(&db)
+                .obj::<Row>()
+                .query()
+                .await
+                .map(drop),
+        );
+        assert_invalid_parameters(
+            refused_filter_select(&db)
+                .obj::<Row>()
+                .stream_query()
+                .await
+                .map(drop),
+        );
+        assert_invalid_parameters(
+            refused_filter_select(&db)
                 .obj::<Row>()
                 .stream_query_with_errors()
                 .await
                 .map(drop),
         );
-        invalid(select().record_batches().await.map(drop));
+        assert_invalid_parameters(refused_filter_select(&db).record_batches().await.map(drop));
         assert!(take_calls().is_empty(), "nothing is sent");
 
-        let replaced = select().filter_sql("n > 1").record_batches().await;
+        let replaced = refused_filter_select(&db)
+            .filter_sql("n > 1")
+            .record_batches()
+            .await;
         assert!(replaced.is_ok(), "the last filter call wins");
     }
 }

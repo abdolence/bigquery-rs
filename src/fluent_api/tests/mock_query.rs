@@ -126,7 +126,7 @@ impl BigQueryQuerySupport for MockDatabase {
 mod tests {
     use super::*;
     use crate::errors::BigQueryError;
-    use crate::fluent_api::BigQueryExprBuilder;
+    use crate::fluent_api::{BigQueryExprBuilder, BigQueryQueryBuilder};
     use crate::query::{infer_param, typed_param, ParamLabel};
     use crate::{
         BigQueryDatasetId, BigQueryFieldType, BigQueryReadCompression, BigQueryReadOptions,
@@ -142,35 +142,50 @@ mod tests {
         min: i64,
     }
 
+    /// A query with every parameter form and job setting given.
+    fn full_query<'a>(
+        db: &'a MockDatabase,
+        read_options: &BigQueryReadOptions,
+    ) -> BigQueryQueryBuilder<'a, MockDatabase> {
+        BigQueryExprBuilder::new(db)
+            .query("SELECT @n, @min, @t")
+            .param("n", 10)
+            .params(&Filter { min: 3 })
+            .param_as("t", BigQueryFieldType::Timestamp, None::<jiff::Timestamp>)
+            .location(BigQueryLocation::from_static("EU"))
+            .default_dataset(BigQueryDatasetId::from_static("shop"))
+            .label("team", "data")
+            .labels([("env", "test")])
+            .maximum_bytes_billed(1_000_000)
+            .use_query_cache(false)
+            .timeout(Duration::from_secs(3))
+            .job_timeout(Duration::from_secs(60))
+            .request_id(BigQueryRequestId::new("req-1").expect("a request ID"))
+            .inline_rows_limit(500)
+            .read_options(read_options.clone())
+    }
+
     #[tokio::test]
     async fn query_chain_passes_params_to_support() -> BigQueryResult<()> {
         let db = MockDatabase;
         let read_options =
             BigQueryReadOptions::new().with_compression(BigQueryReadCompression::Zstd);
-        let query = || {
-            BigQueryExprBuilder::new(&db)
-                .query("SELECT @n, @min, @t")
-                .param("n", 10)
-                .params(&Filter { min: 3 })
-                .param_as("t", BigQueryFieldType::Timestamp, None::<jiff::Timestamp>)
-                .location(BigQueryLocation::from_static("EU"))
-                .default_dataset(BigQueryDatasetId::from_static("ds"))
-                .label("team", "data")
-                .labels([("env", "test")])
-                .maximum_bytes_billed(1_000_000)
-                .use_query_cache(false)
-                .timeout(Duration::from_secs(3))
-                .job_timeout(Duration::from_secs(60))
-                .request_id(BigQueryRequestId::new("req-1").expect("a request ID"))
-                .inline_rows_limit(500)
-                .read_options(read_options.clone())
-        };
-        query().obj::<Row>().query().await?;
-        drop(query().obj::<Row>().stream_query().await?);
-        drop(query().obj::<Row>().stream_query_with_errors().await?);
-        drop(query().record_batches().await?);
-        query().execute().await?;
-        query().dry_run().await?;
+        full_query(&db, &read_options).obj::<Row>().query().await?;
+        drop(
+            full_query(&db, &read_options)
+                .obj::<Row>()
+                .stream_query()
+                .await?,
+        );
+        drop(
+            full_query(&db, &read_options)
+                .obj::<Row>()
+                .stream_query_with_errors()
+                .await?,
+        );
+        drop(full_query(&db, &read_options).record_batches().await?);
+        full_query(&db, &read_options).execute().await?;
+        full_query(&db, &read_options).dry_run().await?;
         BigQueryExprBuilder::new(&db)
             .query("SELECT ?")
             .positional_param("x")
@@ -188,7 +203,7 @@ mod tests {
                 )?,
             ])
             .with_location(BigQueryLocation::from_static("EU"))
-            .with_default_dataset(BigQueryDatasetId::from_static("ds").into())
+            .with_default_dataset(BigQueryDatasetId::from_static("shop").into())
             .with_labels(BigQueryLabels::from([("team", "data"), ("env", "test")]))
             .with_maximum_bytes_billed(1_000_000)
             .with_use_query_cache(false)

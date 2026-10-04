@@ -125,9 +125,9 @@ fn hostile_target(value: &str) -> BigQueryTableTarget {
 }
 
 fn orders() -> BigQueryTableRef {
-    BigQueryDatasetRef::new("p", BigQueryDatasetId::from_static("ds"))
+    BigQueryDatasetRef::new("acme-prod", BigQueryDatasetId::from_static("shop"))
         .expect("a project")
-        .table(BigQueryTableId::from_static("t"))
+        .table(BigQueryTableId::from_static("orders"))
 }
 
 #[test]
@@ -135,8 +135,12 @@ fn table_path_quotes_each_part_whatever_the_project_holds() {
     let accepted: Vec<(String, BigQueryTableRef)> = injection_corpus()
         .into_iter()
         .filter_map(|p| {
-            let dataset = BigQueryDatasetRef::new(p.clone(), BigQueryDatasetId::from_static("ds"));
-            Some((p, dataset.ok()?.table(BigQueryTableId::from_static("t"))))
+            let dataset =
+                BigQueryDatasetRef::new(p.clone(), BigQueryDatasetId::from_static("shop"));
+            Some((
+                p,
+                dataset.ok()?.table(BigQueryTableId::from_static("orders")),
+            ))
         })
         .collect();
     assert!(
@@ -150,23 +154,24 @@ fn table_path_quotes_each_part_whatever_the_project_holds() {
             vec![
                 Token::Ident(project.clone()),
                 Token::Text(".".into()),
-                Token::Ident("ds".into()),
+                Token::Ident("shop".into()),
                 Token::Text(".".into()),
-                Token::Ident("t".into()),
+                Token::Ident("orders".into()),
             ],
             "{project:.80?}"
         );
     }
-    let unset = BigQueryDatasetId::from_static("ds").table(BigQueryTableId::from_static("t"));
+    let unset =
+        BigQueryDatasetId::from_static("shop").table(BigQueryTableId::from_static("orders"));
     assert_eq!(
         unset.ddl("client-project").to_string(),
-        "`client-project`.`ds`.`t`"
+        "`client-project`.`shop`.`orders`"
     );
 }
 
 #[test]
 fn hostile_descriptions_and_labels_render_as_single_literals_that_parse_back() {
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     let plain = skeleton(&table.create(&hostile_target("plain"), true).expect("DDL"));
     for value in injection_corpus() {
         let sql = table.create(&hostile_target(&value), true).expect("DDL");
@@ -181,7 +186,7 @@ fn hostile_descriptions_and_labels_render_as_single_literals_that_parse_back() {
 
 #[test]
 fn hostile_column_names_render_as_single_identifiers() {
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     let plain_create = skeleton(
         &table
             .create(
@@ -261,10 +266,13 @@ fn create_or_replace_restates_columns_key_partitioning_clustering_and_options() 
     target.labels = BigQueryLabels::from([("team", "shop")]);
     target.expiration = Some(jiff::Timestamp::from_second(1_900_000_000).expect("a timestamp"));
 
-    let sql = orders().ddl("p").create(&target, true).expect("DDL");
+    let sql = orders()
+        .ddl("acme-prod")
+        .create(&target, true)
+        .expect("DDL");
     assert_eq!(
         sql,
-        "CREATE OR REPLACE TABLE `p`.`ds`.`t` (\n  \
+        "CREATE OR REPLACE TABLE `acme-prod`.`shop`.`orders` (\n  \
          `id` INT64 NOT NULL OPTIONS(description='key'),\n  \
          `ts` TIMESTAMP,\n  \
          `tags` ARRAY<STRING>,\n  \
@@ -285,11 +293,11 @@ fn drop_and_create_is_one_script() {
         BigQueryFieldType::Int64,
         BigQueryFieldMode::Nullable,
     )]);
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     let sql = table.drop_and_create(&target).expect("DDL");
     assert_eq!(
         sql,
-        "DROP TABLE `p`.`ds`.`t`;\nCREATE TABLE `p`.`ds`.`t` (\n  `id` INT64\n);"
+        "DROP TABLE `acme-prod`.`shop`.`orders`;\nCREATE TABLE `acme-prod`.`shop`.`orders` (\n  `id` INT64\n);"
     );
 }
 
@@ -322,7 +330,7 @@ fn partition_expression_follows_the_column_type() {
             "PARTITION BY DATETIME_TRUNC(`c`, YEAR)",
         ),
     ];
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     for (field_type, unit, expected) in cases {
         let mut target = target(vec![column(
             "c",
@@ -378,10 +386,10 @@ fn partition_expression_follows_the_column_type() {
 
 #[test]
 fn alter_statements_name_the_table_and_the_column() {
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     assert_eq!(
         table.rename_column("a", "b"),
-        "ALTER TABLE `p`.`ds`.`t` RENAME COLUMN `a` TO `b`"
+        "ALTER TABLE `acme-prod`.`shop`.`orders` RENAME COLUMN `a` TO `b`"
     );
     assert_eq!(
         table.widen_column(
@@ -390,19 +398,19 @@ fn alter_statements_name_the_table_and_the_column() {
                 max_length: Some(20)
             }
         ),
-        "ALTER TABLE `p`.`ds`.`t` ALTER COLUMN `s` SET DATA TYPE STRING(20)"
+        "ALTER TABLE `acme-prod`.`shop`.`orders` ALTER COLUMN `s` SET DATA TYPE STRING(20)"
     );
     assert_eq!(
         table.drop_column("d"),
-        "ALTER TABLE `p`.`ds`.`t` DROP COLUMN `d`"
+        "ALTER TABLE `acme-prod`.`shop`.`orders` DROP COLUMN `d`"
     );
     assert_eq!(
-        BigQueryDatasetRef::new("p", BigQueryDatasetId::from_static("ds"))
+        BigQueryDatasetRef::new("acme-prod", BigQueryDatasetId::from_static("shop"))
             .expect("a project")
-            .table(BigQueryTableId::from_static("t_snap"))
-            .ddl("p")
+            .table(BigQueryTableId::from_static("orders_snapshot"))
+            .ddl("acme-prod")
             .snapshot_of(&table),
-        "CREATE SNAPSHOT TABLE `p`.`ds`.`t_snap` CLONE `p`.`ds`.`t`"
+        "CREATE SNAPSHOT TABLE `acme-prod`.`shop`.`orders_snapshot` CLONE `acme-prod`.`shop`.`orders`"
     );
 }
 
@@ -444,7 +452,7 @@ fn without_comments(sql: &str) -> String {
 
 #[test]
 fn a_default_is_one_parenthesized_operand() {
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     let rendered = |expression: &str, code: &str| {
         let mut c = column("c", BigQueryFieldType::Int64, BigQueryFieldMode::Nullable);
         c.default_value_expression = Some(expression.into());
@@ -473,7 +481,7 @@ fn a_default_is_one_parenthesized_operand() {
 
 #[test]
 fn a_nested_field_name_stays_one_identifier() {
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     let nested = |name: &str| {
         let inner = column(name, STRING, BigQueryFieldMode::Nullable);
         let outer = column(
@@ -503,7 +511,7 @@ fn a_nested_field_name_stays_one_identifier() {
 
 #[test]
 fn hostile_key_clustering_and_partitioning_columns_render_as_single_identifiers() {
-    let table = orders().ddl("p");
+    let table = orders().ddl("acme-prod");
     // `None` stands for range partitioning on an INT64 column.
     let partitionings = [
         (BigQueryFieldType::Date, Some(BigQueryPartitionUnit::Day)),

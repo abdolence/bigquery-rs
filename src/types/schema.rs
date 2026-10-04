@@ -1,10 +1,9 @@
 //! One vocabulary for the schemas that three sources name differently: the v2 API's legacy
 //! type strings, the Storage API's enums, and the physical types of an Arrow schema.
 
-use crate::db::proto::NonEmpty;
 use crate::errors::BigQueryError;
 use crate::types::error::CodecError;
-use crate::types::kind::BqKind;
+use crate::types::kind::FieldKind;
 use crate::BigQueryResult;
 use arrow_schema::{DataType, Field, TimeUnit};
 use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
@@ -182,74 +181,6 @@ impl TypeParams {
         }
     }
 }
-
-/// One v2 column. The error keeps its path as a [`CodecError`], which the public schema
-/// conversion turns into a [`BigQueryError`], so this is not a public `TryFrom`.
-fn field_from_v2(field: &v2::TableFieldSchema) -> Result<BigQueryFieldSchema, CodecError> {
-    let at = |err: CodecError| err.at_field(&field.name);
-    let params = TypeParams {
-        max_length: field.max_length,
-        precision: field.precision,
-        scale: field.scale,
-        timestamp_precision: field.timestamp_precision,
-    };
-    let field_type = match field.r#type.to_ascii_uppercase().as_str() {
-        "INTEGER" | "INT64" => BigQueryFieldType::Int64,
-        "FLOAT" | "FLOAT64" => BigQueryFieldType::Float64,
-        "BOOLEAN" | "BOOL" => BigQueryFieldType::Bool,
-        "NUMERIC" | "DECIMAL" => BigQueryFieldType::Numeric(params.decimal().map_err(at)?),
-        "BIGNUMERIC" | "BIGDECIMAL" => BigQueryFieldType::BigNumeric(params.decimal().map_err(at)?),
-        "STRING" => BigQueryFieldType::String {
-            max_length: params.max_length().map_err(at)?,
-        },
-        "BYTES" => BigQueryFieldType::Bytes {
-            max_length: params.max_length().map_err(at)?,
-        },
-        "DATE" => BigQueryFieldType::Date,
-        "TIME" => BigQueryFieldType::Time,
-        "DATETIME" => BigQueryFieldType::DateTime,
-        "TIMESTAMP" => params.timestamp().map_err(at)?,
-        "GEOGRAPHY" => BigQueryFieldType::Geography,
-        "JSON" => BigQueryFieldType::Json,
-        "INTERVAL" => BigQueryFieldType::Interval,
-        "RANGE" => BigQueryFieldType::Range(
-            BigQueryRangeElementType::parse(
-                field.range_element_type.as_ref().map(|e| e.r#type.as_str()),
-            )
-            .map_err(at)?,
-        ),
-        "RECORD" | "STRUCT" => BigQueryFieldType::Struct(
-            field
-                .fields
-                .iter()
-                .map(field_from_v2)
-                .collect::<Result<_, _>>()
-                .map_err(at)?,
-        ),
-        other => {
-            return Err(at(CodecError::unsupported(format!(
-                "column type `{other}` is not supported"
-            ))))
-        }
-    };
-    let mode = BigQueryFieldMode::parse(&field.mode).ok_or_else(|| {
-        at(CodecError::unsupported(format!(
-            "column mode `{}` is not supported",
-            field.mode.to_ascii_uppercase()
-        )))
-    })?;
-    Ok(BigQueryFieldSchema {
-        name: field.name.clone(),
-        field_type,
-        mode,
-        description: field.description.clone().and_then(NonEmpty::non_empty),
-        default_value_expression: field
-            .default_value_expression
-            .clone()
-            .and_then(NonEmpty::non_empty),
-    })
-}
-
 fn storage_type(value: i32) -> Result<StorageType, CodecError> {
     match StorageType::try_from(value) {
         Ok(StorageType::Unspecified) | Err(_) => Err(CodecError::unsupported(format!(
@@ -259,75 +190,145 @@ fn storage_type(value: i32) -> Result<StorageType, CodecError> {
     }
 }
 
-/// One Storage API column, as [`field_from_v2`].
-fn field_from_storage(
-    field: &storage::TableFieldSchema,
-) -> Result<BigQueryFieldSchema, CodecError> {
-    let at = |err: CodecError| err.at_field(&field.name);
-    let params = TypeParams {
-        max_length: field.max_length,
-        precision: field.precision,
-        scale: field.scale,
-        timestamp_precision: field.timestamp_precision,
-    };
-    let field_type = match storage_type(field.r#type).map_err(at)? {
-        StorageType::Int64 => BigQueryFieldType::Int64,
-        StorageType::Double => BigQueryFieldType::Float64,
-        StorageType::Bool => BigQueryFieldType::Bool,
-        StorageType::Numeric => BigQueryFieldType::Numeric(params.decimal().map_err(at)?),
-        StorageType::Bignumeric => BigQueryFieldType::BigNumeric(params.decimal().map_err(at)?),
-        StorageType::String => BigQueryFieldType::String {
-            max_length: params.max_length().map_err(at)?,
-        },
-        StorageType::Bytes => BigQueryFieldType::Bytes {
-            max_length: params.max_length().map_err(at)?,
-        },
-        StorageType::Date => BigQueryFieldType::Date,
-        StorageType::Time => BigQueryFieldType::Time,
-        StorageType::Datetime => BigQueryFieldType::DateTime,
-        StorageType::Timestamp => params.timestamp().map_err(at)?,
-        StorageType::Geography => BigQueryFieldType::Geography,
-        StorageType::Json => BigQueryFieldType::Json,
-        StorageType::Interval => BigQueryFieldType::Interval,
-        StorageType::Range => {
-            let element = field
-                .range_element_type
-                .as_ref()
-                .map(|e| storage_type(e.r#type).map(|ty| ty.as_str_name()))
-                .transpose()
-                .map_err(at)?;
-            BigQueryFieldType::Range(BigQueryRangeElementType::parse(element).map_err(at)?)
-        }
-        StorageType::Struct => BigQueryFieldType::Struct(
-            field
-                .fields
-                .iter()
-                .map(field_from_storage)
-                .collect::<Result<_, _>>()
+impl BigQueryFieldSchema {
+    /// One v2 column. The error keeps its path as a [`CodecError`], which the public schema
+    /// conversion turns into a [`BigQueryError`], so this is not a public `TryFrom`.
+    fn from_v2(field: &v2::TableFieldSchema) -> Result<BigQueryFieldSchema, CodecError> {
+        let at = |err: CodecError| err.at_field(&field.name);
+        let params = TypeParams {
+            max_length: field.max_length,
+            precision: field.precision,
+            scale: field.scale,
+            timestamp_precision: field.timestamp_precision,
+        };
+        let field_type = match field.r#type.to_ascii_uppercase().as_str() {
+            "INTEGER" | "INT64" => BigQueryFieldType::Int64,
+            "FLOAT" | "FLOAT64" => BigQueryFieldType::Float64,
+            "BOOLEAN" | "BOOL" => BigQueryFieldType::Bool,
+            "NUMERIC" | "DECIMAL" => BigQueryFieldType::Numeric(params.decimal().map_err(at)?),
+            "BIGNUMERIC" | "BIGDECIMAL" => {
+                BigQueryFieldType::BigNumeric(params.decimal().map_err(at)?)
+            }
+            "STRING" => BigQueryFieldType::String {
+                max_length: params.max_length().map_err(at)?,
+            },
+            "BYTES" => BigQueryFieldType::Bytes {
+                max_length: params.max_length().map_err(at)?,
+            },
+            "DATE" => BigQueryFieldType::Date,
+            "TIME" => BigQueryFieldType::Time,
+            "DATETIME" => BigQueryFieldType::DateTime,
+            "TIMESTAMP" => params.timestamp().map_err(at)?,
+            "GEOGRAPHY" => BigQueryFieldType::Geography,
+            "JSON" => BigQueryFieldType::Json,
+            "INTERVAL" => BigQueryFieldType::Interval,
+            "RANGE" => BigQueryFieldType::Range(
+                BigQueryRangeElementType::parse(
+                    field.range_element_type.as_ref().map(|e| e.r#type.as_str()),
+                )
                 .map_err(at)?,
-        ),
-        StorageType::Unspecified => {
-            return Err(at(CodecError::unsupported("TYPE_UNSPECIFIED".to_string())))
-        }
-    };
-    let mode = match StorageMode::try_from(field.mode) {
-        Ok(StorageMode::Unspecified | StorageMode::Nullable) => BigQueryFieldMode::Nullable,
-        Ok(StorageMode::Required) => BigQueryFieldMode::Required,
-        Ok(StorageMode::Repeated) => BigQueryFieldMode::Repeated,
-        Err(_) => {
-            return Err(at(CodecError::unsupported(format!(
-                "Storage API column mode {} is not supported",
-                field.mode
-            ))))
-        }
-    };
-    Ok(BigQueryFieldSchema {
-        name: field.name.clone(),
-        field_type,
-        mode,
-        description: field.description.clone().non_empty(),
-        default_value_expression: field.default_value_expression.clone().non_empty(),
-    })
+            ),
+            "RECORD" | "STRUCT" => BigQueryFieldType::Struct(
+                field
+                    .fields
+                    .iter()
+                    .map(BigQueryFieldSchema::from_v2)
+                    .collect::<Result<_, _>>()
+                    .map_err(at)?,
+            ),
+            other => {
+                return Err(at(CodecError::unsupported(format!(
+                    "column type `{other}` is not supported"
+                ))))
+            }
+        };
+        let mode = BigQueryFieldMode::parse(&field.mode).ok_or_else(|| {
+            at(CodecError::unsupported(format!(
+                "column mode `{}` is not supported",
+                field.mode.to_ascii_uppercase()
+            )))
+        })?;
+        Ok(BigQueryFieldSchema {
+            name: field.name.clone(),
+            field_type,
+            mode,
+            description: field.description.clone().filter(|v| !v.is_empty()),
+            default_value_expression: field
+                .default_value_expression
+                .clone()
+                .filter(|v| !v.is_empty()),
+        })
+    }
+
+    /// One Storage API column, as [`BigQueryFieldSchema::from_v2`].
+    fn from_storage(field: &storage::TableFieldSchema) -> Result<BigQueryFieldSchema, CodecError> {
+        let at = |err: CodecError| err.at_field(&field.name);
+        let params = TypeParams {
+            max_length: field.max_length,
+            precision: field.precision,
+            scale: field.scale,
+            timestamp_precision: field.timestamp_precision,
+        };
+        let field_type = match storage_type(field.r#type).map_err(at)? {
+            StorageType::Int64 => BigQueryFieldType::Int64,
+            StorageType::Double => BigQueryFieldType::Float64,
+            StorageType::Bool => BigQueryFieldType::Bool,
+            StorageType::Numeric => BigQueryFieldType::Numeric(params.decimal().map_err(at)?),
+            StorageType::Bignumeric => BigQueryFieldType::BigNumeric(params.decimal().map_err(at)?),
+            StorageType::String => BigQueryFieldType::String {
+                max_length: params.max_length().map_err(at)?,
+            },
+            StorageType::Bytes => BigQueryFieldType::Bytes {
+                max_length: params.max_length().map_err(at)?,
+            },
+            StorageType::Date => BigQueryFieldType::Date,
+            StorageType::Time => BigQueryFieldType::Time,
+            StorageType::Datetime => BigQueryFieldType::DateTime,
+            StorageType::Timestamp => params.timestamp().map_err(at)?,
+            StorageType::Geography => BigQueryFieldType::Geography,
+            StorageType::Json => BigQueryFieldType::Json,
+            StorageType::Interval => BigQueryFieldType::Interval,
+            StorageType::Range => {
+                let element = field
+                    .range_element_type
+                    .as_ref()
+                    .map(|e| storage_type(e.r#type).map(|ty| ty.as_str_name()))
+                    .transpose()
+                    .map_err(at)?;
+                BigQueryFieldType::Range(BigQueryRangeElementType::parse(element).map_err(at)?)
+            }
+            StorageType::Struct => BigQueryFieldType::Struct(
+                field
+                    .fields
+                    .iter()
+                    .map(BigQueryFieldSchema::from_storage)
+                    .collect::<Result<_, _>>()
+                    .map_err(at)?,
+            ),
+            StorageType::Unspecified => {
+                return Err(at(CodecError::unsupported("TYPE_UNSPECIFIED".to_string())))
+            }
+        };
+        let mode = match StorageMode::try_from(field.mode) {
+            Ok(StorageMode::Unspecified | StorageMode::Nullable) => BigQueryFieldMode::Nullable,
+            Ok(StorageMode::Required) => BigQueryFieldMode::Required,
+            Ok(StorageMode::Repeated) => BigQueryFieldMode::Repeated,
+            Err(_) => {
+                return Err(at(CodecError::unsupported(format!(
+                    "Storage API column mode {} is not supported",
+                    field.mode
+                ))))
+            }
+        };
+        Ok(BigQueryFieldSchema {
+            name: field.name.clone(),
+            field_type,
+            mode,
+            description: Some(field.description.clone()).filter(|v| !v.is_empty()),
+            default_value_expression: Some(field.default_value_expression.clone())
+                .filter(|v| !v.is_empty()),
+        })
+    }
 }
 
 /// The schema of `GetWriteStream` and `CreateWriteStream`. A type the crate does not handle is
@@ -340,7 +341,7 @@ impl TryFrom<&storage::TableSchema> for BigQueryTableSchema {
         schema
             .fields
             .iter()
-            .map(field_from_storage)
+            .map(BigQueryFieldSchema::from_storage)
             .collect::<Result<_, _>>()
             .map(|fields| BigQueryTableSchema { fields })
             .map_err(CodecError::into_deserialize)
@@ -357,7 +358,7 @@ impl TryFrom<&v2::TableSchema> for BigQueryTableSchema {
         schema
             .fields
             .iter()
-            .map(field_from_v2)
+            .map(BigQueryFieldSchema::from_v2)
             .collect::<Result<_, _>>()
             .map(|fields| BigQueryTableSchema { fields })
             .map_err(CodecError::into_deserialize)
@@ -368,7 +369,7 @@ impl From<&BigQueryFieldSchema> for v2::TableFieldSchema {
     fn from(field: &BigQueryFieldSchema) -> Self {
         let mut out = v2::TableFieldSchema {
             name: field.name.clone(),
-            r#type: BqKind::from(&field.field_type).name().to_string(),
+            r#type: FieldKind::from(&field.field_type).name().to_string(),
             mode: field.mode.name().to_string(),
             description: field.description.clone(),
             default_value_expression: field.default_value_expression.clone(),
@@ -426,97 +427,101 @@ impl BigQueryTableSchema {
         schema
             .fields()
             .iter()
-            .map(|field| field_from_arrow(field))
+            .map(|field| BigQueryFieldSchema::from_arrow_field(field))
             .collect::<Result<_, _>>()
             .map(|fields| BigQueryTableSchema { fields })
             .map_err(CodecError::into_deserialize)
     }
 }
 
-fn field_from_arrow(field: &Field) -> Result<BigQueryFieldSchema, CodecError> {
-    let at = |err: CodecError| err.at_field(field.name());
-    let (element, kind, mode) = match field.data_type() {
-        DataType::List(item) => (
-            item.as_ref(),
-            BqKind::from_arrow_list_item(field, item),
-            BigQueryFieldMode::Repeated,
-        ),
-        _ => (
-            field,
-            BqKind::from_arrow(field),
-            if field.is_nullable() {
-                BigQueryFieldMode::Nullable
-            } else {
-                BigQueryFieldMode::Required
-            },
-        ),
-    };
-    let kind = kind.ok_or_else(|| {
-        at(CodecError::unsupported(format!(
-            "Arrow type {} is not one BigQuery sends",
-            element.data_type()
-        )))
-    })?;
-    let field_type = match kind {
-        BqKind::Int64 => BigQueryFieldType::Int64,
-        BqKind::Float64 => BigQueryFieldType::Float64,
-        BqKind::Bool => BigQueryFieldType::Bool,
-        BqKind::String => BigQueryFieldType::String { max_length: None },
-        BqKind::Bytes => BigQueryFieldType::Bytes { max_length: None },
-        BqKind::Date => BigQueryFieldType::Date,
-        BqKind::Time => BigQueryFieldType::Time,
-        BqKind::DateTime => BigQueryFieldType::DateTime,
-        BqKind::Timestamp => BigQueryFieldType::Timestamp,
-        BqKind::Numeric => BigQueryFieldType::Numeric(None),
-        BqKind::BigNumeric => BigQueryFieldType::BigNumeric(None),
-        BqKind::Geography => BigQueryFieldType::Geography,
-        BqKind::Json => BigQueryFieldType::Json,
-        BqKind::Interval => BigQueryFieldType::Interval,
-        BqKind::Range => BigQueryFieldType::Range(range_element_from_arrow(element).map_err(at)?),
-        BqKind::Struct => match element.data_type() {
-            DataType::Struct(children) => BigQueryFieldType::Struct(
-                children
-                    .iter()
-                    .map(|child| field_from_arrow(child))
-                    .collect::<Result<_, _>>()
-                    .map_err(at)?,
+impl BigQueryFieldSchema {
+    fn from_arrow_field(field: &Field) -> Result<BigQueryFieldSchema, CodecError> {
+        let at = |err: CodecError| err.at_field(field.name());
+        let (element, kind, mode) = match field.data_type() {
+            DataType::List(item) => (
+                item.as_ref(),
+                FieldKind::from_arrow_list_item(field, item),
+                BigQueryFieldMode::Repeated,
             ),
-            other => {
-                return Err(at(CodecError::unsupported(format!(
-                    "Arrow type {other} is not a STRUCT"
-                ))))
-            }
-        },
-    };
-    Ok(BigQueryFieldSchema {
-        name: field.name().clone(),
-        field_type,
-        mode,
-        description: None,
-        default_value_expression: None,
-    })
-}
-
-fn range_element_from_arrow(range: &Field) -> Result<BigQueryRangeElementType, CodecError> {
-    let start = match range.data_type() {
-        DataType::Struct(children) => children.iter().find(|child| child.name() == "start"),
-        _ => None,
-    };
-    match start.map(|start| start.data_type()) {
-        Some(DataType::Date32) => Ok(BigQueryRangeElementType::Date),
-        Some(DataType::Timestamp(TimeUnit::Microsecond, None)) => {
-            Ok(BigQueryRangeElementType::DateTime)
-        }
-        Some(DataType::Timestamp(TimeUnit::Microsecond, Some(_))) => {
-            Ok(BigQueryRangeElementType::Timestamp)
-        }
-        other => Err(CodecError::unsupported(format!(
-            "a RANGE whose start is {other:?} is not one BigQuery sends"
-        ))),
+            _ => (
+                field,
+                FieldKind::from_arrow(field),
+                if field.is_nullable() {
+                    BigQueryFieldMode::Nullable
+                } else {
+                    BigQueryFieldMode::Required
+                },
+            ),
+        };
+        let kind = kind.ok_or_else(|| {
+            at(CodecError::unsupported(format!(
+                "Arrow type {} is not one BigQuery sends",
+                element.data_type()
+            )))
+        })?;
+        let field_type = match kind {
+            FieldKind::Int64 => BigQueryFieldType::Int64,
+            FieldKind::Float64 => BigQueryFieldType::Float64,
+            FieldKind::Bool => BigQueryFieldType::Bool,
+            FieldKind::String => BigQueryFieldType::String { max_length: None },
+            FieldKind::Bytes => BigQueryFieldType::Bytes { max_length: None },
+            FieldKind::Date => BigQueryFieldType::Date,
+            FieldKind::Time => BigQueryFieldType::Time,
+            FieldKind::DateTime => BigQueryFieldType::DateTime,
+            FieldKind::Timestamp => BigQueryFieldType::Timestamp,
+            FieldKind::Numeric => BigQueryFieldType::Numeric(None),
+            FieldKind::BigNumeric => BigQueryFieldType::BigNumeric(None),
+            FieldKind::Geography => BigQueryFieldType::Geography,
+            FieldKind::Json => BigQueryFieldType::Json,
+            FieldKind::Interval => BigQueryFieldType::Interval,
+            FieldKind::Range => BigQueryFieldType::Range(
+                BigQueryRangeElementType::from_arrow_range(element).map_err(at)?,
+            ),
+            FieldKind::Struct => match element.data_type() {
+                DataType::Struct(children) => BigQueryFieldType::Struct(
+                    children
+                        .iter()
+                        .map(|child| BigQueryFieldSchema::from_arrow_field(child))
+                        .collect::<Result<_, _>>()
+                        .map_err(at)?,
+                ),
+                other => {
+                    return Err(at(CodecError::unsupported(format!(
+                        "Arrow type {other} is not a STRUCT"
+                    ))))
+                }
+            },
+        };
+        Ok(BigQueryFieldSchema {
+            name: field.name().clone(),
+            field_type,
+            mode,
+            description: None,
+            default_value_expression: None,
+        })
     }
 }
 
 impl BigQueryRangeElementType {
+    fn from_arrow_range(range: &Field) -> Result<BigQueryRangeElementType, CodecError> {
+        let start = match range.data_type() {
+            DataType::Struct(children) => children.iter().find(|child| child.name() == "start"),
+            _ => None,
+        };
+        match start.map(|start| start.data_type()) {
+            Some(DataType::Date32) => Ok(BigQueryRangeElementType::Date),
+            Some(DataType::Timestamp(TimeUnit::Microsecond, None)) => {
+                Ok(BigQueryRangeElementType::DateTime)
+            }
+            Some(DataType::Timestamp(TimeUnit::Microsecond, Some(_))) => {
+                Ok(BigQueryRangeElementType::Timestamp)
+            }
+            other => Err(CodecError::unsupported(format!(
+                "a RANGE whose start is {other:?} is not one BigQuery sends"
+            ))),
+        }
+    }
+
     /// The element type a v2 or Storage API `range_element_type` names, in any case; `None` is
     /// a RANGE that names none.
     fn parse(name: Option<&str>) -> Result<Self, CodecError> {
@@ -546,7 +551,7 @@ impl Display for BigQueryRangeElementType {
 
 impl Display for BigQueryFieldType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let name = BqKind::from(self).name();
+        let name = FieldKind::from(self).name();
         match self {
             BigQueryFieldType::String {
                 max_length: Some(n),

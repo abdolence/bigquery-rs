@@ -215,7 +215,7 @@ impl BigQuerySchemaChange {
     }
 }
 
-fn opt<T: fmt::Debug>(value: &Option<T>) -> String {
+fn debug_or_none<T: fmt::Debug>(value: &Option<T>) -> String {
     value
         .as_ref()
         .map_or_else(|| "none".to_string(), |v| format!("{v:?}"))
@@ -251,16 +251,28 @@ impl Display for BigQuerySchemaChange {
             SetColumnDescription { path, from, to } => write!(
                 f,
                 "[patch] description of `{path}`: {} to {to:?}",
-                opt(from)
+                debug_or_none(from)
             ),
             SetColumnDefault { path, from, to } => {
-                write!(f, "[patch] default of `{path}`: {} to {to}", opt(from))
+                write!(
+                    f,
+                    "[patch] default of `{path}`: {} to {to}",
+                    debug_or_none(from)
+                )
             }
             SetDescription { from, to } => {
-                write!(f, "[patch] table description: {} to {to:?}", opt(from))
+                write!(
+                    f,
+                    "[patch] table description: {} to {to:?}",
+                    debug_or_none(from)
+                )
             }
             SetLabel { key, from, to } => {
-                write!(f, "[patch] label {key:?}: {} to {to:?}", opt(from))
+                write!(
+                    f,
+                    "[patch] label {key:?}: {} to {to:?}",
+                    debug_or_none(from)
+                )
             }
             SetExpiration { from, to } => write!(
                 f,

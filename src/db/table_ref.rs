@@ -160,8 +160,8 @@ impl Display for BigQueryDatasetRef {
 ///
 /// let parsed: BigQueryTableRef = "acme-prod.shop.orders".parse()?;
 /// assert_eq!(parsed.project(), Some("acme-prod"));
-/// assert_eq!(parsed.dataset(), "shop");
-/// assert_eq!(parsed.table(), "orders");
+/// assert_eq!(parsed.dataset(), &SHOP);
+/// assert_eq!(parsed.table(), &ORDERS);
 /// # Ok::<(), bigquery::errors::BigQueryError>(())
 /// ```
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
@@ -327,8 +327,8 @@ mod tests {
             .parse()
             .expect("valid test input");
         assert_eq!(parsed.project(), Some("example.com:proj"));
-        assert_eq!(parsed.dataset(), "shop");
-        assert_eq!(parsed.table(), "orders");
+        assert_eq!(parsed.dataset(), &SHOP);
+        assert_eq!(parsed.table(), &ORDERS);
         assert_eq!(parsed.to_string(), "example.com:proj.shop.orders");
 
         let dataset: BigQueryDatasetRef = "example.com:proj.shop".parse().expect("valid input");
@@ -344,9 +344,9 @@ mod tests {
             ("shop.ord`ers", "table_id"),
             (".orders", "dataset_id"),
             ("sh/op.orders", "dataset_id"),
-            ("p..orders", "dataset_id"),
+            ("acme-prod..orders", "dataset_id"),
             (".shop.orders", "project_id"),
-            ("p.shop.orders.", "table_id"),
+            ("acme-prod.shop.orders.", "table_id"),
         ];
         for (text, field) in cases {
             assert_eq!(
@@ -378,12 +378,12 @@ mod tests {
     #[test]
     fn a_v2_table_reference_is_validated() {
         let good = TableReference {
-            project_id: "p".into(),
+            project_id: "acme-prod".into(),
             dataset_id: "shop".into(),
             table_id: "orders".into(),
         };
         let table = BigQueryTableRef::try_from(good.clone()).expect("valid test input");
-        assert_eq!(table.to_string(), "p.shop.orders");
+        assert_eq!(table.to_string(), "acme-prod.shop.orders");
 
         let bad = TableReference {
             dataset_id: "sh/op".into(),
@@ -430,10 +430,10 @@ mod tests {
             SHOP.table(ORDERS).table_path("default-p"),
             "projects/default-p/datasets/shop/tables/orders"
         );
-        let other = BigQueryDatasetRef::new("p", SHOP).expect("valid test input");
+        let other = BigQueryDatasetRef::new("acme-prod", SHOP).expect("valid test input");
         assert_eq!(
             other.table(ORDERS).table_path("default-p"),
-            "projects/p/datasets/shop/tables/orders"
+            "projects/acme-prod/datasets/shop/tables/orders"
         );
     }
 }

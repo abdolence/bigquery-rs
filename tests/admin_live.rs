@@ -6,11 +6,12 @@ use bigquery::*;
 use futures::{FutureExt, StreamExt};
 use std::panic::AssertUnwindSafe;
 
+#[path = "support/common.rs"]
 mod common;
 use common::*;
 
-const T: BigQueryTableId = BigQueryTableId::from_static("t");
-const U: BigQueryTableId = BigQueryTableId::from_static("u");
+const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+const CUSTOMERS: BigQueryTableId = BigQueryTableId::from_static("customers");
 
 fn columns(c: BigQuerySchemaColumnsBuilder) -> Vec<BigQuerySchemaColumn> {
     c.fields([c.field("id").int64().required(), c.field("name").string()])
@@ -27,8 +28,9 @@ async fn create_table(db: &BigQueryDb, table: BigQueryTableRef) -> TestResult {
 }
 
 async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> TestResult {
-    let schema = || db.fluent().schema();
-    let created = schema()
+    let created = db
+        .fluent()
+        .schema()
         .dataset(dataset.clone())
         .create()
         .location(BigQueryLocation::from_static("EU"))
@@ -39,12 +41,14 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
     assert_eq!(created.reference.project(), Some(project));
     assert_eq!(created.location, Some(BigQueryLocation::from_static("EU")));
 
-    let read = schema().dataset(dataset.clone()).get().await?;
+    let read = db.fluent().schema().dataset(dataset.clone()).get().await?;
     assert_eq!(read.description.as_deref(), Some("scratch"));
     assert_eq!(read.labels.get("purpose"), Some("bq_admin_live"));
     assert!(read.creation_time.is_some());
 
-    let listed = schema()
+    let listed = db
+        .fluent()
+        .schema()
         .datasets()
         .stream_all_with_errors()
         .await?
@@ -60,7 +64,9 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         .ok_or("the scratch dataset is not listed")??;
     assert_eq!(listed.location, Some(BigQueryLocation::from_static("EU")));
 
-    let updated = schema()
+    let updated = db
+        .fluent()
+        .schema()
         .dataset(dataset.clone())
         .update()
         .remove_label("purpose")
@@ -72,20 +78,26 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         updated.labels.into_iter().collect::<Vec<_>>(),
         [("stage".to_string(), "updated".to_string())]
     );
-    let read = schema().dataset(dataset.clone()).get().await?;
+    let read = db.fluent().schema().dataset(dataset.clone()).get().await?;
     assert_eq!(read.description.as_deref(), Some("updated scratch"));
-    schema()
+    db.fluent()
+        .schema()
         .dataset(dataset.clone())
         .update()
         .clear_description()
         .execute()
         .await?;
-    let read = schema().dataset(dataset.clone()).get().await?;
+    let read = db.fluent().schema().dataset(dataset.clone()).get().await?;
     assert_eq!(read.description, None);
 
-    create_table(db, dataset.table(T)).await?;
-    create_table(db, dataset.table(U)).await?;
-    let table = schema().table(dataset.table(T)).get().await?;
+    create_table(db, dataset.table(ORDERS)).await?;
+    create_table(db, dataset.table(CUSTOMERS)).await?;
+    let table = db
+        .fluent()
+        .schema()
+        .table(dataset.table(ORDERS))
+        .get()
+        .await?;
     assert_eq!(table.table_type, Some(BigQueryTableType::Table));
     let types: Vec<_> = table
         .schema
@@ -106,22 +118,24 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
     );
     assert_eq!(table.num_rows, Some(0));
     assert_eq!(table.location, Some(BigQueryLocation::from_static("EU")));
-    let mut tables: Vec<_> = schema()
+    let mut tables: Vec<_> = db
+        .fluent()
+        .schema()
         .dataset(dataset.clone())
         .tables()
         .stream_all_with_errors()
         .await?
-        .map(|t| t.map(|t| t.reference.table().to_string()))
+        .map(|t| t.map(|t| t.reference.table().clone()))
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<_, _>>()?;
     tables.sort();
-    assert_eq!(tables, ["t", "u"]);
+    assert_eq!(tables, [CUSTOMERS, ORDERS]);
 
     let outcome = db
         .fluent()
-        .query(format!("SELECT COUNT(*) FROM `{dataset}.t`"))
+        .query(format!("SELECT COUNT(*) FROM `{dataset}.{ORDERS}`"))
         .execute()
         .await?;
     let job_ref = outcome.job.ok_or("the query reported no job")?;
@@ -158,19 +172,28 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         Err(BigQueryError::DataNotFoundError(_))
     ));
 
-    schema().table(dataset.table(T)).delete().await?;
+    db.fluent()
+        .schema()
+        .table(dataset.table(ORDERS))
+        .delete()
+        .await?;
     assert!(matches!(
-        schema().table(dataset.table(T)).get().await,
+        db.fluent()
+            .schema()
+            .table(dataset.table(ORDERS))
+            .get()
+            .await,
         Err(BigQueryError::DataNotFoundError(_))
     ));
-    let refused = schema().dataset(dataset.clone()).delete().await;
+    let refused = db.fluent().schema().dataset(dataset.clone()).delete().await;
     assert!(refused.is_err(), "a dataset holding a table was deleted");
-    schema()
+    db.fluent()
+        .schema()
         .dataset(dataset.clone())
         .dangerously_delete_with_contents()
         .await?;
     assert!(matches!(
-        schema().dataset(dataset.clone()).get().await,
+        db.fluent().schema().dataset(dataset.clone()).get().await,
         Err(BigQueryError::DataNotFoundError(_))
     ));
     Ok(())

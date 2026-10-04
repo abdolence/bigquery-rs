@@ -6,8 +6,9 @@ use futures::TryStreamExt;
 use gcloud_sdk::google::cloud::bigquery::v2 as bq;
 use serde::{Deserialize, Serialize};
 
+#[path = "support/common.rs"]
 mod common;
-use common::{with_scratch, TestResult, RUN_LABEL};
+use common::{with_scratch, Scratch, TestResult, RUN_LABEL};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Pair {
@@ -249,18 +250,20 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
     .await
 }
 
+/// `sql` with the scratch dataset as its default dataset, labelled with the run.
+fn scratch_query<'a>(l: &'a Scratch, sql: &str) -> BigQueryQueryBuilder<'a, BigQueryDb> {
+    l.db.fluent()
+        .query(sql.to_string())
+        .default_dataset(l.dataset.clone())
+        .label(RUN_LABEL, l.dataset.as_str())
+}
+
 #[tokio::test]
 async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
     with_scratch(
         "dml_counts_labels_and_dry_run_on_a_scratch_table",
         async |l| {
-            let run = |sql: &str| {
-                l.db.fluent()
-                    .query(sql.to_string())
-                    .default_dataset(l.dataset.clone())
-                    .label(RUN_LABEL, l.dataset.as_str())
-            };
-            let created = run("CREATE TABLE t (id INT64, name STRING)")
+            let created = scratch_query(l, "CREATE TABLE t (id INT64, name STRING)")
                 .execute()
                 .await?;
             assert_eq!(
@@ -268,9 +271,10 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 Some(BigQueryStatementType::CreateTable)
             );
 
-            let inserted = run("INSERT t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')")
-                .execute()
-                .await?;
+            let inserted =
+                scratch_query(l, "INSERT t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+                    .execute()
+                    .await?;
             assert_eq!(inserted.statement_type, Some(BigQueryStatementType::Insert));
             assert_eq!(inserted.num_dml_affected_rows, Some(3));
             assert_eq!(
@@ -282,7 +286,7 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 })
             );
 
-            let updated = run("UPDATE t SET name = @name WHERE id <= @max")
+            let updated = scratch_query(l, "UPDATE t SET name = @name WHERE id <= @max")
                 .param("name", "z")
                 .param("max", 2)
                 .execute()
@@ -290,7 +294,7 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
             assert_eq!(updated.num_dml_affected_rows, Some(2));
             assert_eq!(updated.dml_stats.map(|s| s.updated), Some(2));
 
-            let deleted = run("DELETE t WHERE id = 3").execute().await?;
+            let deleted = scratch_query(l, "DELETE t WHERE id = 3").execute().await?;
             assert_eq!(deleted.dml_stats.map(|s| s.deleted), Some(1));
 
             let job = deleted.job.ok_or("a DML statement runs as a job")?;
@@ -314,7 +318,7 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 Some(l.dataset.as_str())
             );
 
-            let estimate = run("SELECT id, name FROM t").dry_run().await?;
+            let estimate = scratch_query(l, "SELECT id, name FROM t").dry_run().await?;
             assert!(
                 estimate.total_bytes_processed.is_some_and(|b| b > 0),
                 "{estimate:?}"
@@ -330,7 +334,7 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 id: i64,
                 name: String,
             }
-            let rows: Vec<Row> = run("SELECT id, name FROM t ORDER BY id")
+            let rows: Vec<Row> = scratch_query(l, "SELECT id, name FROM t ORDER BY id")
                 .obj::<Row>()
                 .query()
                 .await?;
@@ -356,16 +360,15 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
 #[tokio::test]
 async fn injection_payloads_stay_data() -> TestResult {
     with_scratch("injection_payloads_stay_data", async |l| {
-        let run = |sql: &str| {
-            l.db.fluent()
-                .query(sql.to_string())
-                .default_dataset(l.dataset.clone())
-                .label(RUN_LABEL, l.dataset.as_str())
-        };
-        run("CREATE TABLE people (name STRING)").execute().await?;
-        run("INSERT people (name) VALUES ('Åsa'), ('Linnéa'), ('Olle')")
+        scratch_query(l, "CREATE TABLE people (name STRING)")
             .execute()
             .await?;
+        scratch_query(
+            l,
+            "INSERT people (name) VALUES ('Åsa'), ('Linnéa'), ('Olle')",
+        )
+        .execute()
+        .await?;
 
         #[derive(Deserialize, Debug, PartialEq)]
         struct Echo {
@@ -385,20 +388,20 @@ async fn injection_payloads_stay_data() -> TestResult {
             "Åsa' OR TRUE --",
             "\\'; DELETE people WHERE TRUE; --",
         ] {
-            let echoed: Vec<Echo> = run("SELECT @v AS v")
+            let echoed: Vec<Echo> = scratch_query(l, "SELECT @v AS v")
                 .param("v", payload)
                 .obj::<Echo>()
                 .query()
                 .await?;
             assert_eq!(echoed, [Echo { v: payload.into() }], "{payload:?}");
-            let matched: Vec<Person> = run("SELECT name FROM people WHERE name = @v")
+            let matched: Vec<Person> = scratch_query(l, "SELECT name FROM people WHERE name = @v")
                 .param("v", payload)
                 .obj::<Person>()
                 .query()
                 .await?;
             assert_eq!(matched, [], "{payload:?}");
         }
-        let count: Vec<Count> = run("SELECT COUNT(*) AS n FROM people")
+        let count: Vec<Count> = scratch_query(l, "SELECT COUNT(*) AS n FROM people")
             .obj::<Count>()
             .query()
             .await?;

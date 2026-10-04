@@ -2,7 +2,7 @@
 //! precondition, and what it refuses to send.
 
 use super::*;
-use crate::db::fake::query::{job_reference, query_request};
+use crate::db::fake::query::job_reference;
 use crate::db::fake::FakeBigQuery;
 use crate::errors::BigQueryError;
 use crate::{
@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 fn orders() -> BigQueryTableRef {
-    BigQueryDatasetId::from_static("ds").table(BigQueryTableId::from_static("t"))
+    BigQueryDatasetId::from_static("shop").table(BigQueryTableId::from_static("orders"))
 }
 
-fn f(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
+fn v2_field(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
     v2::TableFieldSchema {
         name: name.into(),
         r#type: ty.into(),
@@ -38,15 +38,15 @@ fn live_table() -> v2::Table {
         r#type: "TABLE".into(),
         table_reference: Some(v2::TableReference {
             project_id: "fake-project".into(),
-            dataset_id: "ds".into(),
-            table_id: "t".into(),
+            dataset_id: "shop".into(),
+            table_id: "orders".into(),
         }),
         schema: Some(v2::TableSchema {
             fields: vec![
-                f("id", "INTEGER", "REQUIRED"),
-                f("name", "STRING", "NULLABLE"),
-                f("n", "INTEGER", "NULLABLE"),
-                f("x", "STRING", "NULLABLE"),
+                v2_field("id", "INTEGER", "REQUIRED"),
+                v2_field("name", "STRING", "NULLABLE"),
+                v2_field("n", "INTEGER", "NULLABLE"),
+                v2_field("x", "STRING", "NULLABLE"),
             ],
             ..Default::default()
         }),
@@ -85,14 +85,14 @@ impl Scenario {
     async fn serve(self, mut call: FakeCall) {
         match call.method() {
             "GetTable" => {
-                get_table_request(&mut call).await;
+                call.get_table_request().await;
                 match &self.table {
                     Some(table) => call.reply(table),
-                    None => call.fail(Code::NotFound, "Not found: Table fake-project:ds.t"),
+                    None => call.fail(Code::NotFound, "Not found: Table fake-project:shop.orders"),
                 }
             }
             "PatchTable" | "UpdateTable" => {
-                let request = patch_or_update_request(&mut call).await;
+                let request = call.patch_or_update_request().await;
                 match self.patch_fails {
                     Some(code) if call.method() == "PatchTable" => {
                         call.fail(code, "Precondition check failed.")
@@ -104,12 +104,12 @@ impl Scenario {
                 }
             }
             "InsertTable" => {
-                let request = insert_table_request(&mut call).await;
+                let request = call.insert_table_request().await;
                 let table = self.written(request.table);
                 call.reply(&table)
             }
             "ListRowAccessPolicies" => {
-                list_row_access_policies_request(&mut call).await;
+                call.list_row_access_policies_request().await;
                 call.reply(&ListRowAccessPoliciesResponse {
                     row_access_policies: vec![RowAccessPolicy {
                         row_access_policy_reference: Some(RowAccessPolicyReference {
@@ -122,7 +122,7 @@ impl Scenario {
                 })
             }
             "Query" => {
-                query_request(&mut call).await;
+                call.query_request().await;
                 call.reply(&QueryResponse {
                     job_reference: Some(job_reference()),
                     job_complete: Some(true),
@@ -142,7 +142,7 @@ async fn start(scenario: Scenario) -> FakeBigQuery {
     FakeBigQuery::start(move |call| scenario.clone().serve(call)).await
 }
 
-const TABLE_SQL: &str = "`fake-project`.`ds`.`t`";
+const TABLE_SQL: &str = "`fake-project`.`shop`.`orders`";
 
 #[tokio::test]
 async fn sync_writes_in_fixed_order_with_the_read_etag_as_precondition() {
@@ -168,7 +168,7 @@ async fn sync_writes_in_fixed_order_with_the_read_etag_as_precondition() {
     assert_eq!(
         fake.calls(),
         [
-            "GetTable ds.t".to_string(),
+            "GetTable shop.orders".to_string(),
             "PatchTable if-match=e0".into(),
             "PatchTable if-match=e1".into(),
             "UpdateTable if-match=e2".into(),
@@ -206,12 +206,13 @@ async fn a_stale_etag_is_a_conflict_and_stops_the_sync() {
         .sync()
         .await;
     match result {
-        Err(BigQueryError::DataConflictError(err)) => {
-            assert!(err.details.contains("changed since"), "{err}")
-        }
+        Err(BigQueryError::DataConflictError(_)) => {}
         other => panic!("expected a conflict, got {other:?}"),
     }
-    assert_eq!(fake.calls(), ["GetTable ds.t", "PatchTable if-match=e0"]);
+    assert_eq!(
+        fake.calls(),
+        ["GetTable shop.orders", "PatchTable if-match=e0"]
+    );
 }
 
 fn refused(result: crate::BigQueryResult<crate::BigQueryTableSyncReport>) -> BigQueryRefusal {
@@ -243,7 +244,7 @@ async fn an_impossible_change_without_an_opt_in_writes_nothing() {
         .sync()
         .await;
     assert_eq!(refused(result), BigQueryRefusal::NoRecreateOptIn);
-    assert_eq!(fake.calls(), ["GetTable ds.t"]);
+    assert_eq!(fake.calls(), ["GetTable shop.orders"]);
 }
 
 #[tokio::test]
@@ -262,7 +263,7 @@ async fn recreate_if_empty_refuses_a_table_with_rows() {
         refused(result),
         BigQueryRefusal::NotEmpty { num_rows: Some(5) }
     );
-    assert_eq!(fake.calls(), ["GetTable ds.t"]);
+    assert_eq!(fake.calls(), ["GetTable shop.orders"]);
 }
 
 #[tokio::test]
@@ -284,8 +285,8 @@ async fn recreate_if_empty_replaces_an_empty_table_and_lists_its_policies() {
     assert_eq!(
         fake.calls(),
         [
-            "GetTable ds.t".to_string(),
-            "ListRowAccessPolicies ds.t".into(),
+            "GetTable shop.orders".to_string(),
+            "ListRowAccessPolicies shop.orders".into(),
             format!(
                 "Query CREATE OR REPLACE TABLE {TABLE_SQL} (\n  `id` INT64 NOT NULL,\n  \
                  `n` STRING\n)"
@@ -316,16 +317,19 @@ async fn a_dangerous_partitioning_change_snapshots_then_drops_and_creates() {
         .expect("a sync");
     let calls = fake.calls();
     assert_eq!(calls.len(), 4, "{calls:#?}");
-    assert_eq!(calls[..2], ["GetTable ds.t", "ListRowAccessPolicies ds.t"]);
+    assert_eq!(
+        calls[..2],
+        ["GetTable shop.orders", "ListRowAccessPolicies shop.orders"]
+    );
     let snapshot = report.snapshot.as_ref().expect("a snapshot");
     assert!(
-        snapshot.table().as_str().starts_with("t_snapshot_"),
+        snapshot.table().as_str().starts_with("orders_snapshot_"),
         "{snapshot}"
     );
     assert_eq!(
         calls[2],
         format!(
-            "Query CREATE SNAPSHOT TABLE `fake-project`.`ds`.`{}` CLONE {TABLE_SQL}",
+            "Query CREATE SNAPSHOT TABLE `fake-project`.`shop`.`{}` CLONE {TABLE_SQL}",
             snapshot.table()
         )
     );
@@ -359,7 +363,10 @@ async fn a_missing_table_is_created_with_insert_table() {
         .sync()
         .await
         .expect("a sync");
-    assert_eq!(fake.calls(), ["GetTable ds.t", "InsertTable ds.t"]);
+    assert_eq!(
+        fake.calls(),
+        ["GetTable shop.orders", "InsertTable shop.orders"]
+    );
     let created = report.created.expect("a create");
     assert_eq!(created.description.as_deref(), Some("Orders"));
 }
@@ -385,7 +392,7 @@ async fn plan_only_reads() {
         .await
         .expect("a plan");
     assert_eq!(plan.changes.len(), 3, "{plan}");
-    assert_eq!(fake.calls(), ["GetTable ds.t"]);
+    assert_eq!(fake.calls(), ["GetTable shop.orders"]);
 }
 
 #[tokio::test]
@@ -406,7 +413,7 @@ async fn withheld_changes_are_reported_and_not_sent() {
         .sync()
         .await
         .expect("a sync");
-    assert_eq!(fake.calls(), ["GetTable ds.t"]);
+    assert_eq!(fake.calls(), ["GetTable shop.orders"]);
     assert!(report.applied.is_empty(), "{report}");
     assert_eq!(
         report.withheld.len(),

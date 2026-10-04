@@ -6,7 +6,9 @@ use base64::Engine;
 use bigquery::*;
 use serde::{Deserialize, Serialize};
 
+#[path = "support/common.rs"]
 mod common;
+#[path = "support/read_common.rs"]
 mod read_common;
 use common::{with_scratch, Scratch, TestResult};
 use read_common::run_sql;
@@ -249,11 +251,11 @@ fn bounded<T>(start: T, end: T) -> BigQueryRange<T> {
     }
 }
 
-fn opt<T>(keep: bool, v: T) -> Option<T> {
+fn present_if<T>(keep: bool, v: T) -> Option<T> {
     keep.then_some(v)
 }
 
-fn arr<T>(len: i64, f: impl Fn(i64) -> T) -> Vec<T> {
+fn array_of<T>(len: i64, f: impl Fn(i64) -> T) -> Vec<T> {
     (0..len).map(f).collect()
 }
 
@@ -289,52 +291,55 @@ fn every_type_rows() -> Vec<EveryType> {
             };
             EveryType {
                 id,
-                n_int64: opt(keep, id * 1_000),
+                n_int64: present_if(keep, id * 1_000),
                 r_int64: -id,
-                a_int64: arr(len, |k| id + k),
-                n_float64: opt(keep, id as f64 * 0.25),
+                a_int64: array_of(len, |k| id + k),
+                n_float64: present_if(keep, id as f64 * 0.25),
                 r_float64: -(id as f64) * 1.5,
-                a_float64: arr(len, |k| k as f64 / 8.0),
-                n_numeric: opt(keep, format!("{id}.5")),
+                a_float64: array_of(len, |k| k as f64 / 8.0),
+                n_numeric: present_if(keep, format!("{id}.5")),
                 r_numeric: format!("-{id}.000000001"),
-                a_numeric: arr(len, |k| format!("{}", id * 100 + k)),
-                n_bignumeric: opt(keep, format!("{id}.00000000000000000000000000000000000001")),
+                a_numeric: array_of(len, |k| format!("{}", id * 100 + k)),
+                n_bignumeric: present_if(
+                    keep,
+                    format!("{id}.00000000000000000000000000000000000001"),
+                ),
                 r_bignumeric: format!("{}", id * 7),
-                a_bignumeric: arr(len, |k| format!("-{k}.25")),
-                n_bool: opt(keep, id % 2 == 0),
+                a_bignumeric: array_of(len, |k| format!("-{k}.25")),
+                n_bool: present_if(keep, id % 2 == 0),
                 r_bool: id % 2 == 1,
-                a_bool: arr(len, |k| k == 0),
-                n_string: opt(keep, names[i % names.len()].to_string()),
+                a_bool: array_of(len, |k| k == 0),
+                n_string: present_if(keep, names[i % names.len()].to_string()),
                 r_string: format!("rad {id}"),
-                a_string: arr(len, |k| format!("{}{k}", names[i % names.len()])),
-                n_bytes: opt(keep, vec![id as u8, 255]),
+                a_string: array_of(len, |k| format!("{}{k}", names[i % names.len()])),
+                n_bytes: present_if(keep, vec![id as u8, 255]),
                 r_bytes: (0..id as u8).collect(),
-                a_bytes: arr(len, |k| vec![k as u8; k as usize]),
-                n_date: opt(keep, date(0)),
+                a_bytes: array_of(len, |k| vec![k as u8; k as usize]),
+                n_date: present_if(keep, date(0)),
                 r_date: date(1),
-                a_date: arr(len, date),
-                n_time: opt(keep, time(0)),
+                a_date: array_of(len, date),
+                n_time: present_if(keep, time(0)),
                 r_time: time(1),
-                a_time: arr(len, time),
-                n_datetime: opt(keep, datetime(0)),
+                a_time: array_of(len, time),
+                n_datetime: present_if(keep, datetime(0)),
                 r_datetime: datetime(1),
-                a_datetime: arr(len, datetime),
-                n_timestamp: opt(keep, timestamp(0)),
+                a_datetime: array_of(len, datetime),
+                n_timestamp: present_if(keep, timestamp(0)),
                 r_timestamp: timestamp(1),
-                a_timestamp: arr(len, timestamp),
-                n_geography: opt(keep, format!("POINT({id} 59)")),
+                a_timestamp: array_of(len, timestamp),
+                n_geography: present_if(keep, format!("POINT({id} 59)")),
                 r_geography: format!("POINT(18 {id})"),
-                a_geography: arr(len, |k| format!("POINT({k} {id})")),
-                n_json: opt(
+                a_geography: array_of(len, |k| format!("POINT({k} {id})")),
+                n_json: present_if(
                     keep,
                     serde_json::json!({"stad": names[i % names.len()], "n": id}),
                 ),
                 r_json: serde_json::json!([id, null, true]),
-                a_json: arr(len, |k| serde_json::json!({"k": k})),
-                n_interval: opt(keep, interval(0)),
+                a_json: array_of(len, |k| serde_json::json!({"k": k})),
+                n_interval: present_if(keep, interval(0)),
                 r_interval: interval(1),
-                a_interval: arr(len, interval),
-                n_range_date: opt(
+                a_interval: array_of(len, interval),
+                n_range_date: present_if(
                     keep,
                     BigQueryRange {
                         start: Some(date(0)),
@@ -342,11 +347,11 @@ fn every_type_rows() -> Vec<EveryType> {
                     },
                 ),
                 r_range_date: bounded(date(0), date(1)),
-                a_range_date: arr(len, |k| BigQueryRange {
+                a_range_date: array_of(len, |k| BigQueryRange {
                     start: None,
                     end: Some(date(k)),
                 }),
-                n_range_datetime: opt(
+                n_range_datetime: present_if(
                     keep,
                     BigQueryRange {
                         start: None,
@@ -354,8 +359,8 @@ fn every_type_rows() -> Vec<EveryType> {
                     },
                 ),
                 r_range_datetime: bounded(datetime(0), datetime(1)),
-                a_range_datetime: arr(len, |k| bounded(datetime(k), datetime(k + 1))),
-                n_range_timestamp: opt(
+                a_range_datetime: array_of(len, |k| bounded(datetime(k), datetime(k + 1))),
+                n_range_timestamp: present_if(
                     keep,
                     BigQueryRange {
                         start: Some(timestamp(0)),
@@ -363,10 +368,10 @@ fn every_type_rows() -> Vec<EveryType> {
                     },
                 ),
                 r_range_timestamp: bounded(timestamp(0), timestamp(1)),
-                a_range_timestamp: arr(len, |k| bounded(timestamp(k), timestamp(k + 1))),
-                n_struct: opt(keep, pair(0)),
+                a_range_timestamp: array_of(len, |k| bounded(timestamp(k), timestamp(k + 1))),
+                n_struct: present_if(keep, pair(0)),
                 r_struct: pair(1),
-                a_struct: arr(len, pair),
+                a_struct: array_of(len, pair),
             }
         })
         .collect()

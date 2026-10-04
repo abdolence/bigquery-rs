@@ -11,13 +11,13 @@ use crate::{
 };
 use std::collections::HashMap;
 
-const C: BigQuerySchemaColumnsBuilder = BigQuerySchemaColumnsBuilder;
+const COLUMNS: BigQuerySchemaColumnsBuilder = BigQuerySchemaColumnsBuilder;
 
 fn table_ref() -> BigQueryTableRef {
-    BigQueryDatasetId::from_static("ds").table(BigQueryTableId::from_static("t"))
+    BigQueryDatasetId::from_static("shop").table(BigQueryTableId::from_static("orders"))
 }
 
-fn f(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
+fn v2_field(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
     v2::TableFieldSchema {
         name: name.into(),
         r#type: ty.into(),
@@ -26,10 +26,10 @@ fn f(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
     }
 }
 
-fn rec(name: &str, fields: Vec<v2::TableFieldSchema>) -> v2::TableFieldSchema {
+fn v2_record(name: &str, fields: Vec<v2::TableFieldSchema>) -> v2::TableFieldSchema {
     v2::TableFieldSchema {
         fields,
-        ..f(name, "RECORD", "NULLABLE")
+        ..v2_field(name, "RECORD", "NULLABLE")
     }
 }
 
@@ -38,21 +38,23 @@ fn rec(name: &str, fields: Vec<v2::TableFieldSchema>) -> v2::TableFieldSchema {
 /// DDL-created columns on `n`.
 fn base_fields() -> Vec<v2::TableFieldSchema> {
     vec![
-        f("id", "INTEGER", "REQUIRED"),
-        f("name", "STRING", "REQUIRED"),
-        rec("rec", vec![f("a", "INTEGER", "NULLABLE")]),
-        f("n", "INTEGER", ""),
-        f("s", "STRING", "NULLABLE"),
+        v2_field("id", "INTEGER", "REQUIRED"),
+        v2_field("name", "STRING", "REQUIRED"),
+        v2_record("rec", vec![v2_field("a", "INTEGER", "NULLABLE")]),
+        v2_field("n", "INTEGER", ""),
+        v2_field("s", "STRING", "NULLABLE"),
     ]
 }
 
 fn base_columns() -> Vec<BigQuerySchemaColumn> {
     vec![
-        C.field("id").int64().required(),
-        C.field("name").string().required(),
-        C.field("rec").record(|r| r.fields([r.field("a").int64()])),
-        C.field("n").int64(),
-        C.field("s").string(),
+        COLUMNS.field("id").int64().required(),
+        COLUMNS.field("name").string().required(),
+        COLUMNS
+            .field("rec")
+            .record(|r| r.fields([r.field("a").int64()])),
+        COLUMNS.field("n").int64(),
+        COLUMNS.field("s").string(),
     ]
 }
 
@@ -81,8 +83,8 @@ fn declare(
 }
 
 fn plan_against(declaration: &BigQueryTableDeclaration, table: v2::Table) -> BigQueryTablePlan {
-    let live = LiveTable::try_from(table).expect("a table the crate models");
-    declaration.plan(table_ref(), Some(&live))
+    let existing = ExistingTable::try_from(table).expect("a table the crate models");
+    declaration.plan(table_ref(), Some(&existing))
 }
 
 fn plan(columns: Vec<BigQuerySchemaColumn>, table: v2::Table) -> BigQueryTablePlan {
@@ -143,12 +145,12 @@ fn a_type_parameter_is_part_of_the_type() {
     let mut fields = base_fields();
     fields[4].max_length = 10;
     let mut columns = base_columns();
-    columns[4] = C.field("s").string_with_max_length(10);
+    columns[4] = COLUMNS.field("s").string_with_max_length(10);
     let same = plan(columns, raw(fields.clone()));
     assert!(same.is_empty(), "{same}");
 
     let mut columns = base_columns();
-    columns[4] = C.field("s").string();
+    columns[4] = COLUMNS.field("s").string();
     let unbounded = plan(columns, raw(fields));
     assert_eq!(
         unbounded.withheld,
@@ -169,7 +171,7 @@ fn a_type_parameter_is_part_of_the_type() {
 #[test]
 fn add_nullable_column_is_a_patch() {
     let plan = plan(
-        with(base_columns(), C.field("c_null").string()),
+        with(base_columns(), COLUMNS.field("c_null").string()),
         raw(base_fields()),
     );
     assert_only_change(
@@ -184,7 +186,7 @@ fn add_nullable_column_is_a_patch() {
 #[test]
 fn add_repeated_column_is_a_patch() {
     let plan = plan(
-        with(base_columns(), C.field("c_rep").int64().repeated()),
+        with(base_columns(), COLUMNS.field("c_rep").int64().repeated()),
         raw(base_fields()),
     );
     assert_only_change(
@@ -203,7 +205,7 @@ fn add_repeated_column_is_a_patch() {
 #[test]
 fn add_nullable_field_inside_an_existing_record_is_a_patch() {
     let mut columns = base_columns();
-    columns[2] = C
+    columns[2] = COLUMNS
         .field("rec")
         .record(|r| r.fields([r.field("a").int64(), r.field("b").string()]));
     let plan = plan(columns, raw(base_fields()));
@@ -221,7 +223,8 @@ fn add_record_column_is_a_patch() {
     let plan = plan(
         with(
             base_columns(),
-            C.field("addr")
+            COLUMNS
+                .field("addr")
                 .record(|r| r.fields([r.field("city").string()])),
         ),
         raw(base_fields()),
@@ -244,7 +247,7 @@ fn add_column_with_default_is_added_first_and_defaulted_by_a_second_patch() {
     let plan = plan(
         with(
             base_columns(),
-            C.field("c_def").string().default_value("'x'"),
+            COLUMNS.field("c_def").string().default_value("'x'"),
         ),
         raw(base_fields()),
     );
@@ -284,7 +287,7 @@ fn add_column_with_default_is_added_first_and_defaulted_by_a_second_patch() {
 #[test]
 fn set_default_on_existing_column_is_a_patch() {
     let mut columns = base_columns();
-    columns[4] = C.field("s").string().default_value("'dflt'");
+    columns[4] = COLUMNS.field("s").string().default_value("'dflt'");
     let plan = plan(columns, raw(base_fields()));
     assert_only_change(
         &plan,
@@ -310,7 +313,7 @@ fn set_default_on_existing_column_is_a_patch() {
 #[test]
 fn relax_required_to_nullable_is_a_patch() {
     let mut columns = base_columns();
-    columns[1] = C.field("name").string();
+    columns[1] = COLUMNS.field("name").string();
     let plan = plan(columns, raw(base_fields()));
     assert_only_change(
         &plan,
@@ -334,7 +337,7 @@ fn column_description_patch_carries_every_column_and_its_description() {
         names: vec!["projects/p/locations/us/taxonomies/1/policyTags/2".into()],
     });
     let mut columns = base_columns();
-    columns[4] = C.field("s").string().description("s-desc");
+    columns[4] = COLUMNS.field("s").string().description("s-desc");
     let plan = plan(columns, raw(fields.clone()));
     assert_only_change(
         &plan,
@@ -472,7 +475,7 @@ fn expirations_finer_than_a_millisecond_match_the_table() {
     }
     let at = jiff::Timestamp::from_nanosecond(1_900_000_000_123_456_789).expect("a timestamp");
     let plan = plan_against(
-        &declare(with(base_columns(), C.field("ts").timestamp()), |d| {
+        &declare(with(base_columns(), COLUMNS.field("ts").timestamp()), |d| {
             d.partitioning = Some(day_on_ts());
             d.partition_expiration = Some(std::time::Duration::from_nanos(86_400_000_999_999));
             d.expiration = Some(at);
@@ -488,7 +491,7 @@ fn partitioned(table: &mut v2::Table) {
         .as_mut()
         .expect("a schema")
         .fields
-        .push(f("ts", "TIMESTAMP", "NULLABLE"));
+        .push(v2_field("ts", "TIMESTAMP", "NULLABLE"));
     table.time_partitioning = Some(v2::TimePartitioning {
         r#type: "DAY".into(),
         expiration_ms: None,
@@ -508,7 +511,7 @@ fn partition_expiration_is_a_patch_restating_the_partitioning() {
     let mut table = raw(base_fields());
     partitioned(&mut table);
     let plan = plan_against(
-        &declare(with(base_columns(), C.field("ts").timestamp()), |d| {
+        &declare(with(base_columns(), COLUMNS.field("ts").timestamp()), |d| {
             d.partitioning = Some(day_on_ts());
             d.partition_expiration = Some(std::time::Duration::from_secs(86_400));
         }),
@@ -676,9 +679,11 @@ fn drop_column_is_ddl_with_prune_and_withheld_without() {
 #[test]
 fn drop_nested_field_is_impossible_with_prune_and_withheld_without() {
     let mut columns = base_columns();
-    columns[2] = C.field("rec").record(|r| r.fields([r.field("b").string()]));
+    columns[2] = COLUMNS
+        .field("rec")
+        .record(|r| r.fields([r.field("b").string()]));
     let mut fields = base_fields();
-    fields[2].fields.push(f("b", "STRING", "NULLABLE"));
+    fields[2].fields.push(v2_field("b", "STRING", "NULLABLE"));
     let drop = BigQuerySchemaChange::DropNestedField {
         path: "rec.a".into(),
         field_type: BigQueryFieldType::Int64,
@@ -699,7 +704,7 @@ fn drop_nested_field_is_impossible_with_prune_and_withheld_without() {
 #[test]
 fn widening_is_ddl_with_allow_widening_and_withheld_without() {
     let mut columns = base_columns();
-    columns[3] = C.field("n").numeric();
+    columns[3] = COLUMNS.field("n").numeric();
     let widen = BigQuerySchemaChange::WidenColumn {
         column: "n".into(),
         from: BigQueryFieldType::Int64,
@@ -732,7 +737,7 @@ fn widening_string_length_is_ddl() {
     let mut fields = base_fields();
     fields[4].max_length = 10;
     let mut columns = base_columns();
-    columns[4] = C.field("s").string_with_max_length(20);
+    columns[4] = COLUMNS.field("s").string_with_max_length(20);
     let plan = plan_against(&declare(columns, |d| d.allow_widening = true), raw(fields));
     assert_only_change(
         &plan,
@@ -751,7 +756,7 @@ fn widening_string_length_is_ddl() {
 #[test]
 fn rename_is_ddl_and_a_no_op_once_done() {
     let mut columns = base_columns();
-    columns[4] = C.field("s2").string().renamed_from("s");
+    columns[4] = COLUMNS.field("s2").string().renamed_from("s");
     let rename = plan(columns.clone(), raw(base_fields()));
     assert_only_change(
         &rename,
@@ -801,7 +806,7 @@ fn narrowing_is_impossible() {
     let mut fields = base_fields();
     fields[4].max_length = 20;
     let mut columns = base_columns();
-    columns[4] = C.field("s").string_with_max_length(5);
+    columns[4] = COLUMNS.field("s").string_with_max_length(5);
     let plan_string = plan_against(&declare(columns, |d| d.allow_widening = true), raw(fields));
     assert_impossible(
         &plan_string,
@@ -820,8 +825,8 @@ fn narrowing_is_impossible() {
 #[test]
 fn other_type_changes_are_impossible_even_with_allow_widening() {
     for (declared, to) in [
-        (C.field("n").string(), STRING),
-        (C.field("n").float64(), BigQueryFieldType::Float64),
+        (COLUMNS.field("n").string(), STRING),
+        (COLUMNS.field("n").float64(), BigQueryFieldType::Float64),
     ] {
         let mut columns = base_columns();
         columns[3] = declared;
@@ -844,11 +849,11 @@ fn other_type_changes_are_impossible_even_with_allow_widening() {
 fn nullable_to_required_or_repeated_is_impossible() {
     for (declared, mode) in [
         (
-            C.field("s").string().required(),
+            COLUMNS.field("s").string().required(),
             BigQueryFieldMode::Required,
         ),
         (
-            C.field("s").string().repeated(),
+            COLUMNS.field("s").string().repeated(),
             BigQueryFieldMode::Repeated,
         ),
     ] {
@@ -869,7 +874,7 @@ fn nullable_to_required_or_repeated_is_impossible() {
 #[test]
 fn adding_a_required_column_is_impossible() {
     let plan = plan(
-        with(base_columns(), C.field("r").string().required()),
+        with(base_columns(), COLUMNS.field("r").string().required()),
         raw(base_fields()),
     );
     assert_impossible(
@@ -883,14 +888,14 @@ fn adding_a_required_column_is_impossible() {
 
 #[test]
 fn adding_or_changing_partitioning_is_impossible() {
-    let columns = with(base_columns(), C.field("ts").timestamp());
+    let columns = with(base_columns(), COLUMNS.field("ts").timestamp());
     let mut unpartitioned = raw(base_fields());
     unpartitioned
         .schema
         .as_mut()
         .expect("a schema")
         .fields
-        .push(f("ts", "TIMESTAMP", "NULLABLE"));
+        .push(v2_field("ts", "TIMESTAMP", "NULLABLE"));
     let add = plan_against(
         &declare(columns.clone(), |d| d.partitioning = Some(day_on_ts())),
         unpartitioned,
@@ -927,11 +932,17 @@ fn changes_are_planned_in_write_order() {
     let mut table = raw(base_fields());
     table.labels = HashMap::from([("old".to_string(), "x".to_string())]);
     let columns = vec![
-        C.field("id").int64().required(),
-        C.field("name2").string().required().renamed_from("name"),
-        C.field("rec").record(|r| r.fields([r.field("a").int64()])),
-        C.field("n").numeric(),
-        C.field("c").string(),
+        COLUMNS.field("id").int64().required(),
+        COLUMNS
+            .field("name2")
+            .string()
+            .required()
+            .renamed_from("name"),
+        COLUMNS
+            .field("rec")
+            .record(|r| r.fields([r.field("a").int64()])),
+        COLUMNS.field("n").numeric(),
+        COLUMNS.field("c").string(),
     ];
     let plan = plan_against(
         &declare(columns, |d| {
@@ -983,7 +994,7 @@ fn a_missing_table_is_created_as_declared() {
 
 fn impossible_columns() -> Vec<BigQuerySchemaColumn> {
     let mut columns = base_columns();
-    columns[3] = C.field("n").string();
+    columns[3] = COLUMNS.field("n").string();
     columns
 }
 
@@ -1029,7 +1040,7 @@ fn dangerous_recreate_with_a_partitioning_change_drops_and_creates() {
         column: Some("ts".into()),
     };
     let plan = plan_against(
-        &declare(with(base_columns(), C.field("ts").timestamp()), |d| {
+        &declare(with(base_columns(), COLUMNS.field("ts").timestamp()), |d| {
             d.partitioning = Some(month.clone());
             d.recreate = Some(BigQueryRecreatePolicy::DangerouslyWithDataLoss);
         }),

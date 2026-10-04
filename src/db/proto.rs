@@ -1,29 +1,10 @@
-//! The proto3 field conventions of the v2 and Storage APIs, in both directions: an empty
-//! string or list is unset, and a time or a duration is an integer count of milliseconds.
+//! The proto3 field conventions of the v2 and Storage APIs, in both directions: a time or a
+//! duration is an integer count of milliseconds.
 
 use crate::errors::BigQueryError;
 use crate::types::error::CodecError;
 use crate::{BigQueryInstant, BigQueryResult};
 use std::time::Duration;
-
-/// A proto3 field that is unset when it is empty, as optional strings and lists are on the
-/// wire.
-pub(crate) trait NonEmpty: Sized {
-    /// `None` for an empty value, which is how proto3 sends an unset one.
-    fn non_empty(self) -> Option<Self>;
-}
-
-impl NonEmpty for String {
-    fn non_empty(self) -> Option<Self> {
-        (!self.is_empty()).then_some(self)
-    }
-}
-
-impl<T> NonEmpty for Vec<T> {
-    fn non_empty(self) -> Option<Self> {
-        (!self.is_empty()).then_some(self)
-    }
-}
 
 /// `d` in whole milliseconds as the integer type of the request field `field`.
 ///

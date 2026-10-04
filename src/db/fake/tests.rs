@@ -28,16 +28,16 @@ async fn unary_call_is_answered_and_logged() {
         .db
         .table_client()
         .get_table(GetTableRequest {
-            project_id: "p".into(),
-            dataset_id: "ds".into(),
-            table_id: "t".into(),
+            project_id: "acme-prod".into(),
+            dataset_id: "shop".into(),
+            table_id: "orders".into(),
             ..Default::default()
         })
         .await
         .expect("the fake server answers")
         .into_inner();
-    assert_eq!(table.id, "p:ds.t");
-    assert_eq!(fake.calls(), ["GetTable ds.t"]);
+    assert_eq!(table.id, "acme-prod:shop.orders");
+    assert_eq!(fake.calls(), ["GetTable shop.orders"]);
 }
 
 #[tokio::test]
@@ -160,7 +160,7 @@ async fn dropped_connection_is_a_retryable_transport_error() {
 #[tokio::test]
 async fn failure_before_any_message_is_visible_at_the_call() {
     let fake = FakeBigQuery::start(|call: FakeCall| async move {
-        call.fail(Code::NotFound, "Not found: Table p:ds.t");
+        call.fail(Code::NotFound, "Not found: Table p:shop.orders");
     })
     .await;
     let status = fake
@@ -170,7 +170,7 @@ async fn failure_before_any_message_is_visible_at_the_call() {
         .await
         .expect_err("the call must fail");
     assert_eq!(status.code(), Code::NotFound);
-    assert_eq!(status.message(), "Not found: Table p:ds.t");
+    assert_eq!(status.message(), "Not found: Table p:shop.orders");
 }
 
 #[tokio::test]

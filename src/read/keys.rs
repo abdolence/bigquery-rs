@@ -16,7 +16,7 @@
 //! looks aliased and is read with name keys, which is correct and slightly slower.
 
 use crate::errors::BigQueryCodecErrorKind;
-use crate::read::decoder::{Node, ValueDe};
+use crate::read::decoder::{StructColumns, ValueDeserializer};
 use crate::types::error::CodecError;
 use serde::de::value::{BorrowedStrDeserializer, U64Deserializer};
 use serde::de::{DeserializeSeed, MapAccess, Visitor};
@@ -86,7 +86,7 @@ impl Plan {
 
 /// The keys of one struct value, in the order the plan gives them.
 pub(crate) struct FieldMap<'n, 'a> {
-    node: &'n Node<'a>,
+    node: &'n StructColumns<'a>,
     plan: &'n Plan,
     fields: &'static [&'static str],
     row: usize,
@@ -114,7 +114,7 @@ enum Pending {
 
 impl<'n, 'a> FieldMap<'n, 'a> {
     pub(crate) fn new(
-        node: &'n Node<'a>,
+        node: &'n StructColumns<'a>,
         plan: &'n Plan,
         fields: &'static [&'static str],
         row: usize,
@@ -238,16 +238,16 @@ impl<'a> MapAccess<'a> for FieldMap<'_, 'a> {
                 let c = self.plan.keys[k as usize].1 as usize;
                 let value = self
                     .node
-                    .col(c)
-                    .and_then(|col| seed.deserialize(ValueDe::new(col, self.row)));
+                    .column(c)
+                    .and_then(|column| seed.deserialize(ValueDeserializer::new(column, self.row)));
                 (c, value)
             }
             Pending::Probe(k) => {
                 let c = self.plan.keys[k as usize].1 as usize;
-                let value = self.node.col(c).and_then(|col| {
+                let value = self.node.column(c).and_then(|column| {
                     seed.deserialize(ProbeValue {
                         map: self,
-                        value: ValueDe::new(col, self.row),
+                        value: ValueDeserializer::new(column, self.row),
                     })
                 });
                 (c, value)
@@ -270,7 +270,7 @@ impl<'a> MapAccess<'a> for FieldMap<'_, 'a> {
 /// numbering; asked for as anything else, it was the last field, and the column is read.
 struct ProbeValue<'m, 'n, 'a> {
     map: &'m FieldMap<'n, 'a>,
-    value: ValueDe<'n, 'a>,
+    value: ValueDeserializer<'n, 'a>,
 }
 
 macro_rules! forward_to_value {
@@ -380,8 +380,8 @@ impl<'a> serde::Deserializer<'a> for Unknown<'_, '_, 'a> {
     type Error = CodecError;
 
     fn deserialize_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        let col = self.map.node.col(self.c)?;
-        ValueDe::new(col, self.map.row).deserialize_any(v)
+        let column = self.map.node.column(self.c)?;
+        ValueDeserializer::new(column, self.map.row).deserialize_any(v)
     }
 
     fn deserialize_ignored_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {

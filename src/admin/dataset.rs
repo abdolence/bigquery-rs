@@ -2,7 +2,7 @@
 
 use crate::admin::paged;
 use crate::db::if_match;
-use crate::db::proto::{duration_ms, millis, timestamp_ms, NonEmpty};
+use crate::db::proto::{duration_ms, millis, timestamp_ms};
 use crate::errors::BigQueryError;
 use crate::BigQueryInstant;
 use crate::{BigQueryDatasetRef, BigQueryDb, BigQueryResult};
@@ -60,8 +60,8 @@ impl TryFrom<v2::Dataset> for BigQueryDataset {
         Ok(Self {
             reference: dataset_reference(dataset.dataset_reference)?,
             location: BigQueryLocation::reported(dataset.location),
-            friendly_name: dataset.friendly_name.and_then(NonEmpty::non_empty),
-            description: dataset.description.and_then(NonEmpty::non_empty),
+            friendly_name: dataset.friendly_name.filter(|v| !v.is_empty()),
+            description: dataset.description.filter(|v| !v.is_empty()),
             labels: dataset.labels.into_iter().collect(),
             default_table_expiration: duration_ms(
                 "default_table_expiration_ms",
@@ -87,7 +87,7 @@ impl TryFrom<v2::ListFormatDataset> for BigQueryDatasetSummary {
         Ok(Self {
             reference: dataset_reference(dataset.dataset_reference)?,
             location: BigQueryLocation::reported(dataset.location),
-            friendly_name: dataset.friendly_name.and_then(NonEmpty::non_empty),
+            friendly_name: dataset.friendly_name.filter(|v| !v.is_empty()),
             labels: dataset.labels.into_iter().collect(),
         })
     }

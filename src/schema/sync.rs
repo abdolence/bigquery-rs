@@ -5,7 +5,7 @@ use crate::db::if_match;
 use crate::db::proto::millis;
 use crate::db::TableIds;
 use crate::errors::{BigQueryError, BigQuerySchemaChangeRefusedError};
-use crate::schema::live::LiveTable;
+use crate::schema::existing::ExistingTable;
 use crate::schema::plan::ChangeStep;
 use crate::{
     BigQueryDatasetRef, BigQueryDb, BigQueryDroppedData, BigQueryPartitioning, BigQueryQueryParams,
@@ -53,11 +53,11 @@ impl BigQueryDb {
         table.ids(&self.options().google_project_id)
     }
 
-    async fn get_live_table(
+    async fn get_existing_table(
         &self,
         table: &BigQueryTableRef,
         span: &Span,
-    ) -> BigQueryResult<Option<LiveTable>> {
+    ) -> BigQueryResult<Option<ExistingTable>> {
         let ids = self.ids(table);
         let request = v2::GetTableRequest {
             project_id: ids.project,
@@ -72,7 +72,7 @@ impl BigQueryDb {
             })
             .await;
         match result {
-            Ok(table) => Ok(Some(LiveTable::try_from(table)?)),
+            Ok(table) => Ok(Some(ExistingTable::try_from(table)?)),
             Err(BigQueryError::DataNotFoundError(_)) => Ok(None),
             Err(err) => Err(err),
         }
@@ -117,14 +117,14 @@ impl BigQueryDb {
         &self,
         declaration: &BigQueryTableDeclaration,
         span: &Span,
-    ) -> BigQueryResult<(BigQueryTablePlan, Option<LiveTable>)> {
+    ) -> BigQueryResult<(BigQueryTablePlan, Option<ExistingTable>)> {
         let table = self.resolved(&declaration.table)?;
-        let live = self.get_live_table(&table, span).await?;
-        let mut plan = declaration.plan(table, live.as_ref());
+        let existing = self.get_existing_table(&table, span).await?;
+        let mut plan = declaration.plan(table, existing.as_ref());
         if let Some(recreate) = &mut plan.recreate {
             recreate.row_access_policies = self.row_access_policies(&plan.table, span).await?;
         }
-        Ok((plan, live))
+        Ok((plan, existing))
     }
 
     /// Sends a `PatchTable` or `UpdateTable` guarded by `etag`, and returns the table it wrote.
@@ -251,13 +251,13 @@ impl BigQueryDb {
     async fn apply_in_place(
         &self,
         plan: &BigQueryTablePlan,
-        live: LiveTable,
+        existing: ExistingTable,
         report: &mut BigQueryTableSyncReport,
         span: &Span,
     ) -> BigQueryResult<()> {
         let table = &plan.table;
         let mut pacer = Pacer { sent: 0 };
-        let mut latest = live.raw;
+        let mut latest = existing.raw;
         if let Some(body) = plan.patch_body(&latest)? {
             pacer.next().await;
             latest = self
@@ -397,7 +397,7 @@ impl BigQueryDb {
         declaration: BigQueryTableDeclaration,
     ) -> BigQueryResult<BigQueryTableSyncReport> {
         let span = declaration.table.schema_span();
-        let (plan, live) = self.planned(&declaration, &span).await?;
+        let (plan, existing) = self.planned(&declaration, &span).await?;
         if plan.refusal.is_some() {
             return Err(BigQueryError::SchemaChangeRefused(Box::new(
                 BigQuerySchemaChangeRefusedError { plan },
@@ -405,7 +405,7 @@ impl BigQueryDb {
         }
         let mut report = BigQueryTableSyncReport::new(plan.table.clone());
         report.withheld.clone_from(&plan.withheld);
-        let result = match (&plan.create, &plan.recreate, live) {
+        let result = match (&plan.create, &plan.recreate, existing) {
             (Some(target), _, _) => {
                 let created = self.create_table(&plan.table, target, &span).await;
                 if created.is_ok() {
@@ -415,7 +415,10 @@ impl BigQueryDb {
                 created
             }
             (None, Some(recreate), _) => self.recreate(&plan.table, recreate, &mut report).await,
-            (None, None, Some(live)) => self.apply_in_place(&plan, live, &mut report, &span).await,
+            (None, None, Some(existing)) => {
+                self.apply_in_place(&plan, existing, &mut report, &span)
+                    .await
+            }
             (None, None, None) => Ok(()),
         };
         if let Err(err) = result {

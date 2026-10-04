@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn default_endpoints_are_the_two_google_hosts() {
-        let options = BigQueryDbOptions::new("p".to_string());
+        let options = BigQueryDbOptions::new("acme-prod".to_string());
         assert_eq!(
             options.effective_bigquery_api_url().host_str(),
             Some("bigquery.googleapis.com")

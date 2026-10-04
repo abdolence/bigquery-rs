@@ -20,9 +20,9 @@ use crate::types::decimal::{self, BIGNUMERIC_SCALE, NUMERIC_SCALE, TAG_DECIMAL};
 use crate::types::error::CodecError;
 use crate::types::interval::{BigQueryInterval, TAG_INTERVAL};
 use crate::types::json::TAG_JSON;
-use crate::types::kind::BqKind;
-use crate::types::temporal::{capture_int, temporal_tag_kind};
-use crate::write::descriptor::{FieldPlan, MsgPlan, WritePlan};
+use crate::types::kind::FieldKind;
+use crate::types::temporal::{capture_integer, temporal_tag_kind};
+use crate::write::descriptor::{FieldPlan, MessagePlan, WritePlan};
 use crate::{BigQueryChangeSequenceNumber, BigQueryChangeType};
 use arrow_buffer::i256;
 use serde::ser::{self, Impossible, Serialize};
@@ -57,7 +57,7 @@ impl FieldPlan {
 }
 
 const NOT_A_ROW: &str = "a row must serialize as a struct or a map";
-const NOT_A_SEQ: &str = "a REPEATED field takes a sequence";
+const NOT_A_SEQUENCE: &str = "a REPEATED field takes a sequence";
 const NOT_A_KEY: &str = "a map key must be a string";
 
 /// A JSON column's value that `serde_json` could not build.
@@ -131,7 +131,7 @@ impl Encoder {
             out.truncate(start);
             return Err(err);
         }
-        let mut st = St {
+        let mut output = RowOutput {
             out,
             caches: &mut self.caches,
             scratch: &mut self.scratch,
@@ -140,11 +140,11 @@ impl Encoder {
             BigQueryChangeType::Upsert => "UPSERT",
             BigQueryChangeType::Delete => "DELETE",
         };
-        st.put(cdc.change_type.get());
-        st.len_delim(change_type.as_bytes());
+        output.put(cdc.change_type.get());
+        output.length_delimited(change_type.as_bytes());
         if let Some(sequence_number) = sequence_number {
-            st.put(cdc.sequence_number.get());
-            st.len_delim(sequence_number.as_str().as_bytes());
+            output.put(cdc.sequence_number.get());
+            output.length_delimited(sequence_number.as_str().as_bytes());
         }
         Ok(())
     }
@@ -154,26 +154,26 @@ impl Encoder {
         row: &T,
         out: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        let mut st = St {
+        let mut output = RowOutput {
             out,
             caches: &mut self.caches,
             scratch: &mut self.scratch,
         };
-        row.serialize(RowSer {
-            st: &mut st,
-            msg: &self.plan.root,
+        row.serialize(RowSerializer {
+            output: &mut output,
+            message: &self.plan.root,
         })
     }
 }
 
 /// The output buffer and the encoder's reusable state, borrowed for one row.
-struct St<'e> {
+struct RowOutput<'e> {
     out: &'e mut Vec<u8>,
     caches: &'e mut [KeyCache],
     scratch: &'e mut String,
 }
 
-impl St<'_> {
+impl RowOutput<'_> {
     #[inline]
     fn put(&mut self, b: &[u8]) {
         self.out.extend_from_slice(b);
@@ -195,7 +195,7 @@ impl St<'_> {
     }
 
     #[inline]
-    fn len_delim(&mut self, b: &[u8]) {
+    fn length_delimited(&mut self, b: &[u8]) {
         self.varint(b.len() as u64);
         self.put(b);
     }
@@ -231,20 +231,20 @@ macro_rules! reject {
 }
 
 /// The top-level row: a struct or a map.
-struct RowSer<'r, 'e, 'p> {
-    st: &'r mut St<'e>,
-    msg: &'p MsgPlan,
+struct RowSerializer<'r, 'e, 'p> {
+    output: &'r mut RowOutput<'e>,
+    message: &'p MessagePlan,
 }
 
-impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
+impl<'r, 'e, 'p> ser::Serializer for RowSerializer<'r, 'e, 'p> {
     type Ok = ();
     type Error = CodecError;
     type SerializeSeq = Impossible<(), CodecError>;
     type SerializeTuple = Impossible<(), CodecError>;
     type SerializeTupleStruct = Impossible<(), CodecError>;
     type SerializeTupleVariant = Impossible<(), CodecError>;
-    type SerializeMap = MsgSer<'r, 'e, 'p>;
-    type SerializeStruct = MsgSer<'r, 'e, 'p>;
+    type SerializeMap = MessageSerializer<'r, 'e, 'p>;
+    type SerializeStruct = MessageSerializer<'r, 'e, 'p>;
     type SerializeStructVariant = Impossible<(), CodecError>;
 
     fn serialize_struct(
@@ -252,11 +252,11 @@ impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, CodecError> {
-        Ok(MsgSer::new(self.st, self.msg, None))
+        Ok(MessageSerializer::new(self.output, self.message, None))
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
-        Ok(MsgSer::new(self.st, self.msg, None))
+        Ok(MessageSerializer::new(self.output, self.message, None))
     }
 
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
@@ -327,7 +327,7 @@ impl<'r, 'e, 'p> ser::Serializer for RowSer<'r, 'e, 'p> {
     }
 }
 
-impl MsgPlan {
+impl MessagePlan {
     fn field_index(&self, key: &str) -> Result<usize, CodecError> {
         self.index_of(key).ok_or_else(|| {
             CodecError::new(
@@ -340,9 +340,9 @@ impl MsgPlan {
 }
 
 /// One message: the row, a STRUCT or a RANGE.
-struct MsgSer<'r, 'e, 'p> {
-    st: &'r mut St<'e>,
-    msg: &'p MsgPlan,
+struct MessageSerializer<'r, 'e, 'p> {
+    output: &'r mut RowOutput<'e>,
+    message: &'p MessagePlan,
     /// The payload mark of a nested message; `None` for the row itself.
     mark: Option<usize>,
     cursor: usize,
@@ -350,11 +350,11 @@ struct MsgSer<'r, 'e, 'p> {
     map_key: Option<usize>,
 }
 
-impl<'r, 'e, 'p> MsgSer<'r, 'e, 'p> {
-    fn new(st: &'r mut St<'e>, msg: &'p MsgPlan, mark: Option<usize>) -> Self {
-        MsgSer {
-            st,
-            msg,
+impl<'r, 'e, 'p> MessageSerializer<'r, 'e, 'p> {
+    fn new(output: &'r mut RowOutput<'e>, message: &'p MessagePlan, mark: Option<usize>) -> Self {
+        MessageSerializer {
+            output,
+            message,
             mark,
             cursor: 0,
             seen: 0,
@@ -367,13 +367,13 @@ impl<'r, 'e, 'p> MsgSer<'r, 'e, 'p> {
         let k = self.cursor;
         self.cursor += 1;
         let ptr = key.as_ptr() as usize;
-        let cache = &mut self.st.caches[self.msg.id];
+        let cache = &mut self.output.caches[self.message.id];
         if let Some(&(p, l, idx)) = cache.get(k) {
             if p == ptr && l == key.len() {
                 return Ok(idx as usize);
             }
         }
-        let idx = self.msg.field_index(key)?;
+        let idx = self.message.field_index(key)?;
         let entry = (ptr, key.len(), idx as u32);
         match k.cmp(&cache.len()) {
             std::cmp::Ordering::Less => cache[k] = entry,
@@ -384,30 +384,33 @@ impl<'r, 'e, 'p> MsgSer<'r, 'e, 'p> {
     }
 
     fn field<T: Serialize + ?Sized>(&mut self, idx: usize, v: &T) -> Result<(), CodecError> {
-        let f = &self.msg.fields[idx];
+        let field = &self.message.fields[idx];
         if idx < 64 {
             self.seen |= 1 << idx;
         }
-        let result = if f.repeated {
-            v.serialize(RepSer { st: self.st, f })
+        let result = if field.repeated {
+            v.serialize(RepeatedSerializer {
+                output: self.output,
+                field,
+            })
         } else {
-            ValSer {
-                st: self.st,
-                f,
+            ValueSerializer {
+                output: self.output,
+                field,
                 packed: false,
                 in_array: false,
             }
             .value(v)
         };
-        result.map_err(|e| e.at_field(&self.msg.names[idx]))
+        result.map_err(|e| e.at_field(&self.message.names[idx]))
     }
 
     fn finish(self) -> Result<(), CodecError> {
-        let missing = self.msg.required & !self.seen;
+        let missing = self.message.required & !self.seen;
         if missing != 0 {
             let names: Vec<&str> = (0..64)
                 .filter(|i| missing & (1 << i) != 0)
-                .map(|i| self.msg.names[i].as_str())
+                .map(|i| self.message.names[i].as_str())
                 .collect();
             return Err(CodecError::new(
                 BigQueryCodecErrorKind::MissingRequiredField,
@@ -416,13 +419,13 @@ impl<'r, 'e, 'p> MsgSer<'r, 'e, 'p> {
             .at_field(names[0]));
         }
         if let Some(mark) = self.mark {
-            self.st.end(mark);
+            self.output.end(mark);
         }
         Ok(())
     }
 }
 
-impl ser::SerializeStruct for MsgSer<'_, '_, '_> {
+impl ser::SerializeStruct for MessageSerializer<'_, '_, '_> {
     type Ok = ();
     type Error = CodecError;
 
@@ -441,13 +444,13 @@ impl ser::SerializeStruct for MsgSer<'_, '_, '_> {
     }
 }
 
-impl ser::SerializeMap for MsgSer<'_, '_, '_> {
+impl ser::SerializeMap for MessageSerializer<'_, '_, '_> {
     type Ok = ();
     type Error = CodecError;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), CodecError> {
         let key = key.serialize(KeyCapture)?;
-        self.map_key = Some(self.msg.field_index(&key)?);
+        self.map_key = Some(self.message.field_index(&key)?);
         Ok(())
     }
 
@@ -464,33 +467,33 @@ impl ser::SerializeMap for MsgSer<'_, '_, '_> {
 }
 
 /// A REPEATED field, which takes a sequence.
-struct RepSer<'r, 'e, 'p> {
-    st: &'r mut St<'e>,
-    f: &'p FieldPlan,
+struct RepeatedSerializer<'r, 'e, 'p> {
+    output: &'r mut RowOutput<'e>,
+    field: &'p FieldPlan,
 }
 
-impl<'r, 'e, 'p> RepSer<'r, 'e, 'p> {
-    fn seq(self, len: Option<usize>) -> SeqSer<'r, 'e, 'p> {
-        let mark = if self.f.kind.packable() && len != Some(0) {
-            self.st.put(self.f.packed_key.get());
-            Some(self.st.begin())
+impl<'r, 'e, 'p> RepeatedSerializer<'r, 'e, 'p> {
+    fn sequence(self, len: Option<usize>) -> RepeatedSequence<'r, 'e, 'p> {
+        let mark = if self.field.kind.packable() && len != Some(0) {
+            self.output.put(self.field.packed_key.get());
+            Some(self.output.begin())
         } else {
             None
         };
-        SeqSer {
-            st: self.st,
-            f: self.f,
+        RepeatedSequence {
+            output: self.output,
+            field: self.field,
             mark,
             i: 0,
         }
     }
 }
 
-impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
+impl<'r, 'e, 'p> ser::Serializer for RepeatedSerializer<'r, 'e, 'p> {
     type Ok = ();
     type Error = CodecError;
-    type SerializeSeq = SeqSer<'r, 'e, 'p>;
-    type SerializeTuple = SeqSer<'r, 'e, 'p>;
+    type SerializeSeq = RepeatedSequence<'r, 'e, 'p>;
+    type SerializeTuple = RepeatedSequence<'r, 'e, 'p>;
     type SerializeTupleStruct = Impossible<(), CodecError>;
     type SerializeTupleVariant = Impossible<(), CodecError>;
     type SerializeMap = Impossible<(), CodecError>;
@@ -498,11 +501,11 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
     type SerializeStructVariant = Impossible<(), CodecError>;
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, CodecError> {
-        Ok(self.seq(len))
+        Ok(self.sequence(len))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, CodecError> {
-        Ok(self.seq(Some(len)))
+        Ok(self.sequence(Some(len)))
     }
 
     /// BigQuery stores a NULL array as an empty one.
@@ -526,7 +529,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         v.serialize(self)
     }
 
-    reject!(CodecError::type_mismatch(NOT_A_SEQ);
+    reject!(CodecError::type_mismatch(NOT_A_SEQUENCE);
         serialize_bool(bool), serialize_i8(i8), serialize_i16(i16), serialize_i32(i32),
         serialize_i64(i64), serialize_u8(u8), serialize_u16(u16), serialize_u32(u32),
         serialize_u64(u64), serialize_f32(f32), serialize_f64(f64), serialize_char(char),
@@ -541,7 +544,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: &T,
     ) -> Result<(), CodecError> {
-        Err(CodecError::type_mismatch(NOT_A_SEQ))
+        Err(CodecError::type_mismatch(NOT_A_SEQUENCE))
     }
 
     fn serialize_tuple_struct(
@@ -549,7 +552,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleStruct, CodecError> {
-        Err(CodecError::type_mismatch(NOT_A_SEQ))
+        Err(CodecError::type_mismatch(NOT_A_SEQUENCE))
     }
 
     fn serialize_tuple_variant(
@@ -559,11 +562,11 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, CodecError> {
-        Err(CodecError::type_mismatch(NOT_A_SEQ))
+        Err(CodecError::type_mismatch(NOT_A_SEQUENCE))
     }
 
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
-        Err(CodecError::type_mismatch(NOT_A_SEQ))
+        Err(CodecError::type_mismatch(NOT_A_SEQUENCE))
     }
 
     fn serialize_struct(
@@ -571,7 +574,7 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStruct, CodecError> {
-        Err(CodecError::type_mismatch(NOT_A_SEQ))
+        Err(CodecError::type_mismatch(NOT_A_SEQUENCE))
     }
 
     fn serialize_struct_variant(
@@ -581,25 +584,25 @@ impl<'r, 'e, 'p> ser::Serializer for RepSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
-        Err(CodecError::type_mismatch(NOT_A_SEQ))
+        Err(CodecError::type_mismatch(NOT_A_SEQUENCE))
     }
 }
 
-struct SeqSer<'r, 'e, 'p> {
-    st: &'r mut St<'e>,
-    f: &'p FieldPlan,
+struct RepeatedSequence<'r, 'e, 'p> {
+    output: &'r mut RowOutput<'e>,
+    field: &'p FieldPlan,
     /// Set when the elements form one packed run.
     mark: Option<usize>,
     i: usize,
 }
 
-impl SeqSer<'_, '_, '_> {
+impl RepeatedSequence<'_, '_, '_> {
     fn element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
         let i = self.i;
         self.i += 1;
-        ValSer {
-            st: self.st,
-            f: self.f,
+        ValueSerializer {
+            output: self.output,
+            field: self.field,
             packed: self.mark.is_some(),
             in_array: true,
         }
@@ -609,13 +612,13 @@ impl SeqSer<'_, '_, '_> {
 
     fn done(self) -> Result<(), CodecError> {
         if let Some(mark) = self.mark {
-            self.st.end(mark);
+            self.output.end(mark);
         }
         Ok(())
     }
 }
 
-impl ser::SerializeSeq for SeqSer<'_, '_, '_> {
+impl ser::SerializeSeq for RepeatedSequence<'_, '_, '_> {
     type Ok = ();
     type Error = CodecError;
 
@@ -628,7 +631,7 @@ impl ser::SerializeSeq for SeqSer<'_, '_, '_> {
     }
 }
 
-impl ser::SerializeTuple for SeqSer<'_, '_, '_> {
+impl ser::SerializeTuple for RepeatedSequence<'_, '_, '_> {
     type Ok = ();
     type Error = CodecError;
 
@@ -641,18 +644,18 @@ impl ser::SerializeTuple for SeqSer<'_, '_, '_> {
     }
 }
 
-impl BqKind {
+impl FieldKind {
     /// Whether the integer form of a kind exists: INT64, the temporal kinds and the decimals.
     fn takes_integers(self) -> bool {
         matches!(
             self,
-            BqKind::Int64
-                | BqKind::Date
-                | BqKind::Time
-                | BqKind::DateTime
-                | BqKind::Timestamp
-                | BqKind::Numeric
-                | BqKind::BigNumeric
+            FieldKind::Int64
+                | FieldKind::Date
+                | FieldKind::Time
+                | FieldKind::DateTime
+                | FieldKind::Timestamp
+                | FieldKind::Numeric
+                | FieldKind::BigNumeric
         )
     }
 
@@ -683,19 +686,19 @@ fn numeric_in_range(v: i256) -> Result<i256, CodecError> {
 
 /// One value of a field: the whole field, an array element, or one entry of a packed run
 /// (`packed`, written without its key).
-struct ValSer<'r, 'e, 'p> {
-    st: &'r mut St<'e>,
-    f: &'p FieldPlan,
+struct ValueSerializer<'r, 'e, 'p> {
+    output: &'r mut RowOutput<'e>,
+    field: &'p FieldPlan,
     packed: bool,
     in_array: bool,
 }
 
-impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
+impl<'r, 'e, 'p> ValueSerializer<'r, 'e, 'p> {
     /// Writes `v`, which a JSON column takes in any shape.
     #[inline]
     fn value<T: Serialize + ?Sized>(self, v: &T) -> Result<(), CodecError> {
-        if self.f.kind == BqKind::Json {
-            v.serialize(JsonSer(self))
+        if self.field.kind == FieldKind::Json {
+            v.serialize(JsonSerializer(self))
         } else {
             v.serialize(self)
         }
@@ -704,35 +707,35 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
     #[inline]
     fn key(&mut self) {
         if !self.packed {
-            self.st.put(self.f.key.get());
+            self.output.put(self.field.key.get());
         }
     }
 
     #[inline]
-    fn len_delim(mut self, b: &[u8]) -> Result<(), CodecError> {
+    fn length_delimited(mut self, b: &[u8]) -> Result<(), CodecError> {
         self.key();
-        self.st.len_delim(b);
+        self.output.length_delimited(b);
         Ok(())
     }
 
     fn decimal(self, v: i256) -> Result<(), CodecError> {
         let (buf, n) = decimal::decimal_le_bytes(v);
-        self.len_delim(&buf[..n])
+        self.length_delimited(&buf[..n])
     }
 
     #[inline]
     fn varint_field(mut self, v: u64) -> Result<(), CodecError> {
         self.key();
-        self.st.varint(v);
+        self.output.varint(v);
         Ok(())
     }
 
     /// An integer in the column's integer form: days, microseconds of the day, civil or epoch
     /// microseconds, or a whole number for INT64 and the decimals.
-    fn int(self, v: i64) -> Result<(), CodecError> {
-        match self.f.kind {
-            BqKind::Int64 => self.varint_field(v as u64),
-            BqKind::Date => {
+    fn integer(self, v: i64) -> Result<(), CodecError> {
+        match self.field.kind {
+            FieldKind::Int64 => self.varint_field(v as u64),
+            FieldKind::Date => {
                 let days = i32::try_from(v)
                     .ok()
                     .filter(|d| (DATE_MIN_DAYS..=DATE_MAX_DAYS).contains(d))
@@ -743,7 +746,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                     })?;
                 self.varint_field(i64::from(days) as u64)
             }
-            BqKind::Time => {
+            FieldKind::Time => {
                 if !(0..MICROS_PER_DAY).contains(&v) {
                     return Err(CodecError::out_of_range(format!(
                         "{v} microseconds is not a time of day"
@@ -751,7 +754,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 }
                 self.varint_field(civil::pack_time(v) as u64)
             }
-            BqKind::DateTime => {
+            FieldKind::DateTime => {
                 if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&v) {
                     return Err(CodecError::out_of_range(format!(
                         "DATETIME of {v} civil microseconds is outside BigQuery's range"
@@ -759,7 +762,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 }
                 self.varint_field(civil::pack_datetime(v) as u64)
             }
-            BqKind::Timestamp => {
+            FieldKind::Timestamp => {
                 if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&v) {
                     return Err(CodecError::out_of_range(format!(
                         "TIMESTAMP of {v} microseconds is outside BigQuery's range"
@@ -767,68 +770,70 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 }
                 self.varint_field(v as u64)
             }
-            BqKind::Numeric => {
+            FieldKind::Numeric => {
                 self.decimal(i256::from_i128(i128::from(v) * 10i128.pow(NUMERIC_SCALE)))
             }
-            BqKind::BigNumeric => {
+            FieldKind::BigNumeric => {
                 // 10^38 does not fit i128, so it is built as 10^19 squared; any i64 times it
                 // stays well inside i256.
                 let half = i256::from_i128(10i128.pow(BIGNUMERIC_SCALE / 2));
                 self.decimal(i256::from_i128(i128::from(v)).wrapping_mul(half.wrapping_mul(half)))
             }
-            _ => Err(self.f.mismatch("an integer")),
+            _ => Err(self.field.mismatch("an integer")),
         }
     }
 
-    fn wide_int(self, v: i128) -> Result<(), CodecError> {
-        if !self.f.kind.takes_integers() {
-            return Err(self.f.mismatch("an integer"));
+    fn wide_integer(self, v: i128) -> Result<(), CodecError> {
+        if !self.field.kind.takes_integers() {
+            return Err(self.field.mismatch("an integer"));
         }
         let v = i64::try_from(v).map_err(|_| {
             CodecError::out_of_range(format!(
                 "{v} does not fit the INT64 range a {} column takes",
-                self.f.kind.name()
+                self.field.kind.name()
             ))
         })?;
-        self.int(v)
+        self.integer(v)
     }
 
     fn text(self, s: &str) -> Result<(), CodecError> {
-        let kind = self.f.kind;
+        let kind = self.field.kind;
         match kind {
-            BqKind::String | BqKind::Geography | BqKind::Json => self.len_delim(s.as_bytes()),
-            BqKind::Date => {
+            FieldKind::String | FieldKind::Geography | FieldKind::Json => {
+                self.length_delimited(s.as_bytes())
+            }
+            FieldKind::Date => {
                 kind.check_signed_year(s)?;
                 let days = civil::parse_date(s)?;
-                self.int(i64::from(days))
+                self.integer(i64::from(days))
             }
-            BqKind::Time => {
+            FieldKind::Time => {
                 let micros = civil::parse_time(s)?;
-                self.int(micros)
+                self.integer(micros)
             }
-            BqKind::DateTime => {
+            FieldKind::DateTime => {
                 kind.check_signed_year(s)?;
                 let micros = civil::parse_datetime(s)?;
-                self.int(micros)
+                self.integer(micros)
             }
-            BqKind::Timestamp => {
+            FieldKind::Timestamp => {
                 kind.check_signed_year(s)?;
                 let micros = civil::parse_timestamp(s)?;
-                self.int(micros)
+                self.integer(micros)
             }
-            BqKind::Numeric => {
+            FieldKind::Numeric => {
                 let v = decimal::parse_numeric(s)?;
                 self.decimal(v)
             }
-            BqKind::BigNumeric => {
+            FieldKind::BigNumeric => {
                 let v = decimal::parse_bignumeric(s)?;
                 self.decimal(v)
             }
-            BqKind::Interval => {
+            FieldKind::Interval => {
                 let interval = BigQueryInterval::parse_bq(s)?;
                 self.interval(interval)
             }
-            _ => Err(self.f.mismatch("a string")),
+            _ => Err(self.field.mismatch("a string")),
         }
     }
 
@@ -839,23 +844,23 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 interval.nanos
             )));
         }
-        let mut text = std::mem::take(self.st.scratch);
+        let mut text = std::mem::take(self.output.scratch);
         text.clear();
         interval.write_bq(&mut text);
-        let ValSer {
-            st,
-            f,
+        let ValueSerializer {
+            output,
+            field,
             packed,
             in_array,
         } = self;
-        let result = ValSer {
-            st: &mut *st,
-            f,
+        let result = ValueSerializer {
+            output: &mut *output,
+            field,
             packed,
             in_array,
         }
-        .len_delim(text.as_bytes());
-        *st.scratch = text;
+        .length_delimited(text.as_bytes());
+        *output.scratch = text;
         result
     }
 
@@ -865,7 +870,7 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
                 BigQueryCodecErrorKind::NullArrayElement,
                 "an ARRAY element cannot be NULL",
             ))
-        } else if self.f.required {
+        } else if self.field.required {
             Err(CodecError::new(
                 BigQueryCodecErrorKind::NullForRequired,
                 "NULL for a REQUIRED field",
@@ -875,32 +880,32 @@ impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
         }
     }
 
-    fn message(mut self) -> Result<MsgSer<'r, 'e, 'p>, CodecError> {
+    fn message(mut self) -> Result<MessageSerializer<'r, 'e, 'p>, CodecError> {
         let sub = self
-            .f
-            .sub
+            .field
+            .nested
             .as_deref()
-            .ok_or_else(|| self.f.mismatch("a struct or a map"))?;
+            .ok_or_else(|| self.field.mismatch("a struct or a map"))?;
         self.key();
-        let mark = self.st.begin();
-        Ok(MsgSer::new(self.st, sub, Some(mark)))
+        let mark = self.output.begin();
+        Ok(MessageSerializer::new(self.output, sub, Some(mark)))
     }
 }
 
-impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
+impl<'r, 'e, 'p> ser::Serializer for ValueSerializer<'r, 'e, 'p> {
     type Ok = ();
     type Error = CodecError;
     type SerializeSeq = Compound<'r, 'e, 'p>;
     type SerializeTuple = Compound<'r, 'e, 'p>;
     type SerializeTupleStruct = Compound<'r, 'e, 'p>;
     type SerializeTupleVariant = Impossible<(), CodecError>;
-    type SerializeMap = MsgSer<'r, 'e, 'p>;
+    type SerializeMap = MessageSerializer<'r, 'e, 'p>;
     type SerializeStruct = Compound<'r, 'e, 'p>;
     type SerializeStructVariant = Impossible<(), CodecError>;
 
     fn serialize_bool(self, v: bool) -> Result<(), CodecError> {
-        if self.f.kind != BqKind::Bool {
-            return Err(self.f.mismatch("a bool"));
+        if self.field.kind != FieldKind::Bool {
+            return Err(self.field.mismatch("a bool"));
         }
         self.varint_field(u64::from(v))
     }
@@ -919,11 +924,11 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
 
     #[inline]
     fn serialize_i64(self, v: i64) -> Result<(), CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn serialize_i128(self, v: i128) -> Result<(), CodecError> {
-        self.wide_int(v)
+        self.wide_integer(v)
     }
 
     fn serialize_u8(self, v: u8) -> Result<(), CodecError> {
@@ -939,13 +944,13 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
     }
 
     fn serialize_u64(self, v: u64) -> Result<(), CodecError> {
-        self.wide_int(i128::from(v))
+        self.wide_integer(i128::from(v))
     }
 
     fn serialize_u128(self, v: u128) -> Result<(), CodecError> {
         match i128::try_from(v) {
-            Ok(v) => self.wide_int(v),
-            Err(_) => self.wide_int(i128::MAX),
+            Ok(v) => self.wide_integer(v),
+            Err(_) => self.wide_integer(i128::MAX),
         }
     }
 
@@ -955,21 +960,21 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
 
     #[inline]
     fn serialize_f64(mut self, v: f64) -> Result<(), CodecError> {
-        match self.f.kind {
-            BqKind::Float64 => {
+        match self.field.kind {
+            FieldKind::Float64 => {
                 self.key();
-                self.st.put(&v.to_le_bytes());
+                self.output.put(&v.to_le_bytes());
                 Ok(())
             }
-            BqKind::Numeric => {
+            FieldKind::Numeric => {
                 let d = numeric_in_range(decimal::decimal_from_f64(v, NUMERIC_SCALE)?)?;
                 self.decimal(d)
             }
-            BqKind::BigNumeric => {
+            FieldKind::BigNumeric => {
                 let d = decimal::decimal_from_f64(v, BIGNUMERIC_SCALE)?;
                 self.decimal(d)
             }
-            _ => Err(self.f.mismatch("a float")),
+            _ => Err(self.field.mismatch("a float")),
         }
     }
 
@@ -983,30 +988,30 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
     }
 
     fn collect_str<T: fmt::Display + ?Sized>(self, v: &T) -> Result<(), CodecError> {
-        let mut text = std::mem::take(self.st.scratch);
+        let mut text = std::mem::take(self.output.scratch);
         text.clear();
         let _ = write!(text, "{v}");
-        let ValSer {
-            st,
-            f,
+        let ValueSerializer {
+            output,
+            field,
             packed,
             in_array,
         } = self;
-        let result = ValSer {
-            st: &mut *st,
-            f,
+        let result = ValueSerializer {
+            output: &mut *output,
+            field,
             packed,
             in_array,
         }
         .text(&text);
-        *st.scratch = text;
+        *output.scratch = text;
         result
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<(), CodecError> {
-        match self.f.kind {
-            BqKind::Bytes => self.len_delim(v),
-            _ => Err(self.f.mismatch("bytes")),
+        match self.field.kind {
+            FieldKind::Bytes => self.length_delimited(v),
+            _ => Err(self.field.mismatch("bytes")),
         }
     }
 
@@ -1042,19 +1047,19 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
     ) -> Result<(), CodecError> {
         if let Some(kind) = temporal_tag_kind(name) {
             // The integer has a unit, so it only means something on its own column type.
-            if kind != self.f.kind {
-                return Err(self.f.mismatch(name));
+            if kind != self.field.kind {
+                return Err(self.field.mismatch(name));
             }
-            let raw = capture_int(v)?;
-            return self.int(raw);
+            let raw = capture_integer(v)?;
+            return self.integer(raw);
         }
         let tagged_kind_matches = match name {
-            TAG_DECIMAL => matches!(self.f.kind, BqKind::Numeric | BqKind::BigNumeric),
-            TAG_JSON => self.f.kind == BqKind::Json,
+            TAG_DECIMAL => matches!(self.field.kind, FieldKind::Numeric | FieldKind::BigNumeric),
+            TAG_JSON => self.field.kind == FieldKind::Json,
             _ => true,
         };
         if !tagged_kind_matches {
-            return Err(self.f.mismatch(name));
+            return Err(self.field.mismatch(name));
         }
         v.serialize(self)
     }
@@ -1066,17 +1071,17 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         _: &'static str,
         _: &T,
     ) -> Result<(), CodecError> {
-        Err(self.f.mismatch("an enum variant with data"))
+        Err(self.field.mismatch("an enum variant with data"))
     }
 
     fn serialize_seq(mut self, _len: Option<usize>) -> Result<Self::SerializeSeq, CodecError> {
-        match self.f.kind {
-            BqKind::Bytes => {
+        match self.field.kind {
+            FieldKind::Bytes => {
                 self.key();
-                let mark = self.st.begin();
+                let mark = self.output.begin();
                 Ok(Compound::Bytes {
-                    st: self.st,
-                    f: self.f,
+                    output: self.output,
+                    field: self.field,
                     mark,
                 })
             }
@@ -1084,7 +1089,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
                 BigQueryCodecErrorKind::UnsupportedType,
                 "an ARRAY of ARRAY is not a BigQuery column type",
             )),
-            _ => Err(self.f.mismatch("a sequence")),
+            _ => Err(self.field.mismatch("a sequence")),
         }
     }
 
@@ -1107,7 +1112,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, CodecError> {
-        Err(self.f.mismatch("an enum variant with data"))
+        Err(self.field.mismatch("an enum variant with data"))
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
@@ -1119,16 +1124,16 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, CodecError> {
-        if self.f.kind == BqKind::Interval {
+        if self.field.kind == FieldKind::Interval {
             if name != TAG_INTERVAL {
-                return Err(self.f.mismatch(name));
+                return Err(self.field.mismatch(name));
             }
             return Ok(Compound::Interval {
-                v: self,
+                value: self,
                 parts: [None; 3],
             });
         }
-        Ok(Compound::Msg(self.message()?))
+        Ok(Compound::Message(self.message()?))
     }
 
     fn serialize_struct_variant(
@@ -1138,7 +1143,7 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
-        Err(self.f.mismatch("an enum variant with data"))
+        Err(self.field.mismatch("an enum variant with data"))
     }
 }
 
@@ -1153,16 +1158,16 @@ type JsonValueStructVariant = <JsonValueSer as ser::Serializer>::SerializeStruct
 /// One value of a JSON column. A string is the JSON text as it is, and `None` is SQL NULL;
 /// any other shape, `()` and `serde_json::Value::Null` included, is printed as JSON text.
 /// Inside a printed value, strings are JSON strings.
-struct JsonSer<'r, 'e, 'p>(ValSer<'r, 'e, 'p>);
+struct JsonSerializer<'r, 'e, 'p>(ValueSerializer<'r, 'e, 'p>);
 
-impl JsonSer<'_, '_, '_> {
+impl JsonSerializer<'_, '_, '_> {
     fn print(self, value: Result<serde_json::Value, serde_json::Error>) -> Result<(), CodecError> {
         let text = value.map_err(CodecError::from)?.to_string();
         self.0.text(&text)
     }
 }
 
-impl<'r, 'e, 'p> ser::Serializer for JsonSer<'r, 'e, 'p> {
+impl<'r, 'e, 'p> ser::Serializer for JsonSerializer<'r, 'e, 'p> {
     type Ok = ();
     type Error = CodecError;
     type SerializeSeq = JsonCompound<'r, 'e, 'p, JsonValueSeq>;
@@ -1343,13 +1348,13 @@ impl<'r, 'e, 'p> ser::Serializer for JsonSer<'r, 'e, 'p> {
 
 /// A compound value of a JSON column, built as a [`serde_json::Value`] and printed at its end.
 struct JsonCompound<'r, 'e, 'p, C> {
-    target: JsonSer<'r, 'e, 'p>,
+    target: JsonSerializer<'r, 'e, 'p>,
     inner: C,
 }
 
 impl<'r, 'e, 'p, C> JsonCompound<'r, 'e, 'p, C> {
     fn new(
-        target: JsonSer<'r, 'e, 'p>,
+        target: JsonSerializer<'r, 'e, 'p>,
         inner: Result<C, serde_json::Error>,
     ) -> Result<Self, CodecError> {
         Ok(JsonCompound {
@@ -1483,14 +1488,14 @@ impl<C: ser::SerializeStructVariant<Ok = serde_json::Value, Error = serde_json::
 /// The compound values one field can take: a nested message, BYTES as a sequence of `u8`,
 /// or a [`BigQueryInterval`] as its struct.
 enum Compound<'r, 'e, 'p> {
-    Msg(MsgSer<'r, 'e, 'p>),
+    Message(MessageSerializer<'r, 'e, 'p>),
     Bytes {
-        st: &'r mut St<'e>,
-        f: &'p FieldPlan,
+        output: &'r mut RowOutput<'e>,
+        field: &'p FieldPlan,
         mark: usize,
     },
     Interval {
-        v: ValSer<'r, 'e, 'p>,
+        value: ValueSerializer<'r, 'e, 'p>,
         parts: [Option<i64>; 3],
     },
 }
@@ -1500,16 +1505,16 @@ const INTERVAL_PARTS: [&str; 3] = ["months", "days", "nanos"];
 impl Compound<'_, '_, '_> {
     fn element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
         match self {
-            Compound::Bytes { st, f, .. } => {
-                let byte = capture_int(v)
+            Compound::Bytes { output, field, .. } => {
+                let byte = capture_integer(v)
                     .ok()
                     .and_then(|b| u8::try_from(b).ok())
-                    .ok_or_else(|| f.mismatch("a sequence of anything but u8"))?;
-                st.byte(byte);
+                    .ok_or_else(|| field.mismatch("a sequence of anything but u8"))?;
+                output.byte(byte);
                 Ok(())
             }
-            Compound::Interval { v, .. } => Err(v.f.mismatch("a sequence")),
-            Compound::Msg(_) => Err(CodecError::new(
+            Compound::Interval { value, .. } => Err(value.field.mismatch("a sequence")),
+            Compound::Message(_) => Err(CodecError::new(
                 BigQueryCodecErrorKind::TypeMismatch,
                 "a STRUCT takes named fields",
             )),
@@ -1518,14 +1523,16 @@ impl Compound<'_, '_, '_> {
 
     fn finish(self) -> Result<(), CodecError> {
         match self {
-            Compound::Msg(m) => m.finish(),
-            Compound::Bytes { st, mark, .. } => {
-                st.end(mark);
+            Compound::Message(m) => m.finish(),
+            Compound::Bytes { output, mark, .. } => {
+                output.end(mark);
                 Ok(())
             }
-            Compound::Interval { v, parts } => {
+            Compound::Interval { value, parts } => {
                 let [Some(months), Some(days), Some(nanos)] = parts else {
-                    return Err(v.f.mismatch("an INTERVAL without months, days and nanos"));
+                    return Err(value
+                        .field
+                        .mismatch("an INTERVAL without months, days and nanos"));
                 };
                 let part = |value: i64, name: &str| {
                     i32::try_from(value).map_err(|_| {
@@ -1537,7 +1544,7 @@ impl Compound<'_, '_, '_> {
                     days: part(days, "days")?,
                     nanos,
                 };
-                v.interval(interval)
+                value.interval(interval)
             }
         }
     }
@@ -1593,7 +1600,7 @@ impl ser::SerializeStruct for Compound<'_, '_, '_> {
         v: &T,
     ) -> Result<(), CodecError> {
         match self {
-            Compound::Msg(m) => ser::SerializeStruct::serialize_field(m, key, v),
+            Compound::Message(m) => ser::SerializeStruct::serialize_field(m, key, v),
             Compound::Interval { parts, .. } => {
                 let i = INTERVAL_PARTS
                     .iter()
@@ -1605,10 +1612,10 @@ impl ser::SerializeStruct for Compound<'_, '_, '_> {
                         )
                         .at_field(key)
                     })?;
-                parts[i] = Some(capture_int(v).map_err(|e| e.at_field(key))?);
+                parts[i] = Some(capture_integer(v).map_err(|e| e.at_field(key))?);
                 Ok(())
             }
-            Compound::Bytes { f, .. } => Err(f.mismatch("a struct")),
+            Compound::Bytes { field, .. } => Err(field.mismatch("a struct")),
         }
     }
 

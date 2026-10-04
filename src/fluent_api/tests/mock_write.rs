@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 use std::cell::RefCell;
 
-const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
-const T: BigQueryTableId = BigQueryTableId::from_static("t");
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 
 /// One insert as the mock saw it: rows as JSON, and for CDC each change's type and sequence.
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +124,7 @@ async fn insert_chain_passes_mode_and_rows() {
 
     let summary = BigQueryExprBuilder::new(&db)
         .insert()
-        .into(DS.table(T))
+        .into(SHOP.table(ORDERS))
         .objects(&rows)
         .execute()
         .await
@@ -133,9 +133,9 @@ async fn insert_chain_passes_mode_and_rows() {
     BigQueryExprBuilder::new(&db)
         .insert()
         .into(
-            BigQueryDatasetRef::new("p", DS)
+            BigQueryDatasetRef::new("acme-prod", SHOP)
                 .expect("valid test input")
-                .table(T),
+                .table(ORDERS),
         )
         .object(&rows[0])
         .exactly_once()
@@ -144,7 +144,7 @@ async fn insert_chain_passes_mode_and_rows() {
         .expect("the insert runs");
     BigQueryExprBuilder::new(&db)
         .insert()
-        .into(DS.table(T))
+        .into(SHOP.table(ORDERS))
         .objects(rows.iter())
         .options(BigQueryStreamingWriteOptions::new().with_max_batch_rows(7))
         .atomic()
@@ -153,7 +153,7 @@ async fn insert_chain_passes_mode_and_rows() {
         .expect("the insert runs");
     BigQueryExprBuilder::new(&db)
         .insert()
-        .into(DS.table(T))
+        .into(SHOP.table(ORDERS))
         .objects(&rows)
         .upsert()
         .execute()
@@ -161,7 +161,7 @@ async fn insert_chain_passes_mode_and_rows() {
         .expect("the insert runs");
     BigQueryExprBuilder::new(&db)
         .insert()
-        .into(DS.table(T))
+        .into(SHOP.table(ORDERS))
         .changes(vec![BigQueryChange {
             change_type: BigQueryChangeType::Delete,
             sequence_number: Some(BigQueryChangeSequenceNumber::from(10)),
@@ -184,12 +184,12 @@ async fn insert_chain_passes_mode_and_rows() {
             BigQueryWriteMode::Default
         ]
     );
-    assert_eq!(inserts[0].params.table, DS.table(T));
+    assert_eq!(inserts[0].params.table, SHOP.table(ORDERS));
     assert_eq!(
         inserts[1].params.table,
-        BigQueryDatasetRef::new("p", DS)
+        BigQueryDatasetRef::new("acme-prod", SHOP)
             .expect("valid test input")
-            .table(T)
+            .table(ORDERS)
     );
     assert_eq!(inserts[2].params.options.max_batch_rows, Some(7));
     assert_eq!(

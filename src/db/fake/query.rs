@@ -17,47 +17,49 @@ pub(crate) fn job_reference() -> JobReference {
     }
 }
 
-/// Reads a `Query` request and logs it as `Query <sql>`.
-pub(crate) async fn query_request(call: &mut FakeCall) -> PostQueryRequest {
-    let request: PostQueryRequest = call.next_request().await.expect("a Query request");
-    let sql = request
-        .query_request
-        .as_ref()
-        .map(|q| q.query.clone())
-        .unwrap_or_default();
-    call.log(format!("Query {sql}"));
-    request
-}
+impl FakeCall {
+    /// Reads a `Query` request and logs it as `Query <sql>`.
+    pub(crate) async fn query_request(&mut self) -> PostQueryRequest {
+        let request: PostQueryRequest = self.next_request().await.expect("a Query request");
+        let sql = request
+            .query_request
+            .as_ref()
+            .map(|q| q.query.clone())
+            .unwrap_or_default();
+        self.log(format!("Query {sql}"));
+        request
+    }
 
-/// Reads a `GetQueryResults` request and logs it as
-/// `GetQueryResults job1 at US max_results=Some(0)`.
-pub(crate) async fn query_results_request(call: &mut FakeCall) -> GetQueryResultsRequest {
-    let request: GetQueryResultsRequest = call
-        .next_request()
-        .await
-        .expect("a GetQueryResults request");
-    call.log(format!(
-        "GetQueryResults {} at {} max_results={:?}",
-        request.job_id, request.location, request.max_results
-    ));
-    request
-}
+    /// Reads a `GetQueryResults` request and logs it as
+    /// `GetQueryResults job1 at US max_results=Some(0)`.
+    pub(crate) async fn query_results_request(&mut self) -> GetQueryResultsRequest {
+        let request: GetQueryResultsRequest = self
+            .next_request()
+            .await
+            .expect("a GetQueryResults request");
+        self.log(format!(
+            "GetQueryResults {} at {} max_results={:?}",
+            request.job_id, request.location, request.max_results
+        ));
+        request
+    }
 
-/// Reads a `GetJob` request and logs it as `GetJob job1 at US`.
-pub(crate) async fn get_job_request(call: &mut FakeCall) -> GetJobRequest {
-    let request: GetJobRequest = call.next_request().await.expect("a GetJob request");
-    call.log(format!("GetJob {} at {}", request.job_id, request.location));
-    request
-}
+    /// Reads a `GetJob` request and logs it as `GetJob job1 at US`.
+    pub(crate) async fn get_job_request(&mut self) -> GetJobRequest {
+        let request: GetJobRequest = self.next_request().await.expect("a GetJob request");
+        self.log(format!("GetJob {} at {}", request.job_id, request.location));
+        request
+    }
 
-/// Reads a `CancelJob` request and logs it as `CancelJob job1 at EU`.
-pub(crate) async fn cancel_job_request(call: &mut FakeCall) -> CancelJobRequest {
-    let request: CancelJobRequest = call.next_request().await.expect("a CancelJob request");
-    call.log(format!(
-        "CancelJob {} at {}",
-        request.job_id, request.location
-    ));
-    request
+    /// Reads a `CancelJob` request and logs it as `CancelJob job1 at EU`.
+    pub(crate) async fn cancel_job_request(&mut self) -> CancelJobRequest {
+        let request: CancelJobRequest = self.next_request().await.expect("a CancelJob request");
+        self.log(format!(
+            "CancelJob {} at {}",
+            request.job_id, request.location
+        ));
+        request
+    }
 }
 
 /// The IPC schema message of `batch` and its record batch message, uncompressed, as the inline
@@ -129,9 +131,7 @@ pub(crate) fn done_job(dataset: &str, table: &str) -> Job {
 mod tests {
     use super::*;
     use crate::db::fake::events::CapturedEvents;
-    use crate::db::fake::read::{
-        get_table, open_session, read_rows_request, send_batches, session_request, FakeReadTable,
-    };
+    use crate::db::fake::read::FakeReadTable;
     use crate::db::fake::spans::{bigquery_fields, CapturedSpans};
     use crate::db::fake::FakeBigQuery;
     use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
@@ -153,7 +153,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
+    const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
 
     /// `id, name`, with `ids` as the ids and `Åsa <id>` as the names.
     fn people(ids: &[i64]) -> RecordBatch {
@@ -191,19 +191,19 @@ mod tests {
     /// Answers the Storage Read calls with `table` as the destination table's content.
     async fn storage_read(mut call: FakeCall, table: &FakeReadTable) {
         match call.method() {
-            "GetTable" => get_table(call, table).await,
+            "GetTable" => call.get_table(table).await,
             "CreateReadSession" => {
-                let request = session_request(&mut call).await;
-                open_session(call, &request, table);
+                let request = call.session_request().await;
+                call.open_session(&request, table);
             }
             "ReadRows" => {
-                let request = read_rows_request(&mut call).await;
+                let request = call.read_rows_request().await;
                 let index: usize = request.read_stream[1..].parse().expect("s<n>");
                 let batches: Vec<(Vec<u8>, i64)> = table.streams[index]
                     .iter()
                     .map(|b| (encode_ipc(b).1, b.num_rows() as i64))
                     .collect();
-                send_batches(&mut call, &batches);
+                call.send_batches(&batches);
                 call.finish();
             }
             other => panic!("unexpected call {other}"),
@@ -224,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn complete_first_response_is_decoded_inline() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             call.reply(&inline_response(&people(&[1, 2]), 2));
         })
         .await;
@@ -245,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn empty_result_is_an_empty_stream() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             let mut response = inline_response(&people(&[]), 0);
             response.results = None;
             call.reply(&response);
@@ -259,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn zero_rows_sent_as_an_empty_batch_message_are_an_empty_stream() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             let mut response = inline_response(&people(&[]), 0);
             response.results = Some(query_response::Results::ArrowRecordBatch(
                 ArrowRecordBatch {
@@ -277,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn query_request_carries_the_routing_settings() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            let request = query_request(&mut call).await;
+            let request = call.query_request().await;
             let q = request.query_request.unwrap_or_default();
             call.log(format!(
                 "format={:?} legacy={:?} int64_timestamp={:?} timeout_ms={:?} location={:?} \
@@ -309,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn builder_settings_reach_the_query_request() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            let request = query_request(&mut call).await;
+            let request = call.query_request().await;
             let q = request.query_request.unwrap_or_default();
             let mut labels: Vec<_> = q.labels.into_iter().collect();
             labels.sort();
@@ -336,7 +336,7 @@ mod tests {
             .query("SELECT @a")
             .param("a", 1)
             .location(BigQueryLocation::from_static("EU"))
-            .default_dataset(BigQueryDatasetRef::new("other", DS)?)
+            .default_dataset(BigQueryDatasetRef::new("other", SHOP)?)
             .label("team", "data")
             .maximum_bytes_billed(10)
             .use_query_cache(false)
@@ -351,7 +351,7 @@ mod tests {
             .fluent()
             .query("SELECT ?")
             .positional_param(1)
-            .default_dataset(DS)
+            .default_dataset(SHOP)
             .request_id(BigQueryRequestId::new("req-2")?)
             .execute()
             .await?;
@@ -359,12 +359,12 @@ mod tests {
             fake.calls(),
             [
                 "Query SELECT @a",
-                "params=1 mode=NAMED location=EU dataset=Some(\"other.ds\") \
+                "params=1 mode=NAMED location=EU dataset=Some(\"other.shop\") \
                  labels=[(\"team\", \"data\")] max_bytes=Some(10) cache=Some(false) \
                  timeout_ms=Some(1500) job_timeout_ms=Some(60000) request_id=req-1 \
                  max_results=Some(100)",
                 "Query SELECT ?",
-                "params=1 mode=POSITIONAL location= dataset=Some(\"fake-project.ds\") labels=[] \
+                "params=1 mode=POSITIONAL location= dataset=Some(\"fake-project.shop\") labels=[] \
                  max_bytes=None cache=None timeout_ms=Some(10000) job_timeout_ms=None \
                  request_id=req-2 max_results=Some(0)",
             ]
@@ -399,7 +399,7 @@ mod tests {
         let fake = FakeBigQuery::start(move |mut call: FakeCall| {
             let attempts = attempts.clone();
             async move {
-                let request = query_request(&mut call).await;
+                let request = call.query_request().await;
                 let q = request.query_request.unwrap_or_default();
                 call.log(format!("{} {:?}", q.request_id, q.job_creation_mode()));
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -448,13 +448,13 @@ mod tests {
             async move {
                 match call.method() {
                     "Query" => {
-                        query_request(&mut call).await;
+                        call.query_request().await;
                         let mut response = inline_response(&people(&[1]), 3);
                         response.page_token = "page-2".into();
                         call.reply(&response);
                     }
                     "GetJob" => {
-                        get_job_request(&mut call).await;
+                        call.get_job_request().await;
                         call.reply(&done_job("_anon", "anon1"));
                     }
                     _ => storage_read(call, &table).await,
@@ -487,11 +487,11 @@ mod tests {
             async move {
                 match call.method() {
                     "Query" => {
-                        query_request(&mut call).await;
+                        call.query_request().await;
                         call.reply(&inline_response(&people(&[1]), 2));
                     }
                     "GetJob" => {
-                        get_job_request(&mut call).await;
+                        call.get_job_request().await;
                         call.reply(&done_job("_anon", "anon1"));
                     }
                     _ => storage_read(call, &table).await,
@@ -529,11 +529,11 @@ mod tests {
             async move {
                 match call.method() {
                     "Query" => {
-                        query_request(&mut call).await;
+                        call.query_request().await;
                         call.reply(&incomplete_response());
                     }
                     "GetQueryResults" => {
-                        query_results_request(&mut call).await;
+                        call.query_results_request().await;
                         let complete = polls.fetch_add(1, Ordering::SeqCst) > 0;
                         call.reply(&GetQueryResultsResponse {
                             job_reference: Some(job_reference()),
@@ -543,7 +543,7 @@ mod tests {
                         });
                     }
                     "GetJob" => {
-                        get_job_request(&mut call).await;
+                        call.get_job_request().await;
                         call.reply(&done_job("_anon", "anon1"));
                     }
                     _ => storage_read(call, &table).await,
@@ -570,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn dml_reports_counts_and_has_no_rows() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             call.reply(&QueryResponse {
                 job_reference: Some(job_reference()),
                 job_complete: Some(true),
@@ -622,11 +622,11 @@ mod tests {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
             match call.method() {
                 "Query" => {
-                    query_request(&mut call).await;
+                    call.query_request().await;
                     call.reply(&incomplete_response());
                 }
                 "GetQueryResults" => {
-                    query_results_request(&mut call).await;
+                    call.query_results_request().await;
                     call.reply(&GetQueryResultsResponse {
                         job_reference: Some(job_reference()),
                         job_complete: Some(true),
@@ -637,8 +637,8 @@ mod tests {
                     });
                 }
                 "GetJob" => {
-                    get_job_request(&mut call).await;
-                    let mut job = done_job("ds", "t");
+                    call.get_job_request().await;
+                    let mut job = done_job("shop", "orders");
                     job.statistics = Some(JobStatistics {
                         query: Some(JobStatistics2 {
                             statement_type: "INSERT".into(),
@@ -682,7 +682,7 @@ mod tests {
     #[tokio::test]
     async fn required_job_creation_reaches_the_query_request() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            let request = query_request(&mut call).await;
+            let request = call.query_request().await;
             let q = request.query_request.unwrap_or_default();
             call.log(format!("job_creation_mode={:?}", q.job_creation_mode()));
             call.reply(&inline_response(&people(&[1]), 1));
@@ -716,7 +716,7 @@ mod tests {
     async fn job_less_result_is_decoded_inline_with_its_query_id() -> BigQueryResult<()> {
         let (spans, _guard) = CapturedSpans::capture();
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             let mut response = job_less_response(&people(&[1, 2]), 2);
             response.total_bytes_processed = Some(0);
             response.total_slot_ms = Some(3);
@@ -762,14 +762,14 @@ mod tests {
             async move {
                 match call.method() {
                     "Query" => {
-                        query_request(&mut call).await;
+                        call.query_request().await;
                         call.reply(&QueryResponse {
                             query_id: "query-1".into(),
                             ..incomplete_response()
                         });
                     }
                     "GetQueryResults" => {
-                        query_results_request(&mut call).await;
+                        call.query_results_request().await;
                         call.reply(&GetQueryResultsResponse {
                             job_reference: Some(job_reference()),
                             job_complete: Some(true),
@@ -778,7 +778,7 @@ mod tests {
                         });
                     }
                     "GetJob" => {
-                        get_job_request(&mut call).await;
+                        call.get_job_request().await;
                         call.reply(&done_job("_anon", "anon1"));
                     }
                     _ => storage_read(call, &table).await,
@@ -816,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            let request = query_request(&mut call).await;
+            let request = call.query_request().await;
             let q = request.query_request.unwrap_or_default();
             call.log(format!("job_creation_mode={:?}", q.job_creation_mode()));
             call.reply(&QueryResponse {
@@ -851,7 +851,7 @@ mod tests {
     async fn inline_result_records_the_response_figures() -> BigQueryResult<()> {
         let (spans, _guard) = CapturedSpans::capture();
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             let mut response = inline_response(&people(&[1, 2]), 2);
             response.location = "US".into();
             response.total_bytes_processed = Some(100);
@@ -911,14 +911,14 @@ mod tests {
             async move {
                 match call.method() {
                     "Query" => {
-                        query_request(&mut call).await;
+                        call.query_request().await;
                         let mut response = inline_response(&people(&[1]), 3);
                         response.page_token = "page-2".into();
                         response.total_bytes_processed = Some(500);
                         call.reply(&response);
                     }
                     "GetJob" => {
-                        get_job_request(&mut call).await;
+                        call.get_job_request().await;
                         let mut job = done_job("_anon", "anon1");
                         job.statistics = Some(JobStatistics {
                             total_bytes_processed: Some(500),
@@ -992,11 +992,11 @@ mod tests {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
             match call.method() {
                 "Query" => {
-                    query_request(&mut call).await;
+                    call.query_request().await;
                     call.reply(&incomplete_response());
                 }
                 "GetQueryResults" => {
-                    query_results_request(&mut call).await;
+                    call.query_results_request().await;
                     call.reply(&GetQueryResultsResponse {
                         job_reference: Some(job_reference()),
                         job_complete: Some(true),
@@ -1007,8 +1007,8 @@ mod tests {
                     });
                 }
                 "GetJob" => {
-                    get_job_request(&mut call).await;
-                    let mut job = done_job("ds", "t");
+                    call.get_job_request().await;
+                    let mut job = done_job("shop", "orders");
                     job.configuration = None;
                     job.statistics = Some(JobStatistics {
                         total_slot_ms: Some(9),
@@ -1079,7 +1079,7 @@ mod tests {
     #[tokio::test]
     async fn failed_query_is_the_status_of_the_query_call() {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             call.fail(
                 Code::InvalidArgument,
                 "Syntax error: Unexpected identifier \"SELEC\" at [1:1]",
@@ -1101,25 +1101,25 @@ mod tests {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
             match call.method() {
                 "Query" => {
-                    query_request(&mut call).await;
+                    call.query_request().await;
                     call.reply(&incomplete_response());
                 }
                 "GetQueryResults" => {
-                    query_results_request(&mut call).await;
+                    call.query_results_request().await;
                     call.reply(&GetQueryResultsResponse {
                         job_complete: Some(true),
                         ..Default::default()
                     });
                 }
                 "GetJob" => {
-                    get_job_request(&mut call).await;
+                    call.get_job_request().await;
                     let failure = ErrorProto {
                         reason: "invalidQuery".into(),
                         location: "query".into(),
                         message: "boom".into(),
                         ..Default::default()
                     };
-                    let mut job = done_job("ds", "t");
+                    let mut job = done_job("shop", "orders");
                     job.status = Some(JobStatus {
                         state: "DONE".into(),
                         error_result: Some(failure.clone()),
@@ -1155,7 +1155,7 @@ mod tests {
     #[tokio::test]
     async fn dry_run_reports_bytes_and_schema() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            let request = query_request(&mut call).await;
+            let request = call.query_request().await;
             let dry_run = request.query_request.map(|q| q.dry_run).unwrap_or_default();
             call.log(format!("dry_run={dry_run}"));
             call.reply(&QueryResponse {
@@ -1192,7 +1192,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_job_sends_the_job_and_its_location() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            cancel_job_request(&mut call).await;
+            call.cancel_job_request().await;
             call.reply(&JobCancelResponse::default());
         })
         .await;
@@ -1210,7 +1210,7 @@ mod tests {
     #[tokio::test]
     async fn base_variant_skips_rows_that_fail_to_decode() -> BigQueryResult<()> {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             let batch = people_named(&[1, 2], vec![None, Some("Åsa 2".into())]);
             call.reply(&inline_response(&batch, 2));
         })
@@ -1321,10 +1321,9 @@ mod tests {
             }
         })
         .await;
-        let string = || BigQueryFieldType::String { max_length: None };
         let holder = BigQueryFieldType::Struct(vec![BigQueryFieldSchema {
             name: "v".into(),
-            field_type: string(),
+            field_type: BigQueryFieldType::String { max_length: None },
             mode: BigQueryFieldMode::Nullable,
             description: None,
             default_value_expression: None,
@@ -1340,12 +1339,13 @@ mod tests {
                 st: Holder { v: p },
                 j: crate::BigQueryJson(Holder { v: p }),
             };
-            let q = || fake.db.fluent();
             let forms = [
                 (
                     "param",
                     named,
-                    q().query(named)
+                    fake.db
+                        .fluent()
+                        .query(named)
                         .param("s", all.s)
                         .param("arr", &all.arr)
                         .param("st", &all.st)
@@ -1354,17 +1354,27 @@ mod tests {
                 (
                     "param_as",
                     named,
-                    q().query(named)
-                        .param_as("s", string(), all.s)
-                        .param_as("arr", BigQueryParamType::array_of(string()), &all.arr)
+                    fake.db
+                        .fluent()
+                        .query(named)
+                        .param_as("s", BigQueryFieldType::String { max_length: None }, all.s)
+                        .param_as(
+                            "arr",
+                            BigQueryParamType::array_of(BigQueryFieldType::String {
+                                max_length: None,
+                            }),
+                            &all.arr,
+                        )
                         .param_as("st", holder.clone(), &all.st)
                         .param_as("j", BigQueryFieldType::Json, &all.j),
                 ),
-                ("params", named, q().query(named).params(&all)),
+                ("params", named, fake.db.fluent().query(named).params(&all)),
                 (
                     "positional_param",
                     positional,
-                    q().query(positional)
+                    fake.db
+                        .fluent()
+                        .query(positional)
                         .positional_param(all.s)
                         .positional_param(&all.arr)
                         .positional_param(&all.st)
@@ -1373,9 +1383,16 @@ mod tests {
                 (
                     "positional_param_as",
                     positional,
-                    q().query(positional)
-                        .positional_param_as(string(), all.s)
-                        .positional_param_as(BigQueryParamType::array_of(string()), &all.arr)
+                    fake.db
+                        .fluent()
+                        .query(positional)
+                        .positional_param_as(BigQueryFieldType::String { max_length: None }, all.s)
+                        .positional_param_as(
+                            BigQueryParamType::array_of(BigQueryFieldType::String {
+                                max_length: None,
+                            }),
+                            &all.arr,
+                        )
                         .positional_param_as(holder.clone(), &all.st)
                         .positional_param_as(BigQueryFieldType::Json, &all.j),
                 ),
@@ -1411,7 +1428,7 @@ mod tests {
         }
         const CELL: &str = "s3cr3t-cell";
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            query_request(&mut call).await;
+            call.query_request().await;
             let names = vec![Some("Basic".to_string()), Some(CELL.to_string())];
             call.reply(&inline_response(&people_named(&[1, 2], names), 2));
         })

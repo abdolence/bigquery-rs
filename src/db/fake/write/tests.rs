@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
-const T: BigQueryTableId = BigQueryTableId::from_static("t");
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 
 #[derive(Serialize)]
 struct Row {
@@ -99,7 +99,7 @@ async fn default_mode_resends_unacked_batches_after_reconnect() {
     let fake = FakeBigQuery::start(move |call| {
         let connections = connections.clone();
         async move {
-            let Some(mut call) = answer_unary(call, schema(&[])).await else {
+            let Some(mut call) = call.answer_unary(schema(&[])).await else {
                 return;
             };
             let c = connections.fetch_add(1, Ordering::SeqCst);
@@ -120,7 +120,7 @@ async fn default_mode_resends_unacked_batches_after_reconnect() {
     .await;
     let (mut writer, responses) = fake
         .db
-        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
+        .create_streaming_writer_with_options::<Row>(SHOP.table(ORDERS), options())
         .await
         .expect("the writer opens");
     for id in 0..3 {
@@ -169,7 +169,7 @@ async fn committed_mode_counts_offset_already_exists_as_written() {
         let connections = connections.clone();
         let end = end.clone();
         async move {
-            let Some(mut call) = answer_unary(call, schema(&[])).await else {
+            let Some(mut call) = call.answer_unary(schema(&[])).await else {
                 return;
             };
             let c = connections.fetch_add(1, Ordering::SeqCst);
@@ -190,12 +190,13 @@ async fn committed_mode_counts_offset_already_exists_as_written() {
     let (mut writer, responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            DS.table(T),
+            SHOP.table(ORDERS),
             options().with_mode(BigQueryWriteMode::Committed),
         )
         .await
         .expect("the writer opens");
-    assert_eq!(writer.stream_name(), Some(CREATED_STREAM));
+    let created = BigQueryWriteStreamName::reported(CREATED_STREAM.to_string());
+    assert_eq!(writer.stream_name(), Some(&created));
     for id in 0..3 {
         within(writer.write(&row(id)))
             .await
@@ -203,10 +204,7 @@ async fn committed_mode_counts_offset_already_exists_as_written() {
     }
     let summary = within(writer.finish()).await.expect("the writer finishes");
     assert_eq!((summary.rows_written, summary.rows_failed), (3, 0));
-    assert_eq!(
-        summary.stream.as_ref().map(BigQueryWriteStreamName::as_str),
-        Some(CREATED_STREAM)
-    );
+    assert_eq!(summary.stream, Some(created));
     let offsets: Vec<Option<i64>> = collect(responses)
         .await
         .into_iter()
@@ -245,7 +243,7 @@ async fn committed_mode_resequences_after_row_errors() {
         let fake = FakeBigQuery::start(move |call| {
             let end = end.clone();
             async move {
-                let Some(mut call) = answer_unary(call, schema(&[])).await else {
+                let Some(mut call) = call.answer_unary(schema(&[])).await else {
                     return;
                 };
                 while let Some(request) = call.next_request::<AppendRowsRequest>().await {
@@ -277,7 +275,7 @@ async fn committed_mode_resequences_after_row_errors() {
         let (mut writer, responses) = fake
             .db
             .create_streaming_writer_with_options::<Row>(
-                DS.table(T),
+                SHOP.table(ORDERS),
                 BigQueryStreamingWriteOptions::new()
                     .with_mode(BigQueryWriteMode::Committed)
                     .with_max_batch_rows(2),
@@ -333,7 +331,7 @@ async fn committed_mode_resequences_after_row_errors() {
 async fn pending_mode_commits_only_without_failed_batches() {
     for fail in [false, true] {
         let fake = FakeBigQuery::start(move |call| async move {
-            let Some(mut call) = answer_unary(call, schema(&[])).await else {
+            let Some(mut call) = call.answer_unary(schema(&[])).await else {
                 return;
             };
             let end = StreamEnd::default();
@@ -351,7 +349,7 @@ async fn pending_mode_commits_only_without_failed_batches() {
         let (mut writer, _responses) = fake
             .db
             .create_streaming_writer_with_options::<Row>(
-                DS.table(T),
+                SHOP.table(ORDERS),
                 options().with_mode(BigQueryWriteMode::Pending),
             )
             .await
@@ -394,7 +392,7 @@ async fn pending_mode_commits_only_without_failed_batches() {
 #[tokio::test]
 async fn row_errors_carry_write_order_indexes() {
     let fake = FakeBigQuery::start(|call| async move {
-        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
             return;
         };
         while let Some(request) = call.next_request::<AppendRowsRequest>().await {
@@ -410,7 +408,7 @@ async fn row_errors_carry_write_order_indexes() {
     let (mut writer, responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            DS.table(T),
+            SHOP.table(ORDERS),
             BigQueryStreamingWriteOptions::new().with_max_batch_rows(3),
         )
         .await
@@ -440,7 +438,7 @@ async fn row_errors_carry_write_order_indexes() {
 #[tokio::test]
 async fn updated_schema_switches_plan_at_a_batch_boundary() {
     let fake = FakeBigQuery::start(|call| async move {
-        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
             return;
         };
         let mut first = true;
@@ -460,7 +458,7 @@ async fn updated_schema_switches_plan_at_a_batch_boundary() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            DS.table(T),
+            SHOP.table(ORDERS),
             BigQueryStreamingWriteOptions::new(),
         )
         .await
@@ -500,7 +498,7 @@ async fn updated_schema_switches_plan_at_a_batch_boundary() {
 #[tokio::test]
 async fn write_stream_is_sent_on_every_request() {
     let fake = FakeBigQuery::start(|call| async move {
-        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
             return;
         };
         while let Some(request) = call.next_request::<AppendRowsRequest>().await {
@@ -516,7 +514,7 @@ async fn write_stream_is_sent_on_every_request() {
     .await;
     let (mut writer, _responses) = fake
         .db
-        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
+        .create_streaming_writer_with_options::<Row>(SHOP.table(ORDERS), options())
         .await
         .expect("the writer opens");
     for id in 0..3 {
@@ -545,7 +543,7 @@ async fn unknown_field_refreshes_schema_once_then_fails() {
             .expect("the lock is never poisoned")
             .clone();
         async move {
-            let Some(mut call) = answer_unary(call, schema).await else {
+            let Some(mut call) = call.answer_unary(schema).await else {
                 return;
             };
             while let Some(request) = call.next_request::<AppendRowsRequest>().await {
@@ -559,7 +557,7 @@ async fn unknown_field_refreshes_schema_once_then_fails() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            DS.table(T),
+            SHOP.table(ORDERS),
             BigQueryStreamingWriteOptions::new()
                 .with_schema_refresh_interval(Duration::from_millis(300)),
         )
@@ -601,13 +599,12 @@ async fn unknown_field_refreshes_schema_once_then_fails() {
 
 #[tokio::test]
 async fn relaxed_mode_reconnects() {
-    let required_name = || TableSchema {
+    let server_schema = Arc::new(Mutex::new(TableSchema {
         fields: vec![
             column("id", Type::Int64, Mode::Required),
             column("name", Type::String, Mode::Required),
         ],
-    };
-    let server_schema = Arc::new(Mutex::new(required_name()));
+    }));
     let shared_schema = server_schema.clone();
     let connections = Arc::new(AtomicUsize::new(0));
     let fake = FakeBigQuery::start(move |call| {
@@ -617,7 +614,7 @@ async fn relaxed_mode_reconnects() {
             .clone();
         let connections = connections.clone();
         async move {
-            let Some(mut call) = answer_unary(call, schema).await else {
+            let Some(mut call) = call.answer_unary(schema).await else {
                 return;
             };
             let c = connections.fetch_add(1, Ordering::SeqCst);
@@ -632,7 +629,7 @@ async fn relaxed_mode_reconnects() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            DS.table(T),
+            SHOP.table(ORDERS),
             BigQueryStreamingWriteOptions::new(),
         )
         .await
@@ -665,7 +662,7 @@ async fn write_waits_at_the_inflight_limit() {
     let fake = FakeBigQuery::start(move |call| {
         let permits = server_permits.clone();
         async move {
-            let Some(mut call) = answer_unary(call, schema(&[])).await else {
+            let Some(mut call) = call.answer_unary(schema(&[])).await else {
                 return;
             };
             while let Some(request) = call.next_request::<AppendRowsRequest>().await {
@@ -683,7 +680,7 @@ async fn write_waits_at_the_inflight_limit() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            DS.table(T),
+            SHOP.table(ORDERS),
             options().with_max_inflight_requests(2),
         )
         .await
@@ -704,7 +701,7 @@ async fn write_waits_at_the_inflight_limit() {
 #[tokio::test]
 async fn idle_batch_is_flushed_after_the_delay() {
     let fake = FakeBigQuery::start(|call| async move {
-        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
             return;
         };
         while let Some(request) = call.next_request::<AppendRowsRequest>().await {
@@ -717,7 +714,7 @@ async fn idle_batch_is_flushed_after_the_delay() {
     let (mut writer, _responses) = fake
         .db
         .create_streaming_writer_with_options::<Row>(
-            DS.table(T),
+            SHOP.table(ORDERS),
             BigQueryStreamingWriteOptions::new().with_max_batch_delay(Duration::from_millis(50)),
         )
         .await
@@ -736,7 +733,7 @@ async fn idle_batch_is_flushed_after_the_delay() {
 #[tokio::test]
 async fn oversize_stream_status_is_not_retried() {
     let fake = FakeBigQuery::start(|call| async move {
-        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
             return;
         };
         if let Some(request) = call.next_request::<AppendRowsRequest>().await {
@@ -750,7 +747,7 @@ async fn oversize_stream_status_is_not_retried() {
     .await;
     let (mut writer, responses) = fake
         .db
-        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
+        .create_streaming_writer_with_options::<Row>(SHOP.table(ORDERS), options())
         .await
         .expect("the writer opens");
     within(writer.write(&row(0)))
@@ -802,7 +799,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
 #[tokio::test]
 async fn drop_without_finish_warns() {
     let fake = FakeBigQuery::start(|call| async move {
-        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
             return;
         };
         while let Some(_request) = call.next_request::<AppendRowsRequest>().await {
@@ -819,7 +816,7 @@ async fn drop_without_finish_warns() {
     let _guard = tracing::subscriber::set_default(subscriber);
     let (mut writer, _responses) = fake
         .db
-        .create_streaming_writer::<Row>(DS.table(T))
+        .create_streaming_writer::<Row>(SHOP.table(ORDERS))
         .await
         .expect("the writer opens");
     within(writer.write(&row(0)))
@@ -848,7 +845,7 @@ async fn write_span_and_summary_record_what_was_sent() {
     let fake = FakeBigQuery::start(move |call| {
         let counted = counted.clone();
         async move {
-            let Some(mut call) = answer_unary(call, schema(&[])).await else {
+            let Some(mut call) = call.answer_unary(schema(&[])).await else {
                 return;
             };
             let mut failed_once = false;
@@ -867,7 +864,7 @@ async fn write_span_and_summary_record_what_was_sent() {
     .await;
     let (mut writer, _responses) = fake
         .db
-        .create_streaming_writer_with_options::<Row>(DS.table(T), options())
+        .create_streaming_writer_with_options::<Row>(SHOP.table(ORDERS), options())
         .await
         .expect("the writer opens");
     for id in 0..3 {
@@ -882,7 +879,7 @@ async fn write_span_and_summary_record_what_was_sent() {
     assert_eq!(
         spans.only("BigQuery streaming write"),
         crate::db::fake::spans::bigquery_fields(&[
-            ("table", "ds.t"),
+            ("table", "shop.orders"),
             ("write_mode", "Default"),
             ("rows_appended", "3"),
             ("bytes_sent", &bytes_sent.to_string()),
@@ -896,7 +893,7 @@ async fn write_span_and_summary_record_what_was_sent() {
 async fn dropped_writer_records_what_was_sent() {
     let (spans, _guard) = CapturedSpans::capture();
     let fake = FakeBigQuery::start(|call| async move {
-        let Some(mut call) = answer_unary(call, schema(&[])).await else {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
             return;
         };
         while let Some(_request) = call.next_request::<AppendRowsRequest>().await {
@@ -907,7 +904,7 @@ async fn dropped_writer_records_what_was_sent() {
     .await;
     let (mut writer, _responses) = fake
         .db
-        .create_streaming_writer::<Row>(DS.table(T))
+        .create_streaming_writer::<Row>(SHOP.table(ORDERS))
         .await
         .expect("the writer opens");
     within(writer.write(&row(0)))
@@ -934,7 +931,7 @@ async fn an_upsert_outside_the_default_stream_is_refused_before_any_call() {
         .db
         .fluent()
         .insert()
-        .into(DS.table(T))
+        .into(SHOP.table(ORDERS))
         .objects(&[row(1)])
         .upsert()
         .exactly_once()

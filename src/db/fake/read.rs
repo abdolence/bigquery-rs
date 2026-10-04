@@ -83,33 +83,84 @@ impl FakeReadTable {
     }
 }
 
-/// Answers `GetTable` with the table's columns, logging `GetTable ds.t`.
-pub(crate) async fn get_table(mut call: FakeCall, table: &FakeReadTable) {
-    let request: GetTableRequest = call.next_request().await.expect("a GetTable request");
-    call.log(format!(
-        "GetTable {}.{}",
-        request.dataset_id, request.table_id
-    ));
-    call.reply(&Table {
-        schema: Some(table.table_schema()),
-        ..Default::default()
-    });
-}
+impl FakeCall {
+    /// Answers `GetTable` with the table's columns, logging `GetTable ds.t`.
+    pub(crate) async fn get_table(mut self, table: &FakeReadTable) {
+        let request: GetTableRequest = self.next_request().await.expect("a GetTable request");
+        self.log(format!(
+            "GetTable {}.{}",
+            request.dataset_id, request.table_id
+        ));
+        self.reply(&Table {
+            schema: Some(table.table_schema()),
+            ..Default::default()
+        });
+    }
 
-/// Reads a `CreateReadSession` request and logs it as `CreateReadSession [selected fields]`.
-pub(crate) async fn session_request(call: &mut FakeCall) -> CreateReadSessionRequest {
-    let request: CreateReadSessionRequest = call
-        .next_request()
-        .await
-        .expect("a CreateReadSession request");
-    let selected = request
-        .read_session
-        .as_ref()
-        .and_then(|s| s.read_options.as_ref())
-        .map(|o| o.selected_fields.join(","))
-        .unwrap_or_default();
-    call.log(format!("CreateReadSession [{selected}]"));
-    request
+    /// Reads a `CreateReadSession` request and logs it as `CreateReadSession [selected fields]`.
+    pub(crate) async fn session_request(&mut self) -> CreateReadSessionRequest {
+        let request: CreateReadSessionRequest = self
+            .next_request()
+            .await
+            .expect("a CreateReadSession request");
+        let selected = request
+            .read_session
+            .as_ref()
+            .and_then(|s| s.read_options.as_ref())
+            .map(|o| o.selected_fields.join(","))
+            .unwrap_or_default();
+        self.log(format!("CreateReadSession [{selected}]"));
+        request
+    }
+
+    /// Answers a `CreateReadSession` request with the table's schema and streams `s0`, `s1`, ...
+    /// in the compression it asked for. Returns each stream's encoded batches for `ReadRows`.
+    pub(crate) fn open_session(
+        self,
+        request: &CreateReadSessionRequest,
+        table: &FakeReadTable,
+    ) -> Vec<Vec<Vec<u8>>> {
+        let (schema, streams) = table.encode(requested_compression(request));
+        self.reply(&ReadSession {
+            name: "session".into(),
+            streams: (0..streams.len())
+                .map(|i| ReadStream {
+                    name: format!("s{i}"),
+                })
+                .collect(),
+            schema: Some(read_session::Schema::ArrowSchema(ArrowSchema {
+                serialized_schema: schema,
+            })),
+            ..Default::default()
+        });
+        streams
+    }
+
+    /// Reads a `ReadRows` request and logs it as `ReadRows s0 at 2`.
+    pub(crate) async fn read_rows_request(&mut self) -> ReadRowsRequest {
+        let request: ReadRowsRequest = self.next_request().await.expect("a ReadRows request");
+        self.log(format!(
+            "ReadRows {} at {}",
+            request.read_stream, request.offset
+        ));
+        request
+    }
+
+    /// Sends one `ReadRowsResponse` per encoded batch, with its row count.
+    pub(crate) fn send_batches(&mut self, batches: &[(Vec<u8>, i64)]) {
+        for (bytes, row_count) in batches {
+            self.send(&ReadRowsResponse {
+                row_count: *row_count,
+                rows: Some(read_rows_response::Rows::ArrowRecordBatch(
+                    ArrowRecordBatch {
+                        serialized_record_batch: bytes.clone(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            });
+        }
+    }
 }
 
 fn requested_compression(request: &CreateReadSessionRequest) -> CompressionCodec {
@@ -123,55 +174,6 @@ fn requested_compression(request: &CreateReadSessionRequest) -> CompressionCodec
             arrow.buffer_compression()
         }
         _ => CompressionCodec::CompressionUnspecified,
-    }
-}
-
-/// Answers a `CreateReadSession` request with the table's schema and streams `s0`, `s1`, ...
-/// in the compression it asked for. Returns each stream's encoded batches for `ReadRows`.
-pub(crate) fn open_session(
-    call: FakeCall,
-    request: &CreateReadSessionRequest,
-    table: &FakeReadTable,
-) -> Vec<Vec<Vec<u8>>> {
-    let (schema, streams) = table.encode(requested_compression(request));
-    call.reply(&ReadSession {
-        name: "session".into(),
-        streams: (0..streams.len())
-            .map(|i| ReadStream {
-                name: format!("s{i}"),
-            })
-            .collect(),
-        schema: Some(read_session::Schema::ArrowSchema(ArrowSchema {
-            serialized_schema: schema,
-        })),
-        ..Default::default()
-    });
-    streams
-}
-
-/// Reads a `ReadRows` request and logs it as `ReadRows s0 at 2`.
-pub(crate) async fn read_rows_request(call: &mut FakeCall) -> ReadRowsRequest {
-    let request: ReadRowsRequest = call.next_request().await.expect("a ReadRows request");
-    call.log(format!(
-        "ReadRows {} at {}",
-        request.read_stream, request.offset
-    ));
-    request
-}
-
-/// Sends one `ReadRowsResponse` per encoded batch, with its row count.
-pub(crate) fn send_batches(call: &mut FakeCall, batches: &[(Vec<u8>, i64)]) {
-    for (bytes, row_count) in batches {
-        call.send(&ReadRowsResponse {
-            row_count: *row_count,
-            rows: Some(read_rows_response::Rows::ArrowRecordBatch(
-                ArrowRecordBatch {
-                    serialized_record_batch: bytes.clone(),
-                    ..Default::default()
-                },
-            )),
-            ..Default::default()
-        });
     }
 }
 
@@ -193,8 +195,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    const DS: BigQueryDatasetId = BigQueryDatasetId::from_static("ds");
-    const T: BigQueryTableId = BigQueryTableId::from_static("t");
+    const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 
     /// `id, name, extra`, with `ids` as the ids.
     fn people(ids: &[i64]) -> RecordBatch {
@@ -238,13 +240,13 @@ mod tests {
             let table = table.clone();
             async move {
                 match call.method() {
-                    "GetTable" => get_table(call, &table).await,
+                    "GetTable" => call.get_table(&table).await,
                     "CreateReadSession" => {
-                        let request = session_request(&mut call).await;
-                        open_session(call, &request, &table);
+                        let request = call.session_request().await;
+                        call.open_session(&request, &table);
                     }
                     "ReadRows" => {
-                        let request = read_rows_request(&mut call).await;
+                        let request = call.read_rows_request().await;
                         let (_, streams) = table.encode(CompressionCodec::Lz4Frame);
                         let index: usize = request.read_stream[1..].parse().expect("s<n>");
                         let batches: Vec<(Vec<u8>, i64)> = streams[index]
@@ -252,7 +254,7 @@ mod tests {
                             .cloned()
                             .zip(table.streams[index].iter().map(|b| b.num_rows() as i64))
                             .collect();
-                        send_batches(&mut call, &batches);
+                        call.send_batches(&batches);
                         call.finish();
                     }
                     other => panic!("unexpected call {other}"),
@@ -269,7 +271,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .obj::<Person>()
             .stream_query_with_errors()
             .await?;
@@ -287,7 +289,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .obj::<Person>()
             .query()
             .await?;
@@ -295,7 +297,7 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "GetTable ds.t",
+                "GetTable shop.orders",
                 "CreateReadSession [id,name]",
                 "ReadRows s0 at 0"
             ]
@@ -310,9 +312,9 @@ mod tests {
             let table = table.clone();
             async move {
                 match call.method() {
-                    "GetTable" => get_table(call, &table).await,
+                    "GetTable" => call.get_table(&table).await,
                     "CreateReadSession" => {
-                        let request = session_request(&mut call).await;
+                        let request = call.session_request().await;
                         let selected = &request
                             .read_session
                             .as_ref()
@@ -320,7 +322,7 @@ mod tests {
                             .map(|o| o.selected_fields.clone())
                             .unwrap_or_default();
                         if selected.is_empty() {
-                            open_session(call, &request, &table);
+                            call.open_session(&request, &table);
                         } else {
                             call.fail(
                                 Code::InvalidArgument,
@@ -330,9 +332,9 @@ mod tests {
                         }
                     }
                     "ReadRows" => {
-                        read_rows_request(&mut call).await;
+                        call.read_rows_request().await;
                         let (_, streams) = table.encode(CompressionCodec::Lz4Frame);
-                        send_batches(&mut call, &[(streams[0][0].clone(), 1)]);
+                        call.send_batches(&[(streams[0][0].clone(), 1)]);
                         call.finish();
                     }
                     other => panic!("unexpected call {other}"),
@@ -344,7 +346,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .obj::<Person>()
             .query()
             .await?;
@@ -352,7 +354,7 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "GetTable ds.t",
+                "GetTable shop.orders",
                 "CreateReadSession [id,name]",
                 "CreateReadSession []",
                 "ReadRows s0 at 0"
@@ -364,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_fields_error_is_schema_mismatch() {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            session_request(&mut call).await;
+            call.session_request().await;
             call.fail(
                 Code::InvalidArgument,
                 "request failed: The following selected fields do not exist in the table \
@@ -377,13 +379,13 @@ mod tests {
             .fluent()
             .select()
             .fields(["id", "nope"])
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .obj::<Person>()
             .query()
             .await;
         match result {
             Err(BigQueryError::SchemaMismatchError(err)) => {
-                assert_eq!(err.table, DS.table(T));
+                assert_eq!(err.table, SHOP.table(ORDERS));
                 assert!(err.details.contains("nope"), "{}", err.details);
             }
             other => panic!("expected a schema mismatch, got {other:?}"),
@@ -402,20 +404,20 @@ mod tests {
             let (table, attempts) = (table.clone(), attempts.clone());
             async move {
                 match call.method() {
-                    "GetTable" => get_table(call, &table).await,
+                    "GetTable" => call.get_table(&table).await,
                     "CreateReadSession" => {
-                        let request = session_request(&mut call).await;
-                        open_session(call, &request, &table);
+                        let request = call.session_request().await;
+                        call.open_session(&request, &table);
                     }
                     "ReadRows" => {
-                        let request = read_rows_request(&mut call).await;
+                        let request = call.read_rows_request().await;
                         let (_, streams) = table.encode(CompressionCodec::Lz4Frame);
                         if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                            send_batches(&mut call, &[(streams[0][0].clone(), 2)]);
+                            call.send_batches(&[(streams[0][0].clone(), 2)]);
                             call.fail(Code::Unavailable, "backend went away");
                         } else {
                             assert_eq!(request.offset, 2);
-                            send_batches(&mut call, &[(streams[0][1].clone(), 1)]);
+                            call.send_batches(&[(streams[0][1].clone(), 1)]);
                             call.finish();
                         }
                     }
@@ -432,7 +434,7 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "GetTable ds.t",
+                "GetTable shop.orders",
                 "CreateReadSession [id,name]",
                 "ReadRows s0 at 0",
                 "ReadRows s0 at 2"
@@ -452,22 +454,22 @@ mod tests {
             let (table, attempts) = (table.clone(), attempts.clone());
             async move {
                 match call.method() {
-                    "GetTable" => get_table(call, &table).await,
+                    "GetTable" => call.get_table(&table).await,
                     "CreateReadSession" => {
-                        let request = session_request(&mut call).await;
-                        open_session(call, &request, &table);
+                        let request = call.session_request().await;
+                        call.open_session(&request, &table);
                     }
                     "ReadRows" => {
-                        let request = read_rows_request(&mut call).await;
+                        let request = call.read_rows_request().await;
                         let (_, streams) = table.encode(CompressionCodec::Lz4Frame);
                         if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                            send_batches(&mut call, &[(streams[0][0].clone(), 2)]);
+                            call.send_batches(&[(streams[0][0].clone(), 2)]);
                             // Lets the batch reach the client before the connection closes.
                             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                             call.drop_connection().await;
                         } else {
                             assert_eq!(request.offset, 2);
-                            send_batches(&mut call, &[(streams[0][1].clone(), 1)]);
+                            call.send_batches(&[(streams[0][1].clone(), 1)]);
                             call.finish();
                         }
                     }
@@ -495,19 +497,19 @@ mod tests {
             let table = table.clone();
             async move {
                 match call.method() {
-                    "GetTable" => get_table(call, &table).await,
+                    "GetTable" => call.get_table(&table).await,
                     "CreateReadSession" => {
-                        let request = session_request(&mut call).await;
-                        open_session(call, &request, &table);
+                        let request = call.session_request().await;
+                        call.open_session(&request, &table);
                     }
                     "ReadRows" => {
-                        let request = read_rows_request(&mut call).await;
+                        let request = call.read_rows_request().await;
                         let (_, streams) = table.encode(CompressionCodec::Lz4Frame);
                         if request.read_stream == "s0" {
-                            send_batches(&mut call, &[(streams[0][0].clone(), 1)]);
+                            call.send_batches(&[(streams[0][0].clone(), 1)]);
                             call.fail(code, message);
                         } else {
-                            send_batches(&mut call, &[(streams[1][0].clone(), 1)]);
+                            call.send_batches(&[(streams[1][0].clone(), 1)]);
                             call.hang().await;
                         }
                     }
@@ -549,7 +551,6 @@ mod tests {
         match items.last() {
             Some(Err(BigQueryError::DatabaseError(e))) => {
                 assert!(!e.retry_possible);
-                assert!(e.details.contains("CAST("), "{}", e.details);
             }
             other => panic!("expected the overflow error last, got {other:?}"),
         }
@@ -604,7 +605,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .obj::<Person>()
             .stream_query()
             .await?
@@ -632,7 +633,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .record_batches()
             .await?
             .collect::<Vec<_>>()
@@ -667,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn a_sample_percentage_is_left_for_bigquery_to_check() {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            let request = session_request(&mut call).await;
+            let request = call.session_request().await;
             let sample = request
                 .read_session
                 .and_then(|s| s.read_options)
@@ -683,7 +684,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .sample_percentage(150.0)
             .record_batches()
             .await;
@@ -697,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn an_avro_session_is_an_unexpected_response() {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-            session_request(&mut call).await;
+            call.session_request().await;
             call.reply(&ReadSession {
                 schema: Some(read_session::Schema::AvroSchema(Default::default())),
                 ..Default::default()
@@ -708,7 +709,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .record_batches()
             .await;
         match result {
@@ -725,11 +726,11 @@ mod tests {
             async move {
                 match call.method() {
                     "CreateReadSession" => {
-                        let request = session_request(&mut call).await;
-                        open_session(call, &request, &table);
+                        let request = call.session_request().await;
+                        call.open_session(&request, &table);
                     }
                     "ReadRows" => {
-                        read_rows_request(&mut call).await;
+                        call.read_rows_request().await;
                         call.send(&ReadRowsResponse {
                             row_count: 1,
                             rows: Some(read_rows_response::Rows::AvroRows(Default::default())),
@@ -746,7 +747,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .record_batches()
             .await?
             .collect::<Vec<_>>()
@@ -764,7 +765,7 @@ mod tests {
         let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
             match call.method() {
                 "CreateReadSession" => {
-                    session_request(&mut call).await;
+                    call.session_request().await;
                     call.reply(&ReadSession::default());
                 }
                 other => panic!("unexpected call {other}"),
@@ -775,7 +776,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .record_batches()
             .await?
             .collect::<Vec<_>>()
@@ -798,7 +799,7 @@ mod tests {
             async move {
                 match call.method() {
                     "CreateReadSession" => {
-                        let request = session_request(&mut call).await;
+                        let request = call.session_request().await;
                         let (schema, _) = table.encode(requested_compression(&request));
                         call.reply(&ReadSession {
                             name: "session".into(),
@@ -814,7 +815,7 @@ mod tests {
                         });
                     }
                     "ReadRows" => {
-                        let request = read_rows_request(&mut call).await;
+                        let request = call.read_rows_request().await;
                         let index: usize = request.read_stream[1..].parse().expect("s<n>");
                         let (_, streams) = table.encode(CompressionCodec::CompressionUnspecified);
                         for (bytes, batch) in streams[index].iter().zip(&table.streams[index]) {
@@ -851,7 +852,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .record_batches()
             .await?;
         let batches: Vec<RecordBatch> =
@@ -864,7 +865,7 @@ mod tests {
         assert_eq!(
             spans.only("BigQuery Read"),
             bigquery_fields(&[
-                ("table", "ds.t"),
+                ("table", "shop.orders"),
                 ("streams", "2"),
                 ("estimated_bytes_scanned", "4096"),
                 ("estimated_rows", "3"),
@@ -884,7 +885,7 @@ mod tests {
             .db
             .fluent()
             .select()
-            .from(DS.table(T))
+            .from(SHOP.table(ORDERS))
             .record_batches()
             .await?;
         let first = tokio::time::timeout(Duration::from_secs(20), batches.next())

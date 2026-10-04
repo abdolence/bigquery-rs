@@ -54,6 +54,20 @@ impl BigQueryError {
         ))
     }
 
+    /// An [`InvalidParametersError`](BigQueryError::InvalidParametersError) for the field
+    /// `table`, naming `table` and `what` about it the crate does not handle.
+    pub(crate) fn unsupported_table(
+        table: &gcloud_sdk::google::cloud::bigquery::v2::Table,
+        what: String,
+    ) -> Self {
+        let id = table
+            .table_reference
+            .as_ref()
+            .map(|r| format!("{}.{}.{}", r.project_id, r.dataset_id, r.table_id))
+            .unwrap_or_default();
+        BigQueryError::invalid_parameters("table", format!("{id}: {what}"))
+    }
+
     /// Builds a [`SystemError`](BigQueryError::SystemError) with a crate-defined `code`.
     pub(crate) fn system(code: &str, message: impl Into<String>) -> Self {
         BigQueryError::SystemError(BigQuerySystemError::new(

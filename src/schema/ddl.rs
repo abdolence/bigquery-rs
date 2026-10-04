@@ -1,7 +1,7 @@
 //! The DDL `.sync()` runs, rendered only through `src/sql`: every name a quoted identifier and
 //! every description, label and option value an escaped literal. The one exception is a
 //! column's default value, which is a trusted SQL expression by contract, declared or copied
-//! from the live table, and is written as one parenthesized operand.
+//! from the existing table, and is written as one parenthesized operand.
 //!
 //! Numbers in the text (type parameters, range bounds) come from integer fields, never from
 //! caller text.

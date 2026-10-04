@@ -3,9 +3,11 @@
 use bigquery::*;
 use serde::Serialize;
 
+#[path = "support/common.rs"]
 mod common;
 use common::*;
 
+#[path = "support/write_support.rs"]
 mod write_support;
 use write_support::*;
 

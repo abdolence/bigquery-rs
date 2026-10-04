@@ -9,7 +9,6 @@
 //! without a job. Whenever the first response leaves anything for a later call, BigQuery has
 //! created a job for it, and that job is what the rest of the route reads.
 
-use crate::db::proto::NonEmpty;
 use crate::errors::BigQueryError;
 use crate::query::params::parameter_mode;
 use crate::read::ArrowIpcDecoder;
@@ -87,12 +86,12 @@ impl From<&QueryResponse> for BigQueryJobStats {
         });
         Self {
             job,
-            query_id: response
-                .query_id
-                .clone()
-                .non_empty()
+            query_id: Some(response.query_id.clone())
+                .filter(|v| !v.is_empty())
                 .map(BigQueryQueryId::reported),
-            statement_type: response.statement_type.clone().non_empty().map(Into::into),
+            statement_type: Some(response.statement_type.clone())
+                .filter(|v| !v.is_empty())
+                .map(Into::into),
             total_rows: response.total_rows,
             total_bytes_processed: response.total_bytes_processed,
             total_bytes_billed: response.total_bytes_billed,
@@ -120,10 +119,11 @@ impl BigQueryJobStats {
             return;
         };
         if let Some(query) = &statistics.query {
-            self.statement_type = self
-                .statement_type
-                .take()
-                .or_else(|| query.statement_type.clone().non_empty().map(Into::into));
+            self.statement_type = self.statement_type.take().or_else(|| {
+                Some(query.statement_type.clone())
+                    .filter(|v| !v.is_empty())
+                    .map(Into::into)
+            });
             self.total_bytes_processed = self.total_bytes_processed.or(query.total_bytes_processed);
             self.total_bytes_billed = self.total_bytes_billed.or(query.total_bytes_billed);
             self.total_slot_ms = self.total_slot_ms.or(query.total_slot_ms);

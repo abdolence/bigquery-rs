@@ -68,45 +68,44 @@ fn field(
 
 fn wide_schema() -> BigQueryTableSchema {
     use BigQueryFieldMode::{Nullable, Repeated, Required};
-    use BigQueryFieldType as T;
-    let string = || T::String { max_length: None };
+    use BigQueryFieldType as FieldType;
     BigQueryTableSchema {
         fields: vec![
-            field("id", T::Int64, Required),
-            field("name", string(), Required),
-            field("score", T::Float64, Nullable),
-            field("active", T::Bool, Required),
-            field("payload", T::Bytes { max_length: None }, Required),
-            field("day", T::Date, Required),
-            field("at", T::Timestamp, Required),
-            field("local", T::DateTime, Required),
-            field("tod", T::Time, Required),
-            field("amount", T::Numeric(None), Required),
-            field("big", T::BigNumeric(None), Required),
-            field("doc", T::Json, Required),
-            field("span", T::Interval, Required),
-            field("geo", T::Geography, Required),
-            field("tags", string(), Repeated),
-            field("nums", T::Int64, Repeated),
+            field("id", FieldType::Int64, Required),
+            field("name", FieldType::String { max_length: None }, Required),
+            field("score", FieldType::Float64, Nullable),
+            field("active", FieldType::Bool, Required),
+            field("payload", FieldType::Bytes { max_length: None }, Required),
+            field("day", FieldType::Date, Required),
+            field("at", FieldType::Timestamp, Required),
+            field("local", FieldType::DateTime, Required),
+            field("tod", FieldType::Time, Required),
+            field("amount", FieldType::Numeric(None), Required),
+            field("big", FieldType::BigNumeric(None), Required),
+            field("doc", FieldType::Json, Required),
+            field("span", FieldType::Interval, Required),
+            field("geo", FieldType::Geography, Required),
+            field("tags", FieldType::String { max_length: None }, Repeated),
+            field("nums", FieldType::Int64, Repeated),
             field(
                 "addr",
-                T::Struct(vec![
-                    field("city", string(), Required),
-                    field("zip", T::Int64, Nullable),
-                    field("loc", T::Geography, Nullable),
+                FieldType::Struct(vec![
+                    field("city", FieldType::String { max_length: None }, Required),
+                    field("zip", FieldType::Int64, Nullable),
+                    field("loc", FieldType::Geography, Nullable),
                 ]),
                 Nullable,
             ),
             field(
                 "items",
-                T::Struct(vec![
-                    field("sku", string(), Required),
-                    field("qty", T::Int64, Required),
-                    field("price", T::Float64, Required),
+                FieldType::Struct(vec![
+                    field("sku", FieldType::String { max_length: None }, Required),
+                    field("qty", FieldType::Int64, Required),
+                    field("price", FieldType::Float64, Required),
                 ]),
                 Repeated,
             ),
-            field("note", string(), Nullable),
+            field("note", FieldType::String { max_length: None }, Nullable),
         ],
     }
 }

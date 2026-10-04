@@ -8,7 +8,9 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
+#[path = "support/common.rs"]
 mod common;
+#[path = "support/read_common.rs"]
 mod read_common;
 use common::{with_scratch, Scratch, TestResult};
 use read_common::run_sql;
@@ -207,15 +209,15 @@ struct AllTypes {
     rr_range: BigQueryRange<jiff::civil::Date>,
 }
 
-fn ts(s: &str) -> jiff::Timestamp {
+fn timestamp(s: &str) -> jiff::Timestamp {
     s.parse().expect("a valid test timestamp")
 }
 
-fn dt(s: &str) -> jiff::civil::DateTime {
+fn datetime(s: &str) -> jiff::civil::DateTime {
     s.parse().expect("a valid test datetime")
 }
 
-fn d(y: i16, m: i8, day: i8) -> jiff::civil::Date {
+fn date(y: i16, m: i8, day: i8) -> jiff::civil::Date {
     jiff::civil::date(y, m, day)
 }
 
@@ -254,9 +256,13 @@ fn expected(id: i64) -> AllTypes {
         n_bytes: if full { Some(vec![0, 255]) } else { None },
         r_bytes: vec![],
         a_bytes: if full { vec![b"a".to_vec()] } else { vec![] },
-        n_date: if full { Some(d(2024, 2, 29)) } else { None },
-        r_date: d(1, 1, 1),
-        a_date: if full { vec![d(9999, 12, 31)] } else { vec![] },
+        n_date: if full { Some(date(2024, 2, 29)) } else { None },
+        r_date: date(1, 1, 1),
+        a_date: if full {
+            vec![date(9999, 12, 31)]
+        } else {
+            vec![]
+        },
         n_time: if full {
             Some(jiff::civil::time(12, 34, 56, 789_012_000))
         } else {
@@ -269,24 +275,24 @@ fn expected(id: i64) -> AllTypes {
             vec![]
         },
         n_datetime: if full {
-            Some(dt("2024-02-29T12:34:56.789012"))
+            Some(datetime("2024-02-29T12:34:56.789012"))
         } else {
             None
         },
-        r_datetime: dt("0001-01-01T00:00:00"),
+        r_datetime: datetime("0001-01-01T00:00:00"),
         a_datetime: if full {
-            vec![dt("9999-12-31T23:59:59.999999")]
+            vec![datetime("9999-12-31T23:59:59.999999")]
         } else {
             vec![]
         },
         n_timestamp: if full {
-            Some(ts("2024-02-29T12:34:56.789012Z"))
+            Some(timestamp("2024-02-29T12:34:56.789012Z"))
         } else {
             None
         },
-        r_timestamp: ts("1969-07-20T20:17:40Z"),
+        r_timestamp: timestamp("1969-07-20T20:17:40Z"),
         a_timestamp: if full {
-            vec![ts("0001-01-01T00:00:00Z")]
+            vec![timestamp("0001-01-01T00:00:00Z")]
         } else {
             vec![]
         },
@@ -328,44 +334,44 @@ fn expected(id: i64) -> AllTypes {
             vec![]
         },
         n_range_date: if full {
-            Some(range(Some(d(2024, 1, 1)), None))
+            Some(range(Some(date(2024, 1, 1)), None))
         } else {
             None
         },
-        r_range_date: range(Some(d(2024, 1, 1)), Some(d(2024, 2, 1))),
+        r_range_date: range(Some(date(2024, 1, 1)), Some(date(2024, 2, 1))),
         a_range_date: if full {
-            vec![range(None, Some(d(2021, 1, 1)))]
+            vec![range(None, Some(date(2021, 1, 1)))]
         } else {
             vec![]
         },
         n_range_datetime: if full {
-            Some(range(Some(dt("2024-01-01T10:00:00")), None))
+            Some(range(Some(datetime("2024-01-01T10:00:00")), None))
         } else {
             None
         },
         r_range_datetime: range(
-            Some(dt("2024-01-01T10:00:00")),
-            Some(dt("2024-01-02T10:00:00")),
+            Some(datetime("2024-01-01T10:00:00")),
+            Some(datetime("2024-01-02T10:00:00")),
         ),
         a_range_datetime: if full {
             vec![range(
-                Some(dt("2020-01-01T00:00:00")),
-                Some(dt("2021-01-01T00:00:00")),
+                Some(datetime("2020-01-01T00:00:00")),
+                Some(datetime("2021-01-01T00:00:00")),
             )]
         } else {
             vec![]
         },
         n_range_timestamp: if full {
-            Some(range(None, Some(ts("2024-01-01T00:00:00Z"))))
+            Some(range(None, Some(timestamp("2024-01-01T00:00:00Z"))))
         } else {
             None
         },
         r_range_timestamp: range(
-            Some(ts("2024-01-01T00:00:00Z")),
-            Some(ts("2024-01-02T00:00:00Z")),
+            Some(timestamp("2024-01-01T00:00:00Z")),
+            Some(timestamp("2024-01-02T00:00:00Z")),
         ),
         a_range_timestamp: if full {
-            vec![range(Some(ts("2020-01-01T00:00:00Z")), None)]
+            vec![range(Some(timestamp("2020-01-01T00:00:00Z")), None)]
         } else {
             vec![]
         },
@@ -393,9 +399,9 @@ fn expected(id: i64) -> AllTypes {
         // A REQUIRED RANGE carries no validity for its ends, so BigQuery's unbounded start
         // arrives as 1970-01-01.
         rr_range: if full {
-            range(Some(d(1970, 1, 1)), Some(d(2024, 1, 1)))
+            range(Some(date(1970, 1, 1)), Some(date(2024, 1, 1)))
         } else {
-            range(Some(d(2024, 1, 1)), Some(d(1970, 1, 1)))
+            range(Some(date(2024, 1, 1)), Some(date(1970, 1, 1)))
         },
     }
 }

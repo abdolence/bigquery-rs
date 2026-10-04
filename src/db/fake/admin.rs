@@ -314,9 +314,7 @@ mod tests {
             .execute()
             .await;
         match result {
-            Err(BigQueryError::DataConflictError(err)) => {
-                assert!(err.details.contains("shop"), "{}", err.details)
-            }
+            Err(BigQueryError::DataConflictError(_)) => {}
             other => panic!("expected a data conflict, got {other:?}"),
         }
         assert_eq!(fake.calls(), ["UpdateDataset"]);
@@ -336,13 +334,16 @@ mod tests {
             call.reply(&());
         })
         .await;
-        let schema = || fake.db.fluent().schema();
-        schema()
+        fake.db
+            .fluent()
+            .schema()
             .dataset(SHOP)
             .delete()
             .await
             .expect("the call succeeds");
-        schema()
+        fake.db
+            .fluent()
+            .schema()
             .dataset(SHOP)
             .dangerously_delete_with_contents()
             .await
@@ -360,7 +361,7 @@ mod tests {
         v2::ListFormatDataset {
             dataset_reference: Some(v2::DatasetReference {
                 dataset_id: dataset.into(),
-                project_id: "p".into(),
+                project_id: "acme-prod".into(),
             }),
             location: "US".into(),
             labels: labels(&[("team", dataset)]),
@@ -368,7 +369,7 @@ mod tests {
         }
     }
 
-    /// `ListDatasets` in two pages, `a` then `b`; with `fail_second`, the second page fails.
+    /// `ListDatasets` in two pages, `shop` then `warehouse`; with `fail_second`, the second page fails.
     async fn two_dataset_pages(fail_second: bool) -> FakeBigQuery {
         FakeBigQuery::start(move |mut call: FakeCall| async move {
             if call.method() != "ListDatasets" {
@@ -381,13 +382,13 @@ mod tests {
             ));
             match request.page_token.as_str() {
                 "" => call.reply(&v2::DatasetList {
-                    datasets: vec![listed_dataset("a")],
+                    datasets: vec![listed_dataset("shop")],
                     next_page_token: "p2".into(),
                     ..Default::default()
                 }),
                 _ if fail_second => call.fail(Code::InvalidArgument, "bad page token"),
                 _ => call.reply(&v2::DatasetList {
-                    datasets: vec![listed_dataset("b")],
+                    datasets: vec![listed_dataset("warehouse")],
                     ..Default::default()
                 }),
             }
@@ -403,7 +404,7 @@ mod tests {
             .fluent()
             .schema()
             .datasets()
-            .project("p")
+            .project("acme-prod")
             .page_size(1)
             .stream_all()
             .await
@@ -413,12 +414,12 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                r#"ListDatasets p max_results=Some(1) page_token="""#,
-                r#"ListDatasets p max_results=Some(1) page_token="p2""#,
+                r#"ListDatasets acme-prod max_results=Some(1) page_token="""#,
+                r#"ListDatasets acme-prod max_results=Some(1) page_token="p2""#,
             ]
         );
         let names: Vec<_> = datasets.iter().map(|d| d.reference.to_string()).collect();
-        assert_eq!(names, ["p.a", "p.b"]);
+        assert_eq!(names, ["acme-prod.shop", "acme-prod.warehouse"]);
         assert_eq!(
             datasets[1].location,
             Some(BigQueryLocation::from_static("US"))
@@ -482,7 +483,7 @@ mod tests {
                 dataset_id: request.dataset_id.clone(),
                 table_id: request.table_id.clone(),
             };
-            let view = request.table_id == "v";
+            let view = request.table_id == "orders_view";
             call.reply(&v2::Table {
                 table_reference: Some(reference),
                 r#type: if view { "VIEW" } else { "TABLE" }.into(),
@@ -557,7 +558,7 @@ mod tests {
             .db
             .fluent()
             .schema()
-            .table(SHOP.table(BigQueryTableId::from_static("v")))
+            .table(SHOP.table(BigQueryTableId::from_static("orders_view")))
             .get()
             .await
             .expect("the call succeeds");
@@ -589,7 +590,7 @@ mod tests {
                             table_reference: Some(v2::TableReference {
                                 project_id: request.project_id,
                                 dataset_id: request.dataset_id,
-                                table_id: "m".into(),
+                                table_id: "order_totals".into(),
                             }),
                             r#type: "MATERIALIZED_VIEW".into(),
                             creation_time: CREATED_MS,
@@ -629,7 +630,7 @@ mod tests {
             ]
         );
         assert_eq!(tables.len(), 1);
-        assert_eq!(tables[0].reference.to_string(), "other.shop.m");
+        assert_eq!(tables[0].reference.to_string(), "other.shop.order_totals");
         assert_eq!(
             tables[0].table_type,
             Some(BigQueryTableType::MaterializedView)

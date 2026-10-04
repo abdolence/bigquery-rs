@@ -19,7 +19,7 @@ use crate::types::civil;
 use crate::types::decimal::{self, BIGNUMERIC_SCALE, NUMERIC_SCALE};
 use crate::types::error::CodecError;
 use crate::types::interval::BigQueryInterval;
-use crate::types::kind::BqKind;
+use crate::types::kind::FieldKind;
 use crate::types::temporal::temporal_tag_kind;
 use crate::BigQueryResult;
 use arrow_array::cast::AsArray;
@@ -37,56 +37,68 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
 /// The typed view of one column's values.
-enum Cells<'a> {
-    I64(&'a [i64]),
-    F64(&'a [f64]),
+enum ColumnValues<'a> {
+    Int64(&'a [i64]),
+    Float64(&'a [f64]),
     Bool(&'a BooleanArray),
     /// STRING and GEOGRAPHY.
-    Str(&'a StringArray),
+    String(&'a StringArray),
     /// JSON: the text for a string target, parsed for any other. The batch's state is kept for
-    /// the cells holding JSON `null` that an `Option` target reads as `None`.
-    Json(&'a StringArray, Rc<Ctx>),
-    Bin(&'a BinaryArray),
+    /// the values holding JSON `null` that an `Option` target reads as `None`.
+    Json {
+        text: &'a StringArray,
+        state: Rc<BatchState>,
+    },
+    Bytes(&'a BinaryArray),
     Date(&'a [i32]),
     Time(&'a [i64]),
     DateTime(&'a [i64]),
-    Ts(&'a [i64]),
-    /// The unscaled values and their scale.
-    Num(&'a [i128], u32),
-    Big(&'a [i256], u32),
-    Iv(&'a [IntervalMonthDayNano]),
+    Timestamp(&'a [i64]),
+    Numeric {
+        unscaled: &'a [i128],
+        scale: u32,
+    },
+    BigNumeric {
+        unscaled: &'a [i256],
+        scale: u32,
+    },
+    Interval(&'a [IntervalMonthDayNano]),
     List {
         offsets: &'a [i32],
-        child: Box<Column<'a>>,
+        items: Box<Column<'a>>,
     },
     /// STRUCT and RANGE.
-    Struct(Box<Node<'a>>),
+    Struct(Box<StructColumns<'a>>),
 }
 
 pub(crate) struct Column<'a> {
     nulls: Option<&'a NullBuffer>,
-    cells: Cells<'a>,
+    values: ColumnValues<'a>,
 }
 
 impl<'a> Column<'a> {
-    fn new(field: &'a Field, array: &'a ArrayRef, ctx: &Rc<Ctx>) -> Result<Self, CodecError> {
+    fn new(
+        field: &'a Field,
+        array: &'a ArrayRef,
+        state: &Rc<BatchState>,
+    ) -> Result<Self, CodecError> {
         let unsupported = || CodecError::unsupported_arrow_type(field);
         match field.data_type() {
             DataType::List(item) => {
-                let kind = BqKind::from_arrow_list_item(field, item).ok_or_else(unsupported)?;
+                let kind = FieldKind::from_arrow_list_item(field, item).ok_or_else(unsupported)?;
                 let list = array.as_list::<i32>();
-                let child = Column::of_kind(kind, item, list.values(), ctx)?;
+                let items = Column::of_kind(kind, item, list.values(), state)?;
                 Ok(Column {
                     nulls: array.nulls(),
-                    cells: Cells::List {
+                    values: ColumnValues::List {
                         offsets: list.value_offsets(),
-                        child: Box::new(child),
+                        items: Box::new(items),
                     },
                 })
             }
             _ => {
-                let kind = BqKind::from_arrow(field).ok_or_else(unsupported)?;
-                Column::of_kind(kind, field, array, ctx)
+                let kind = FieldKind::from_arrow(field).ok_or_else(unsupported)?;
+                Column::of_kind(kind, field, array, state)
             }
         }
     }
@@ -94,44 +106,53 @@ impl<'a> Column<'a> {
     /// A column whose kind has been classified from `field`, so its Arrow type is the one that
     /// kind is sent as.
     fn of_kind(
-        kind: BqKind,
+        kind: FieldKind,
         field: &'a Field,
         array: &'a ArrayRef,
-        ctx: &Rc<Ctx>,
+        state: &Rc<BatchState>,
     ) -> Result<Self, CodecError> {
-        let cells = match kind {
-            BqKind::Int64 => Cells::I64(array.as_primitive::<Int64Type>().values()),
-            BqKind::Float64 => Cells::F64(array.as_primitive::<Float64Type>().values()),
-            BqKind::Bool => Cells::Bool(array.as_boolean()),
-            BqKind::String | BqKind::Geography => Cells::Str(array.as_string::<i32>()),
-            BqKind::Json => Cells::Json(array.as_string::<i32>(), ctx.clone()),
-            BqKind::Bytes => Cells::Bin(array.as_binary::<i32>()),
-            BqKind::Date => Cells::Date(array.as_primitive::<Date32Type>().values()),
-            BqKind::Time => Cells::Time(array.as_primitive::<Time64MicrosecondType>().values()),
-            BqKind::DateTime => {
-                Cells::DateTime(array.as_primitive::<TimestampMicrosecondType>().values())
+        let values = match kind {
+            FieldKind::Int64 => ColumnValues::Int64(array.as_primitive::<Int64Type>().values()),
+            FieldKind::Float64 => {
+                ColumnValues::Float64(array.as_primitive::<Float64Type>().values())
             }
-            BqKind::Timestamp => {
-                Cells::Ts(array.as_primitive::<TimestampMicrosecondType>().values())
+            FieldKind::Bool => ColumnValues::Bool(array.as_boolean()),
+            FieldKind::String | FieldKind::Geography => {
+                ColumnValues::String(array.as_string::<i32>())
             }
-            BqKind::Numeric => Cells::Num(
-                array.as_primitive::<Decimal128Type>().values(),
-                decimal_scale(field.data_type(), NUMERIC_SCALE),
-            ),
-            BqKind::BigNumeric => Cells::Big(
-                array.as_primitive::<Decimal256Type>().values(),
-                decimal_scale(field.data_type(), BIGNUMERIC_SCALE),
-            ),
-            BqKind::Interval => {
-                Cells::Iv(array.as_primitive::<IntervalMonthDayNanoType>().values())
+            FieldKind::Json => ColumnValues::Json {
+                text: array.as_string::<i32>(),
+                state: state.clone(),
+            },
+            FieldKind::Bytes => ColumnValues::Bytes(array.as_binary::<i32>()),
+            FieldKind::Date => ColumnValues::Date(array.as_primitive::<Date32Type>().values()),
+            FieldKind::Time => {
+                ColumnValues::Time(array.as_primitive::<Time64MicrosecondType>().values())
             }
-            BqKind::Struct | BqKind::Range => match field.data_type() {
+            FieldKind::DateTime => {
+                ColumnValues::DateTime(array.as_primitive::<TimestampMicrosecondType>().values())
+            }
+            FieldKind::Timestamp => {
+                ColumnValues::Timestamp(array.as_primitive::<TimestampMicrosecondType>().values())
+            }
+            FieldKind::Numeric => ColumnValues::Numeric {
+                unscaled: array.as_primitive::<Decimal128Type>().values(),
+                scale: decimal_scale(field.data_type(), NUMERIC_SCALE),
+            },
+            FieldKind::BigNumeric => ColumnValues::BigNumeric {
+                unscaled: array.as_primitive::<Decimal256Type>().values(),
+                scale: decimal_scale(field.data_type(), BIGNUMERIC_SCALE),
+            },
+            FieldKind::Interval => {
+                ColumnValues::Interval(array.as_primitive::<IntervalMonthDayNanoType>().values())
+            }
+            FieldKind::Struct | FieldKind::Range => match field.data_type() {
                 DataType::Struct(fields) => {
                     let array = array.as_struct();
-                    Cells::Struct(Box::new(Node::new(
+                    ColumnValues::Struct(Box::new(StructColumns::new(
                         fields.iter().map(AsRef::as_ref).collect(),
                         array.columns().iter().collect(),
-                        ctx.clone(),
+                        state.clone(),
                     )))
                 }
                 _ => return Err(CodecError::unsupported_arrow_type(field)),
@@ -139,12 +160,12 @@ impl<'a> Column<'a> {
         };
         Ok(Column {
             nulls: array.nulls(),
-            cells,
+            values,
         })
     }
 }
 
-/// Reads the JSON `text` of one cell with `read`, which must consume all of it. A parse error,
+/// Reads the JSON `text` of one value with `read`, which must consume all of it. A parse error,
 /// or JSON that does not fit the target, is a `Custom` error, as it is for
 /// [`BigQueryJson`](crate::BigQueryJson).
 fn parse_json<'a, T>(
@@ -174,34 +195,34 @@ fn decimal_scale(data_type: &DataType, default: u32) -> u32 {
 }
 
 /// State shared by every node of one batch.
-struct Ctx {
+struct BatchState {
     plans_built: Cell<usize>,
     /// Set when a key probe found an alias: the row being decoded is decoded again, whatever
     /// its result, since a target may have swallowed the probe's error.
     redo: Cell<bool>,
-    /// JSON `null` cells, as `(column address, index)`, whose `Option` target could not read
+    /// JSON `null` values, as `(column address, index)`, whose `Option` target could not read
     /// the `null` on an earlier pass over the current row, and that are `None` on the next.
     json_nones: RefCell<Vec<(usize, usize)>>,
 }
 
 /// A row-shaped set of columns: the batch itself, or one STRUCT column.
-pub(crate) struct Node<'a> {
+pub(crate) struct StructColumns<'a> {
     fields: Vec<&'a Field>,
     arrays: Vec<&'a ArrayRef>,
     columns: Vec<OnceCell<Result<Column<'a>, CodecError>>>,
     plans: RefCell<Vec<(usize, usize, Rc<Plan>)>>,
-    ctx: Rc<Ctx>,
+    state: Rc<BatchState>,
 }
 
-impl<'a> Node<'a> {
-    fn new(fields: Vec<&'a Field>, arrays: Vec<&'a ArrayRef>, ctx: Rc<Ctx>) -> Self {
+impl<'a> StructColumns<'a> {
+    fn new(fields: Vec<&'a Field>, arrays: Vec<&'a ArrayRef>, state: Rc<BatchState>) -> Self {
         let columns = (0..fields.len()).map(|_| OnceCell::new()).collect();
-        Node {
+        StructColumns {
             fields,
             arrays,
             columns,
             plans: RefCell::new(Vec::new()),
-            ctx,
+            state,
         }
     }
 
@@ -209,15 +230,15 @@ impl<'a> Node<'a> {
         self.fields[c].name()
     }
 
-    pub(crate) fn col(&self, c: usize) -> Result<&Column<'a>, CodecError> {
+    pub(crate) fn column(&self, c: usize) -> Result<&Column<'a>, CodecError> {
         self.columns[c]
-            .get_or_init(|| Column::new(self.fields[c], self.arrays[c], &self.ctx))
+            .get_or_init(|| Column::new(self.fields[c], self.arrays[c], &self.state))
             .as_ref()
             .map_err(Clone::clone)
     }
 
     pub(crate) fn request_redo(&self) {
-        self.ctx.redo.set(true);
+        self.state.redo.set(true);
     }
 
     fn plan(&self, fields: &'static [&'static str]) -> Rc<Plan> {
@@ -228,7 +249,7 @@ impl<'a> Node<'a> {
         let names: Vec<&str> = self.fields.iter().map(|f| f.name().as_str()).collect();
         let plan = Rc::new(Plan::resolve(fields, &names));
         self.plans.borrow_mut().push((key.0, key.1, plan.clone()));
-        self.ctx.plans_built.set(self.ctx.plans_built.get() + 1);
+        self.state.plans_built.set(self.state.plans_built.get() + 1);
         plan
     }
 
@@ -264,9 +285,9 @@ impl<'a> Node<'a> {
 #[cfg(test)]
 impl Column<'_> {
     fn name_key_plans(&self) -> usize {
-        match &self.cells {
-            Cells::Struct(node) => node.name_key_plans(),
-            Cells::List { child, .. } => child.name_key_plans(),
+        match &self.values {
+            ColumnValues::Struct(node) => node.name_key_plans(),
+            ColumnValues::List { items, .. } => items.name_key_plans(),
             _ => 0,
         }
     }
@@ -274,13 +295,13 @@ impl Column<'_> {
 
 /// Every column of a node, keyed by name: the path of `flatten`, maps and dynamic values,
 /// which have to see every column.
-struct AllMap<'n, 'a> {
-    node: &'n Node<'a>,
+struct EveryColumnMap<'n, 'a> {
+    node: &'n StructColumns<'a>,
     row: usize,
     i: usize,
 }
 
-impl<'a> MapAccess<'a> for AllMap<'_, 'a> {
+impl<'a> MapAccess<'a> for EveryColumnMap<'_, 'a> {
     type Error = CodecError;
 
     fn next_key_seed<K: DeserializeSeed<'a>>(
@@ -298,8 +319,8 @@ impl<'a> MapAccess<'a> for AllMap<'_, 'a> {
     fn next_value_seed<S: DeserializeSeed<'a>>(&mut self, seed: S) -> Result<S::Value, CodecError> {
         let c = self.i - 1;
         self.node
-            .col(c)
-            .and_then(|col| seed.deserialize(ValueDe::new(col, self.row)))
+            .column(c)
+            .and_then(|column| seed.deserialize(ValueDeserializer::new(column, self.row)))
             .map_err(|e| e.at_field(self.node.name(c)))
     }
 
@@ -309,13 +330,13 @@ impl<'a> MapAccess<'a> for AllMap<'_, 'a> {
 }
 
 /// Every column by position, for tuple rows.
-struct AllSeq<'n, 'a> {
-    node: &'n Node<'a>,
+struct EveryColumnSeq<'n, 'a> {
+    node: &'n StructColumns<'a>,
     row: usize,
     i: usize,
 }
 
-impl<'a> SeqAccess<'a> for AllSeq<'_, 'a> {
+impl<'a> SeqAccess<'a> for EveryColumnSeq<'_, 'a> {
     type Error = CodecError;
 
     fn next_element_seed<S: DeserializeSeed<'a>>(
@@ -328,8 +349,8 @@ impl<'a> SeqAccess<'a> for AllSeq<'_, 'a> {
         let c = self.i;
         self.i += 1;
         self.node
-            .col(c)
-            .and_then(|col| seed.deserialize(ValueDe::new(col, self.row)))
+            .column(c)
+            .and_then(|column| seed.deserialize(ValueDeserializer::new(column, self.row)))
             .map(Some)
             .map_err(|e| e.at_field(self.node.name(c)))
     }
@@ -340,7 +361,7 @@ impl<'a> SeqAccess<'a> for AllSeq<'_, 'a> {
 }
 
 struct ListSeq<'c, 'a> {
-    child: &'c Column<'a>,
+    items: &'c Column<'a>,
     start: usize,
     i: usize,
     end: usize,
@@ -358,7 +379,7 @@ impl<'a> SeqAccess<'a> for ListSeq<'_, 'a> {
         }
         let i = self.i;
         self.i += 1;
-        seed.deserialize(ValueDe::new(self.child, i))
+        seed.deserialize(ValueDeserializer::new(self.items, i))
             .map(Some)
             .map_err(|e| e.at_index(i - self.start))
     }
@@ -432,20 +453,20 @@ fn jiff_max_micros() -> i64 {
     jiff::Timestamp::MAX.as_microsecond()
 }
 
-/// One cell.
-pub(crate) struct ValueDe<'c, 'a> {
-    col: &'c Column<'a>,
+/// The value of one column at one row.
+pub(crate) struct ValueDeserializer<'c, 'a> {
+    column: &'c Column<'a>,
     row: usize,
 }
 
-impl<'c, 'a> ValueDe<'c, 'a> {
-    pub(crate) fn new(col: &'c Column<'a>, row: usize) -> Self {
-        ValueDe { col, row }
+impl<'c, 'a> ValueDeserializer<'c, 'a> {
+    pub(crate) fn new(column: &'c Column<'a>, row: usize) -> Self {
+        ValueDeserializer { column, row }
     }
 
     #[inline]
     fn is_null(&self) -> bool {
-        self.col.nulls.is_some_and(|n| n.is_null(self.row))
+        self.column.nulls.is_some_and(|n| n.is_null(self.row))
     }
 
     #[inline]
@@ -461,39 +482,45 @@ impl<'c, 'a> ValueDe<'c, 'a> {
     }
 
     /// The canonical text of a value whose only Rust form besides a number or a wrapper is a
-    /// string. `false` for cells that are not of that sort.
+    /// string. `false` for values that are not of that sort.
     fn text(&self, out: &mut String) -> bool {
         let r = self.row;
-        match &self.col.cells {
-            Cells::Date(v) => civil::fmt_date(v[r], out),
-            Cells::Time(v) => civil::fmt_time(v[r], out),
-            Cells::DateTime(v) => civil::fmt_datetime(v[r], out),
-            Cells::Ts(v) => civil::fmt_timestamp(v[r], out),
-            Cells::Num(v, scale) => decimal::fmt_decimal_i128(v[r], *scale, out),
-            Cells::Big(v, scale) => decimal::fmt_decimal_i256(v[r], *scale, out),
-            Cells::Iv(v) => BigQueryInterval::from(v[r]).write_bq(out),
+        match &self.column.values {
+            ColumnValues::Date(v) => civil::fmt_date(v[r], out),
+            ColumnValues::Time(v) => civil::fmt_time(v[r], out),
+            ColumnValues::DateTime(v) => civil::fmt_datetime(v[r], out),
+            ColumnValues::Timestamp(v) => civil::fmt_timestamp(v[r], out),
+            ColumnValues::Numeric { unscaled: v, scale } => {
+                decimal::fmt_decimal_i128(v[r], *scale, out)
+            }
+            ColumnValues::BigNumeric { unscaled: v, scale } => {
+                decimal::fmt_decimal_i256(v[r], *scale, out)
+            }
+            ColumnValues::Interval(v) => BigQueryInterval::from(v[r]).write_bq(out),
             _ => return false,
         }
         true
     }
 
-    /// The integer of a temporal cell: days for DATE, microseconds otherwise.
-    fn temporal_int(&self) -> Option<i64> {
+    /// The integer of a temporal value: days for DATE, microseconds otherwise.
+    fn temporal_integer(&self) -> Option<i64> {
         let r = self.row;
-        match &self.col.cells {
-            Cells::Date(v) => Some(i64::from(v[r])),
-            Cells::Time(v) | Cells::DateTime(v) | Cells::Ts(v) => Some(v[r]),
+        match &self.column.values {
+            ColumnValues::Date(v) => Some(i64::from(v[r])),
+            ColumnValues::Time(v) | ColumnValues::DateTime(v) | ColumnValues::Timestamp(v) => {
+                Some(v[r])
+            }
             _ => None,
         }
     }
 
-    /// The whole number a NUMERIC or BIGNUMERIC cell holds; `OutOfRange` when it has a
+    /// The whole number a NUMERIC or BIGNUMERIC value holds; `OutOfRange` when it has a
     /// fractional part or is beyond `i128`.
     fn whole_decimal(&self) -> Option<Result<i128, CodecError>> {
         let r = self.row;
-        let (value, scale) = match &self.col.cells {
-            Cells::Num(v, scale) => (i256::from_i128(v[r]), *scale),
-            Cells::Big(v, scale) => (v[r], *scale),
+        let (value, scale) = match &self.column.values {
+            ColumnValues::Numeric { unscaled: v, scale } => (i256::from_i128(v[r]), *scale),
+            ColumnValues::BigNumeric { unscaled: v, scale } => (v[r], *scale),
             _ => return None,
         };
         let text = || {
@@ -521,9 +548,9 @@ impl<'c, 'a> ValueDe<'c, 'a> {
     }
 
     /// An integer target of 64 bits or fewer; serde's visitors check the narrower ranges.
-    fn int<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn integer<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        if let Some(x) = self.temporal_int() {
+        if let Some(x) = self.temporal_integer() {
             return v.visit_i64(x);
         }
         if let Some(whole) = self.whole_decimal() {
@@ -542,35 +569,35 @@ impl<'c, 'a> ValueDe<'c, 'a> {
         self.any_non_null(v)
     }
 
-    fn int128<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn integer128<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
         match self.whole_decimal() {
             Some(whole) => v.visit_i128(whole?),
-            None => self.int(v),
+            None => self.integer(v),
         }
     }
 
     fn any_non_null<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         let r = self.row;
-        match &self.col.cells {
-            Cells::I64(a) => v.visit_i64(a[r]),
-            Cells::F64(a) => v.visit_f64(a[r]),
-            Cells::Bool(a) => v.visit_bool(a.value(r)),
-            Cells::Str(a) => v.visit_borrowed_str(a.value(r)),
-            Cells::Json(a, _) => {
+        match &self.column.values {
+            ColumnValues::Int64(a) => v.visit_i64(a[r]),
+            ColumnValues::Float64(a) => v.visit_f64(a[r]),
+            ColumnValues::Bool(a) => v.visit_bool(a.value(r)),
+            ColumnValues::String(a) => v.visit_borrowed_str(a.value(r)),
+            ColumnValues::Json { text: a, .. } => {
                 parse_json(a.value(r), |de| de::Deserializer::deserialize_any(de, v))
             }
-            Cells::Bin(a) => v.visit_borrowed_bytes(a.value(r)),
-            Cells::List { offsets, child } => {
+            ColumnValues::Bytes(a) => v.visit_borrowed_bytes(a.value(r)),
+            ColumnValues::List { offsets, items } => {
                 let (start, end) = (offsets[r] as usize, offsets[r + 1] as usize);
                 v.visit_seq(ListSeq {
-                    child,
+                    items,
                     start,
                     i: start,
                     end,
                 })
             }
-            Cells::Struct(node) => v.visit_map(AllMap { node, row: r, i: 0 }),
+            ColumnValues::Struct(node) => v.visit_map(EveryColumnMap { node, row: r, i: 0 }),
             _ => {
                 let mut s = String::with_capacity(48);
                 self.text(&mut s);
@@ -583,10 +610,10 @@ impl<'c, 'a> ValueDe<'c, 'a> {
     /// and its parse error would read as a bad text; it is reported as the range error it is.
     fn string<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        if let Cells::Json(a, _) = &self.col.cells {
+        if let ColumnValues::Json { text: a, .. } = &self.column.values {
             return v.visit_borrowed_str(a.value(self.row));
         }
-        if let Cells::Ts(a) = &self.col.cells {
+        if let ColumnValues::Timestamp(a) = &self.column.values {
             let micros = a[self.row];
             let mut s = String::with_capacity(32);
             civil::fmt_timestamp(micros, &mut s);
@@ -608,7 +635,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
     }
 }
 
-impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
+impl<'a> de::Deserializer<'a> for ValueDeserializer<'_, 'a> {
     type Error = CodecError;
 
     fn deserialize_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
@@ -620,22 +647,22 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
 
     /// SQL NULL is `None`. JSON `null` is offered to the target as `Some` first, so that a
     /// target that holds `null`, such as `serde_json::Value`, keeps it apart from SQL NULL; a
-    /// target that cannot read it fails, and the row is decoded again with that cell as `None`.
+    /// target that cannot read it fails, and the row is decoded again with that value as `None`.
     fn deserialize_option<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         if self.is_null() {
             return v.visit_none();
         }
-        let col = self.col;
-        if let Cells::Json(a, ctx) = &col.cells {
+        let column = self.column;
+        if let ColumnValues::Json { text: a, state } = &column.values {
             if a.value(self.row).trim_ascii() == "null" {
-                let cell = (std::ptr::from_ref(col) as usize, self.row);
-                if ctx.json_nones.borrow().contains(&cell) {
+                let position = (std::ptr::from_ref(column) as usize, self.row);
+                if state.json_nones.borrow().contains(&position) {
                     return v.visit_none();
                 }
                 let some = v.visit_some(self);
                 if some.is_err() {
-                    ctx.json_nones.borrow_mut().push(cell);
-                    ctx.redo.set(true);
+                    state.json_nones.borrow_mut().push(position);
+                    state.redo.set(true);
                 }
                 return some;
             }
@@ -664,49 +691,49 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
     }
 
     fn deserialize_i8<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_i16<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_i32<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_i64<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_i128<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int128(v)
+        self.integer128(v)
     }
 
     fn deserialize_u8<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_u16<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_u32<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_u64<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int(v)
+        self.integer(v)
     }
 
     fn deserialize_u128<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.int128(v)
+        self.integer128(v)
     }
 
     fn deserialize_f64<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        match &self.col.cells {
-            Cells::Num(..) | Cells::Big(..) => {
+        match &self.column.values {
+            ColumnValues::Numeric { .. } | ColumnValues::BigNumeric { .. } => {
                 let mut s = String::with_capacity(48);
                 self.text(&mut s);
                 let x = s.parse().map_err(|_| {
@@ -717,7 +744,7 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
                 })?;
                 v.visit_f64(x)
             }
-            Cells::I64(_) => Err(CodecError::new(
+            ColumnValues::Int64(_) => Err(CodecError::new(
                 BigQueryCodecErrorKind::TypeMismatch,
                 "an INT64 column cannot be read into a float; read it into an integer type",
             )),
@@ -731,12 +758,12 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
 
     fn deserialize_seq<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        match &self.col.cells {
-            Cells::Bin(a) => v.visit_seq(ByteSeq {
+        match &self.column.values {
+            ColumnValues::Bytes(a) => v.visit_seq(ByteSeq {
                 bytes: a.value(self.row),
                 i: 0,
             }),
-            Cells::Iv(a) => v.visit_seq(IntervalSeq {
+            ColumnValues::Interval(a) => v.visit_seq(IntervalSeq {
                 value: a[self.row],
                 i: 0,
             }),
@@ -764,9 +791,9 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
         v: V,
     ) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        match &self.col.cells {
-            Cells::Struct(node) => node.visit_struct(self.row, fields, v),
-            Cells::Iv(a) => v.visit_seq(IntervalSeq {
+        match &self.column.values {
+            ColumnValues::Struct(node) => node.visit_struct(self.row, fields, v),
+            ColumnValues::Interval(a) => v.visit_seq(IntervalSeq {
                 value: a[self.row],
                 i: 0,
             }),
@@ -775,7 +802,7 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
     }
 
     /// A temporal wrapper gets the column's integer, after its name is checked against the
-    /// column type, since the integer's unit depends on it. Any other newtype sees the cell.
+    /// column type, since the integer's unit depends on it. Any other newtype sees the value.
     fn deserialize_newtype_struct<V: Visitor<'a>>(
         self,
         name: &'static str,
@@ -786,11 +813,11 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
         };
         self.non_null()?;
         let r = self.row;
-        let raw = match (wanted, &self.col.cells) {
-            (BqKind::Date, Cells::Date(a)) => i64::from(a[r]),
-            (BqKind::Time, Cells::Time(a))
-            | (BqKind::DateTime, Cells::DateTime(a))
-            | (BqKind::Timestamp, Cells::Ts(a)) => a[r],
+        let raw = match (wanted, &self.column.values) {
+            (FieldKind::Date, ColumnValues::Date(a)) => i64::from(a[r]),
+            (FieldKind::Time, ColumnValues::Time(a))
+            | (FieldKind::DateTime, ColumnValues::DateTime(a))
+            | (FieldKind::Timestamp, ColumnValues::Timestamp(a)) => a[r],
             _ => {
                 return Err(CodecError::new(
                     BigQueryCodecErrorKind::TypeMismatch,
@@ -811,9 +838,11 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
         v: V,
     ) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        match &self.col.cells {
-            Cells::Str(a) => v.visit_enum(BorrowedStrDeserializer::new(a.value(self.row))),
-            Cells::Json(a, _) => parse_json(a.value(self.row), |de| {
+        match &self.column.values {
+            ColumnValues::String(a) => {
+                v.visit_enum(BorrowedStrDeserializer::new(a.value(self.row)))
+            }
+            ColumnValues::Json { text: a, .. } => parse_json(a.value(self.row), |de| {
                 de::Deserializer::deserialize_enum(de, name, variants, v)
             }),
             _ => self.any_non_null(v),
@@ -860,16 +889,16 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
 }
 
 /// One row of the batch.
-struct RowDe<'n, 'a> {
-    node: &'n Node<'a>,
+struct RowDeserializer<'n, 'a> {
+    node: &'n StructColumns<'a>,
     row: usize,
 }
 
-impl<'a> de::Deserializer<'a> for RowDe<'_, 'a> {
+impl<'a> de::Deserializer<'a> for RowDeserializer<'_, 'a> {
     type Error = CodecError;
 
     fn deserialize_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        v.visit_map(AllMap {
+        v.visit_map(EveryColumnMap {
             node: self.node,
             row: self.row,
             i: 0,
@@ -886,7 +915,7 @@ impl<'a> de::Deserializer<'a> for RowDe<'_, 'a> {
     }
 
     fn deserialize_seq<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        v.visit_seq(AllSeq {
+        v.visit_seq(EveryColumnSeq {
             node: self.node,
             row: self.row,
             i: 0,
@@ -928,14 +957,14 @@ impl<'a> de::Deserializer<'a> for RowDe<'_, 'a> {
 /// A decoder over one `RecordBatch`. It is not `Send`: decode a batch on the thread that holds
 /// it, and do not hold the decoder across an `.await`.
 pub(crate) struct BatchDecoder<'a> {
-    root: Node<'a>,
+    root: StructColumns<'a>,
     rows: usize,
-    ctx: Rc<Ctx>,
+    state: Rc<BatchState>,
 }
 
 impl<'a> BatchDecoder<'a> {
     pub(crate) fn new(batch: &'a RecordBatch) -> Self {
-        let ctx = Rc::new(Ctx {
+        let state = Rc::new(BatchState {
             plans_built: Cell::new(0),
             redo: Cell::new(false),
             json_nones: RefCell::new(Vec::new()),
@@ -946,11 +975,11 @@ impl<'a> BatchDecoder<'a> {
             .iter()
             .map(AsRef::as_ref)
             .collect();
-        let root = Node::new(fields, batch.columns().iter().collect(), ctx.clone());
+        let root = StructColumns::new(fields, batch.columns().iter().collect(), state.clone());
         BatchDecoder {
             root,
             rows: batch.num_rows(),
-            ctx,
+            state,
         }
     }
 
@@ -966,15 +995,15 @@ impl<'a> BatchDecoder<'a> {
                 format!("row {i} of a batch with {} rows", self.rows),
             ));
         }
-        self.ctx.json_nones.borrow_mut().clear();
+        self.state.json_nones.borrow_mut().clear();
         loop {
-            let result = T::deserialize(RowDe {
+            let result = T::deserialize(RowDeserializer {
                 node: &self.root,
                 row: i,
             });
-            // Every pass that asks for another adds a name-key plan or a `None` cell, and
+            // Every pass that asks for another adds a name-key plan or a `None` value, and
             // neither is undone within the row, so the loop ends.
-            if !self.ctx.redo.replace(false) {
+            if !self.state.redo.replace(false) {
                 return result;
             }
         }
@@ -982,7 +1011,7 @@ impl<'a> BatchDecoder<'a> {
 
     #[cfg(test)]
     pub(crate) fn plans_built(&self) -> usize {
-        self.ctx.plans_built.get()
+        self.state.plans_built.get()
     }
 
     /// How many struct plans of this batch use name keys.

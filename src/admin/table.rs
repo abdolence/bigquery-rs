@@ -2,9 +2,8 @@
 //! by the declarative schema API.
 
 use crate::admin::paged;
-use crate::db::proto::{timestamp_ms, NonEmpty};
+use crate::db::proto::timestamp_ms;
 use crate::errors::BigQueryError;
-use crate::schema::table_partitioning;
 use crate::BigQueryInstant;
 use crate::{
     BigQueryDatasetRef, BigQueryDb, BigQueryPartitioning, BigQueryResult, BigQueryTableRef,
@@ -142,7 +141,7 @@ impl TryFrom<v2::Table> for BigQueryTable {
     type Error = BigQueryError;
 
     fn try_from(table: v2::Table) -> Result<Self, Self::Error> {
-        let (partitioning, _) = table_partitioning(&table)?;
+        let (partitioning, _) = BigQueryPartitioning::from_table(&table)?;
         let schema = table
             .schema
             .as_ref()
@@ -153,9 +152,9 @@ impl TryFrom<v2::Table> for BigQueryTable {
         let last_modified_time = i64::try_from(table.last_modified_time).unwrap_or(i64::MAX);
         Ok(Self {
             reference: table_reference(table.table_reference)?,
-            table_type: table.r#type.non_empty().map(Into::into),
+            table_type: Some(table.r#type).filter(|v| !v.is_empty()).map(Into::into),
             schema,
-            description: table.description.and_then(NonEmpty::non_empty),
+            description: table.description.filter(|v| !v.is_empty()),
             labels: table.labels.into_iter().collect(),
             partitioning,
             clustering: table.clustering.map(|c| c.fields).unwrap_or_default(),
@@ -179,7 +178,7 @@ impl TryFrom<v2::ListFormatTable> for BigQueryTableSummary {
     fn try_from(table: v2::ListFormatTable) -> Result<Self, Self::Error> {
         Ok(Self {
             reference: table_reference(table.table_reference)?,
-            table_type: table.r#type.non_empty().map(Into::into),
+            table_type: Some(table.r#type).filter(|v| !v.is_empty()).map(Into::into),
             labels: table.labels.into_iter().collect(),
             creation_time: timestamp_ms("creation_time", table.creation_time)?,
             expiration_time: timestamp_ms("expiration_time", table.expiration_time)?,

@@ -4,14 +4,14 @@
 //! in the codecs. Each wrapper serializes as a newtype struct with a crate-private name around
 //! an inner value that writes text to a human-readable serializer and the BigQuery integer to
 //! any other. serde_json sees a transparent newtype and writes what plain jiff writes; the
-//! codecs recognise the name, take the integer through [`capture_int`], and read by handing the
+//! codecs recognise the name, take the integer through [`capture_integer`], and read by handing the
 //! visitor the Arrow integer. The integer has a unit, so the codecs check the name against the
 //! column type.
 
 use crate::errors::BigQueryCodecErrorKind;
 use crate::types::civil;
 use crate::types::error::CodecError;
-use crate::types::kind::BqKind;
+use crate::types::kind::FieldKind;
 use serde::de::{Unexpected, Visitor};
 use serde::ser::Impossible;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -24,12 +24,12 @@ pub(crate) const TAG_TIME: &str = "BigQueryTime";
 pub(crate) const TAG_DATETIME: &str = "BigQueryDateTime";
 
 /// The column kind a temporal wrapper's serde name stands for; `None` for any other name.
-pub(crate) fn temporal_tag_kind(name: &str) -> Option<BqKind> {
+pub(crate) fn temporal_tag_kind(name: &str) -> Option<FieldKind> {
     match name {
-        TAG_TIMESTAMP => Some(BqKind::Timestamp),
-        TAG_DATE => Some(BqKind::Date),
-        TAG_TIME => Some(BqKind::Time),
-        TAG_DATETIME => Some(BqKind::DateTime),
+        TAG_TIMESTAMP => Some(FieldKind::Timestamp),
+        TAG_DATE => Some(FieldKind::Date),
+        TAG_TIME => Some(FieldKind::Time),
+        TAG_DATETIME => Some(FieldKind::DateTime),
         _ => None,
     }
 }
@@ -38,8 +38,8 @@ pub(crate) fn temporal_tag_kind(name: &str) -> Option<BqKind> {
 /// so a temporal wrapper or its inner value yields its BigQuery integer. Anything that is not a
 /// single integer is `TypeMismatch`; a `u64` above `i64::MAX` is `OutOfRange`. The integer is
 /// not checked against BigQuery's range, which the caller does for its column type.
-pub(crate) fn capture_int<T: Serialize + ?Sized>(value: &T) -> Result<i64, CodecError> {
-    value.serialize(IntCapture)
+pub(crate) fn capture_integer<T: Serialize + ?Sized>(value: &T) -> Result<i64, CodecError> {
+    value.serialize(IntegerCapture)
 }
 
 /// A jiff civil or absolute time with a BigQuery integer form.
@@ -462,12 +462,12 @@ pub mod serialize_as_optional_datetime {
     }
 }
 
-/// The serializer behind [`capture_int`]. It is the only serializer in the crate that reports
+/// The serializer behind [`capture_integer`]. It is the only serializer in the crate that reports
 /// `is_human_readable() == false`: ordinary values never see it, since types such as `uuid`
 /// change their form when it is `false`.
-struct IntCapture;
+struct IntegerCapture;
 
-impl IntCapture {
+impl IntegerCapture {
     /// The error for a serde form, described by `what`, that is not an integer.
     fn not_an_integer(what: &str) -> CodecError {
         CodecError::type_mismatch(format!(
@@ -476,7 +476,7 @@ impl IntCapture {
     }
 }
 
-impl Serializer for IntCapture {
+impl Serializer for IntegerCapture {
     type Ok = i64;
     type Error = CodecError;
     type SerializeSeq = Impossible<i64, CodecError>;
@@ -645,4 +645,225 @@ impl Serializer for IntCapture {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::types::civil::MICROS_PER_DAY;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Plain {
+        ts: jiff::Timestamp,
+        d: jiff::civil::Date,
+        t: jiff::civil::Time,
+        dt: jiff::civil::DateTime,
+        ots: Option<jiff::Timestamp>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Wrapped {
+        ts: BigQueryTimestamp,
+        d: BigQueryDate,
+        t: BigQueryTime,
+        dt: BigQueryDateTime,
+        ots: Option<BigQueryTimestamp>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct WithModules {
+        #[serde(with = "serialize_as_timestamp")]
+        ts: jiff::Timestamp,
+        #[serde(with = "serialize_as_date")]
+        d: jiff::civil::Date,
+        #[serde(with = "serialize_as_time")]
+        t: jiff::civil::Time,
+        #[serde(with = "serialize_as_datetime")]
+        dt: jiff::civil::DateTime,
+        #[serde(with = "serialize_as_optional_timestamp")]
+        ots: Option<jiff::Timestamp>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct OptionalModules {
+        #[serde(with = "serialize_as_optional_date")]
+        d: Option<jiff::civil::Date>,
+        #[serde(with = "serialize_as_optional_time")]
+        t: Option<jiff::civil::Time>,
+        #[serde(with = "serialize_as_optional_datetime")]
+        dt: Option<jiff::civil::DateTime>,
+    }
+
+    fn sample() -> (
+        jiff::Timestamp,
+        jiff::civil::Date,
+        jiff::civil::Time,
+        jiff::civil::DateTime,
+    ) {
+        (
+            "2024-02-29T12:34:56.789012Z"
+                .parse()
+                .expect("valid test input"),
+            jiff::civil::date(2024, 2, 29),
+            "23:59:59.999999".parse().expect("valid test input"),
+            "2024-02-29T12:34:56.789012"
+                .parse()
+                .expect("valid test input"),
+        )
+    }
+
+    fn plain() -> Plain {
+        let (ts, d, t, dt) = sample();
+        Plain {
+            ts,
+            d,
+            t,
+            dt,
+            ots: Some(ts),
+        }
+    }
+
+    fn wrapped() -> Wrapped {
+        let (ts, d, t, dt) = sample();
+        Wrapped {
+            ts: BigQueryTimestamp(ts),
+            d: BigQueryDate(d),
+            t: BigQueryTime(t),
+            dt: BigQueryDateTime(dt),
+            ots: Some(BigQueryTimestamp(ts)),
+        }
+    }
+
+    #[test]
+    fn temporal_wrappers_serialize_to_json_like_plain_jiff() {
+        let plain = serde_json::to_string(&plain()).expect("valid test input");
+        assert_eq!(
+            serde_json::to_string(&wrapped()).expect("valid test input"),
+            plain
+        );
+        assert_eq!(
+            serde_json::to_string(&Wrapped {
+                ots: None,
+                ..wrapped()
+            })
+            .expect("valid test input"),
+            serde_json::to_string(&Plain {
+                ots: None,
+                ..self::plain()
+            })
+            .expect("valid test input")
+        );
+    }
+
+    #[test]
+    fn temporal_wrappers_round_trip_through_json() {
+        let json = serde_json::to_string(&wrapped()).expect("valid test input");
+        assert_eq!(
+            serde_json::from_str::<Wrapped>(&json).expect("valid test input"),
+            wrapped()
+        );
+        let from_plain = serde_json::to_string(&plain()).expect("valid test input");
+        assert_eq!(
+            serde_json::from_str::<Wrapped>(&from_plain).expect("valid test input"),
+            wrapped()
+        );
+        assert!(serde_json::from_str::<BigQueryDate>("\"2024-13-01\"").is_err());
+        assert!(
+            serde_json::from_str::<BigQueryDate>("19782").is_err(),
+            "JSON carries the text form"
+        );
+    }
+
+    #[test]
+    fn with_modules_match_the_wrappers() {
+        let (ts, d, t, dt) = sample();
+        let modules = WithModules {
+            ts,
+            d,
+            t,
+            dt,
+            ots: Some(ts),
+        };
+        let json = serde_json::to_string(&modules).expect("valid test input");
+        assert_eq!(
+            json,
+            serde_json::to_string(&wrapped()).expect("valid test input")
+        );
+        assert_eq!(
+            serde_json::from_str::<WithModules>(&json).expect("valid test input"),
+            modules
+        );
+
+        let none = WithModules {
+            ots: None,
+            ..modules
+        };
+        let json = serde_json::to_string(&none).expect("valid test input");
+        assert_eq!(
+            json,
+            serde_json::to_string(&Wrapped {
+                ots: None,
+                ..wrapped()
+            })
+            .expect("valid test input")
+        );
+        assert_eq!(
+            serde_json::from_str::<WithModules>(&json).expect("valid test input"),
+            none
+        );
+
+        let optional = OptionalModules {
+            d: Some(d),
+            t: None,
+            dt: Some(dt),
+        };
+        let json = serde_json::to_string(&optional).expect("valid test input");
+        assert_eq!(json, format!(r#"{{"d":"{d}","t":null,"dt":"{dt}"}}"#));
+        assert_eq!(
+            serde_json::from_str::<OptionalModules>(&json).expect("valid test input"),
+            optional
+        );
+
+        let (ts_int, d_int, t_int, dt_int) = (
+            capture_integer(&ModuleField(&ts)).expect("valid test input"),
+            capture_integer(&BigQueryDate(d)).expect("valid test input"),
+            capture_integer(&BigQueryTime(t)).expect("valid test input"),
+            capture_integer(&BigQueryDateTime(dt)).expect("valid test input"),
+        );
+        assert_eq!(ts_int, 19782 * MICROS_PER_DAY + 45_296_789_012);
+        assert_eq!(d_int, 19782);
+        assert_eq!(t_int, 86_399_999_999);
+        assert_eq!(dt_int, 19782 * MICROS_PER_DAY + 45_296_789_012);
+    }
+
+    /// A field serialized through the `with` module alone, the way a derived struct hands it to a
+    /// serializer.
+    struct ModuleField<'a>(&'a jiff::Timestamp);
+
+    impl Serialize for ModuleField<'_> {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            serialize_as_timestamp::serialize(self.0, s)
+        }
+    }
+
+    #[test]
+    fn integer_capture_sees_the_wrapper_name_and_not_plain_jiff() {
+        let (ts, d, _, _) = sample();
+        assert_eq!(temporal_tag_kind(TAG_TIMESTAMP), Some(FieldKind::Timestamp));
+        assert_eq!(temporal_tag_kind(TAG_DATE), Some(FieldKind::Date));
+        assert_eq!(temporal_tag_kind(TAG_TIME), Some(FieldKind::Time));
+        assert_eq!(temporal_tag_kind(TAG_DATETIME), Some(FieldKind::DateTime));
+        assert_eq!(temporal_tag_kind("BigQueryJson"), None);
+        assert_eq!(
+            capture_integer(&BigQueryTimestamp(ts)).ok(),
+            Some(19782 * MICROS_PER_DAY + 45_296_789_012)
+        );
+        assert_eq!(capture_integer(&7i32).ok(), Some(7));
+        let err = capture_integer(&d).map_err(CodecError::into_serialize);
+        assert!(
+            matches!(err, Err(crate::errors::BigQueryError::SerializeError(ref e)) if e.kind == BigQueryCodecErrorKind::TypeMismatch),
+            "plain jiff speaks text: {err:?}"
+        );
+        let below_year_one = BigQueryDate(jiff::civil::date(-5, 1, 1));
+        assert!(capture_integer(&below_year_one)
+            .is_ok_and(|days| days < crate::types::civil::DATE_MIN_DAYS.into()));
+    }
+}

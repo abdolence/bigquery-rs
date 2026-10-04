@@ -18,7 +18,7 @@ use std::str::FromStr;
 /// use bigquery::BigQueryLocation;
 ///
 /// const EU: BigQueryLocation = BigQueryLocation::from_static("EU");
-/// assert_eq!(EU, "EU");
+/// assert_eq!(EU.to_string(), "EU");
 ///
 /// let region: BigQueryLocation = "europe-west1".parse()?;
 /// assert_eq!(region.to_string(), "europe-west1");
@@ -65,12 +65,6 @@ impl BigQueryLocation {
     }
 }
 
-impl AsRef<str> for BigQueryLocation {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
 impl Display for BigQueryLocation {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         Display::fmt(self.0.as_ref(), f)
@@ -101,12 +95,6 @@ impl FromStr for BigQueryLocation {
     }
 }
 
-impl PartialEq<&str> for BigQueryLocation {
-    fn eq(&self, other: &&str) -> bool {
-        self.0.as_ref() == *other
-    }
-}
-
 impl Serialize for BigQueryLocation {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
@@ -119,13 +107,17 @@ mod tests {
 
     #[test]
     fn an_empty_location_is_refused_everywhere_it_can_be_built() {
-        let err = BigQueryLocation::new("").expect_err("an empty location");
-        assert!(err.to_string().contains("location"), "{err}");
+        match BigQueryLocation::new("") {
+            Err(BigQueryError::InvalidParametersError(err)) => {
+                assert_eq!(err.public.field, "location")
+            }
+            other => panic!("expected an invalid location, got {other:?}"),
+        }
         assert!("".parse::<BigQueryLocation>().is_err());
         assert!(serde_json::from_str::<BigQueryLocation>(r#""""#).is_err());
         assert_eq!(
             serde_json::from_str::<BigQueryLocation>(r#""EU""#).expect("a location"),
-            "EU"
+            BigQueryLocation::from_static("EU")
         );
     }
 }

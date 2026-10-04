@@ -3,6 +3,7 @@ use bigquery::*;
 use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use gcloud_sdk::google::cloud::bigquery::v2 as bq;
 
+#[path = "support/common.rs"]
 mod common;
 use common::*;
 

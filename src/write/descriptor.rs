@@ -2,7 +2,7 @@
 //! `writer_schema`, and per field the precomputed key bytes and the wire form Storage Write
 //! accepts for its BigQuery type.
 
-use crate::types::kind::BqKind;
+use crate::types::kind::FieldKind;
 use crate::{
     BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryRangeElementType,
     BigQueryTableSchema,
@@ -52,7 +52,7 @@ impl Key {
 /// How one field of a message is written.
 #[derive(Debug)]
 pub(crate) struct FieldPlan {
-    pub(crate) kind: BqKind,
+    pub(crate) kind: FieldKind,
     pub(crate) required: bool,
     pub(crate) repeated: bool,
     /// The key of one occurrence, with the element's wire type.
@@ -60,12 +60,12 @@ pub(crate) struct FieldPlan {
     /// The key of a packed run, wire type 2.
     pub(crate) packed_key: Key,
     /// The message of a STRUCT or RANGE field.
-    pub(crate) sub: Option<Box<MsgPlan>>,
+    pub(crate) nested: Option<Box<MessagePlan>>,
 }
 
 /// How one message is written: the row, a STRUCT or a RANGE.
 #[derive(Debug)]
-pub(crate) struct MsgPlan {
+pub(crate) struct MessagePlan {
     /// The index of this message's key cache in the encoder.
     pub(crate) id: usize,
     pub(crate) names: Vec<String>,
@@ -76,7 +76,7 @@ pub(crate) struct MsgPlan {
     pub(crate) required: u64,
 }
 
-impl MsgPlan {
+impl MessagePlan {
     pub(crate) fn index_of(&self, name: &str) -> Option<usize> {
         self.by_name.get(name).copied()
     }
@@ -98,26 +98,28 @@ pub(crate) struct CdcKeys {
 pub(crate) struct WritePlan {
     schema: BigQueryTableSchema,
     descriptor: DescriptorProto,
-    pub(crate) root: MsgPlan,
+    pub(crate) root: MessagePlan,
     pub(crate) messages: usize,
     pub(crate) cdc: Option<CdcKeys>,
 }
 
-impl BqKind {
+impl FieldKind {
     /// The proto type each BigQuery type is written as. Storage Write refuses FLOAT64 or BOOL as
     /// a string and TIMESTAMP as a double or as text ending in `+00`, so none of those forms is
     /// used.
     fn proto_type(self) -> ProtoType {
         match self {
-            BqKind::Int64 | BqKind::Time | BqKind::DateTime | BqKind::Timestamp => ProtoType::Int64,
-            BqKind::Float64 => ProtoType::Double,
-            BqKind::Bool => ProtoType::Bool,
-            BqKind::Date => ProtoType::Int32,
-            BqKind::Bytes | BqKind::Numeric | BqKind::BigNumeric => ProtoType::Bytes,
-            BqKind::String | BqKind::Geography | BqKind::Json | BqKind::Interval => {
+            FieldKind::Int64 | FieldKind::Time | FieldKind::DateTime | FieldKind::Timestamp => {
+                ProtoType::Int64
+            }
+            FieldKind::Float64 => ProtoType::Double,
+            FieldKind::Bool => ProtoType::Bool,
+            FieldKind::Date => ProtoType::Int32,
+            FieldKind::Bytes | FieldKind::Numeric | FieldKind::BigNumeric => ProtoType::Bytes,
+            FieldKind::String | FieldKind::Geography | FieldKind::Json | FieldKind::Interval => {
                 ProtoType::String
             }
-            BqKind::Struct | BqKind::Range => ProtoType::Message,
+            FieldKind::Struct | FieldKind::Range => ProtoType::Message,
         }
     }
 
@@ -158,10 +160,13 @@ struct Compiler {
 }
 
 impl Compiler {
-    fn compile(&mut self, fields: &[BigQueryFieldSchema]) -> (MsgPlan, Vec<FieldDescriptorProto>) {
+    fn compile(
+        &mut self,
+        fields: &[BigQueryFieldSchema],
+    ) -> (MessagePlan, Vec<FieldDescriptorProto>) {
         let id = self.messages;
         self.messages += 1;
-        let mut plan = MsgPlan {
+        let mut plan = MessagePlan {
             id,
             names: Vec::with_capacity(fields.len()),
             fields: Vec::with_capacity(fields.len()),
@@ -170,7 +175,7 @@ impl Compiler {
         };
         let mut descriptors = Vec::with_capacity(fields.len());
         for (i, field) in fields.iter().enumerate() {
-            let kind = BqKind::from(&field.field_type);
+            let kind = FieldKind::from(&field.field_type);
             let number = field_number(i);
             let mut descriptor = FieldDescriptorProto {
                 name: Some(field.name.clone()),
@@ -194,19 +199,19 @@ impl Compiler {
                 ]),
                 _ => None,
             };
-            let sub = children.map(|children| {
-                let (sub, sub_fields) = self.compile(&children);
+            let nested = children.map(|children| {
+                let (nested, nested_fields) = self.compile(&children);
                 // Storage Write wants every nested type flattened into the root, so names only
                 // have to be unique there; numbering them keeps them valid identifiers whatever
                 // the column names are.
-                let type_name = format!("{ROOT_MESSAGE}_{}", sub.id);
+                let type_name = format!("{ROOT_MESSAGE}_{}", nested.id);
                 self.nested.push(DescriptorProto {
                     name: Some(type_name.clone()),
-                    field: sub_fields,
+                    field: nested_fields,
                     ..Default::default()
                 });
                 descriptor.type_name = Some(type_name);
-                Box::new(sub)
+                Box::new(nested)
             });
             let required = field.mode == BigQueryFieldMode::Required;
             if required && i < 64 {
@@ -220,7 +225,7 @@ impl Compiler {
                 repeated: field.mode == BigQueryFieldMode::Repeated,
                 key: Key::new(number, kind.wire_type()),
                 packed_key: Key::new(number, 2),
-                sub,
+                nested,
             });
             descriptors.push(descriptor);
         }

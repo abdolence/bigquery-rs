@@ -38,36 +38,42 @@ const BYTES: BigQueryFieldType = BigQueryFieldType::Bytes { max_length: None };
 
 fn schema() -> BigQueryTableSchema {
     use BigQueryFieldMode::*;
-    use BigQueryFieldType as T;
+    use BigQueryFieldType as FieldType;
     BigQueryTableSchema {
         fields: vec![
-            field("i", T::Int64, Required),
-            nullable("f", T::Float64),
-            nullable("b", T::Bool),
+            field("i", FieldType::Int64, Required),
+            nullable("f", FieldType::Float64),
+            nullable("b", FieldType::Bool),
             nullable("s", STRING),
             nullable("y", BYTES),
-            nullable("d", T::Date),
-            nullable("t", T::Time),
-            nullable("dt", T::DateTime),
-            nullable("ts", T::Timestamp),
-            nullable("num", T::Numeric(None)),
-            nullable("big", T::BigNumeric(None)),
-            nullable("geo", T::Geography),
-            nullable("js", T::Json),
-            nullable("iv", T::Interval),
-            nullable("rng", T::Range(BigQueryRangeElementType::Date)),
+            nullable("d", FieldType::Date),
+            nullable("t", FieldType::Time),
+            nullable("dt", FieldType::DateTime),
+            nullable("ts", FieldType::Timestamp),
+            nullable("num", FieldType::Numeric(None)),
+            nullable("big", FieldType::BigNumeric(None)),
+            nullable("geo", FieldType::Geography),
+            nullable("js", FieldType::Json),
+            nullable("iv", FieldType::Interval),
+            nullable("rng", FieldType::Range(BigQueryRangeElementType::Date)),
             nullable(
                 "rec",
-                T::Struct(vec![
-                    nullable("a", T::Int64),
+                FieldType::Struct(vec![
+                    nullable("a", FieldType::Int64),
                     field("tags", STRING, Repeated),
-                    nullable("inner", T::Struct(vec![nullable("x", T::Date)])),
+                    nullable(
+                        "inner",
+                        FieldType::Struct(vec![nullable("x", FieldType::Date)]),
+                    ),
                 ]),
             ),
-            field("arr", T::Int64, Repeated),
+            field("arr", FieldType::Int64, Repeated),
             field(
                 "recs",
-                T::Struct(vec![nullable("k", STRING), nullable("v", T::Float64)]),
+                FieldType::Struct(vec![
+                    nullable("k", STRING),
+                    nullable("v", FieldType::Float64),
+                ]),
                 Repeated,
             ),
         ],
@@ -92,19 +98,22 @@ pub(crate) fn message_descriptor(plan: &WritePlan) -> MessageDescriptor {
         .expect("the root message is in the pool")
 }
 
-fn enc<T: Serialize + ?Sized>(plan: &Arc<WritePlan>, row: &T) -> Result<Vec<u8>, CodecError> {
+fn encode<T: Serialize + ?Sized>(plan: &Arc<WritePlan>, row: &T) -> Result<Vec<u8>, CodecError> {
     let mut out = Vec::new();
     Encoder::new(plan.clone()).encode(row, &mut out)?;
     Ok(out)
 }
 
 fn decoded<T: Serialize + ?Sized>(plan: &Arc<WritePlan>, row: &T) -> DynamicMessage {
-    let bytes = enc(plan, row).expect("the row encodes");
+    let bytes = encode(plan, row).expect("the row encodes");
     DynamicMessage::decode(message_descriptor(plan), bytes.as_slice()).expect("the bytes decode")
 }
 
-fn err<T: Serialize + ?Sized>(plan: &Arc<WritePlan>, row: &T) -> BigQuerySerializationError {
-    match enc(plan, row)
+fn encode_error<T: Serialize + ?Sized>(
+    plan: &Arc<WritePlan>,
+    row: &T,
+) -> BigQuerySerializationError {
+    match encode(plan, row)
         .expect_err("the row must fail")
         .into_serialize()
     {
@@ -401,7 +410,7 @@ fn repeated_scalars_are_packed() {
         i: i64,
         arr: Vec<i64>,
     }
-    let bytes = enc(
+    let bytes = encode(
         &plan(),
         &A {
             i: 1,
@@ -434,7 +443,7 @@ fn none_is_absent_and_a_required_none_is_an_error_naming_the_field() {
         (i64_of(&got, "i"), get(&got, "s"), get(&got, "rec")),
         (Some(1), None, None)
     );
-    let e = err(
+    let e = encode_error(
         &plan,
         &N {
             i: None,
@@ -450,7 +459,7 @@ fn none_is_absent_and_a_required_none_is_an_error_naming_the_field() {
     struct Missing {
         s: String,
     }
-    let e = err(&plan, &Missing { s: "x".into() });
+    let e = encode_error(&plan, &Missing { s: "x".into() });
     assert_eq!(
         (e.kind, e.path.as_str()),
         (BigQueryCodecErrorKind::MissingRequiredField, "i")
@@ -469,7 +478,7 @@ fn errors_name_the_field_path() {
     struct BadRec {
         tags: (String, i64),
     }
-    let e = err(
+    let e = encode_error(
         &plan,
         &BadTag {
             i: 1,
@@ -495,7 +504,7 @@ fn errors_name_the_field_path() {
     struct UnknownLeaf {
         z: i64,
     }
-    let e = err(
+    let e = encode_error(
         &plan,
         &Unknown {
             i: 1,
@@ -517,7 +526,7 @@ fn errors_name_the_field_path() {
         i: i64,
         recs: Vec<BadKv>,
     }
-    let e = err(
+    let e = encode_error(
         &plan,
         &BadRecs {
             i: 1,
@@ -530,7 +539,7 @@ fn errors_name_the_field_path() {
         i: i64,
         d: &'static str,
     }
-    let e = err(
+    let e = encode_error(
         &plan,
         &BadDate {
             i: 1,
@@ -573,7 +582,7 @@ fn integer_forms_of_temporal_types_match_the_read_side() {
         i: i64,
         t: i64,
     }
-    let e = err(
+    let e = encode_error(
         &plan(),
         &OutOfDay {
             i: 0,
@@ -589,7 +598,7 @@ fn integer_forms_of_temporal_types_match_the_read_side() {
         i: i64,
         ts: i64,
     }
-    let e = err(
+    let e = encode_error(
         &plan(),
         &PastMax {
             i: 0,
@@ -765,7 +774,7 @@ fn a_null_array_element_is_an_error() {
         i: i64,
         arr: Vec<Option<i64>>,
     }
-    let e = err(
+    let e = encode_error(
         &plan(),
         &A {
             i: 1,
@@ -820,7 +829,7 @@ fn float64_rejects_integers() {
         i: i64,
         f: i64,
     }
-    let e = err(&plan(), &A { i: 1, f: 2 });
+    let e = encode_error(&plan(), &A { i: 1, f: 2 });
     assert_eq!(
         (e.kind, e.path.as_str()),
         (BigQueryCodecErrorKind::TypeMismatch, "f")
@@ -841,7 +850,7 @@ fn bytes_rejects_strings() {
         i: i64,
         y: &'static str,
     }
-    let e = err(&plan(), &A { i: 1, y: "AQI=" });
+    let e = encode_error(&plan(), &A { i: 1, y: "AQI=" });
     assert_eq!(
         (e.kind, e.path.as_str()),
         (BigQueryCodecErrorKind::TypeMismatch, "y")
@@ -856,7 +865,7 @@ fn string_rejects_bytes() {
         #[serde(with = "serde_bytes")]
         s: Vec<u8>,
     }
-    let e = err(
+    let e = encode_error(
         &plan(),
         &A {
             i: 1,
@@ -872,7 +881,7 @@ fn string_rejects_bytes() {
         i: i64,
         s: Vec<u8>,
     }
-    let e = err(
+    let e = encode_error(
         &plan(),
         &B {
             i: 1,
@@ -915,13 +924,13 @@ fn date_before_year_one_is_out_of_range() {
     let plan = plan();
     for year in [0, -1, -9999] {
         let d = jiff::civil::date(year, 12, 31);
-        let e = err(&plan, &Jiff { i: 0, d });
+        let e = encode_error(&plan, &Jiff { i: 0, d });
         assert_eq!(
             (e.kind, e.path.as_str()),
             (BigQueryCodecErrorKind::OutOfRange, "d"),
             "{d}"
         );
-        let e = err(
+        let e = encode_error(
             &plan,
             &Wrapped {
                 i: 0,
@@ -933,7 +942,7 @@ fn date_before_year_one_is_out_of_range() {
             (BigQueryCodecErrorKind::OutOfRange, "d"),
             "{d}"
         );
-        let e = err(
+        let e = encode_error(
             &plan,
             &Local {
                 i: 0,
@@ -946,7 +955,7 @@ fn date_before_year_one_is_out_of_range() {
             "{d}"
         );
     }
-    let e = err(
+    let e = encode_error(
         &plan,
         &Days {
             i: 0,
@@ -957,7 +966,7 @@ fn date_before_year_one_is_out_of_range() {
         (e.kind, e.path.as_str()),
         (BigQueryCodecErrorKind::OutOfRange, "d")
     );
-    let e = err(
+    let e = encode_error(
         &plan,
         &Text {
             i: 0,
@@ -991,7 +1000,7 @@ fn interval_beyond_storage_read_range_is_refused() {
         iv: BigQueryInterval,
     }
     let plan = plan();
-    let e = err(
+    let e = encode_error(
         &plan,
         &Text {
             i: 0,
@@ -1002,7 +1011,7 @@ fn interval_beyond_storage_read_range_is_refused() {
         (e.kind, e.path.as_str()),
         (BigQueryCodecErrorKind::OutOfRange, "iv")
     );
-    let e = err(
+    let e = encode_error(
         &plan,
         &Parts {
             i: 0,
@@ -1044,7 +1053,7 @@ fn temporal_wrapper_on_another_temporal_column_is_type_mismatch() {
         i: BigQueryDate,
     }
     let plan = plan();
-    let e = err(
+    let e = encode_error(
         &plan,
         &DateOnTimestamp {
             i: 0,
@@ -1055,7 +1064,7 @@ fn temporal_wrapper_on_another_temporal_column_is_type_mismatch() {
         (e.kind, e.path.as_str()),
         (BigQueryCodecErrorKind::TypeMismatch, "ts")
     );
-    let e = err(
+    let e = encode_error(
         &plan,
         &TimestampOnDate {
             i: 0,
@@ -1066,7 +1075,7 @@ fn temporal_wrapper_on_another_temporal_column_is_type_mismatch() {
         (e.kind, e.path.as_str()),
         (BigQueryCodecErrorKind::TypeMismatch, "d")
     );
-    let e = err(
+    let e = encode_error(
         &plan,
         &DateOnInt {
             i: BigQueryDate(date("2024-01-01")),

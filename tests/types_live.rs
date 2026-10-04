@@ -5,7 +5,9 @@
 use bigquery::*;
 use serde::{Deserialize, Serialize};
 
+#[path = "support/common.rs"]
 mod common;
+#[path = "support/read_common.rs"]
 mod read_common;
 use common::{with_scratch, Scratch, TestResult};
 use read_common::run_sql;
