@@ -1,0 +1,1 @@
+//! `BigQueryWriteSupport` for `MockDatabase`.

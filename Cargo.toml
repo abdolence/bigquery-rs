@@ -1,0 +1,78 @@
+[package]
+name = "bigquery"
+version = "0.1.0"
+authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Library provides a simple API for Google BigQuery based on the gRPC Storage Read/Write and v2 APIs"
+homepage = "https://bigquery-rust.abdolence.dev"
+repository = "https://github.com/abdolence/bigquery-rs"
+documentation = "https://docs.rs/bigquery"
+keywords = ["bigquery", "google", "client"]
+categories = ["api-bindings", "database"]
+readme = "README.md"
+# The prototype crates in the repository root (`probe/`, `codec-proto/`, etc.) and the probe
+# result pages in `docs/` are not part of the published crate.
+include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE", "docs/src/**/*.md"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+name = "bigquery"
+path = "src/lib.rs"
+
+[features]
+default = ["tls-roots"]
+tls-roots = ["gcloud-sdk/tls-roots"]
+tls-webpki-roots = ["gcloud-sdk/tls-webpki-roots"]
+
+[dependencies]
+tracing = "0.1"
+gcloud-sdk = { version = "0.32.2", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
+hyper = { version = "1" }
+rsb_derive = "0.5"
+tokio = { version = "1", features = ["time", "sync", "rt"] }
+async-trait = "0.1"
+rand = "0.10"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jiff = { version = "0.2", features = ["serde"] }
+base64 = "0.22"
+struct-path = "0.2"
+arrow-array = "60"
+arrow-schema = "60"
+arrow-buffer = "60"
+arrow-ipc = { version = "60", default-features = false, features = ["lz4", "zstd"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Installs a default rustls crypto provider for the tests, see the crypto provider section of the book.
+rustls = "0.23"
+# The integration tests build raw requests for the clients this crate hands out.
+gcloud-sdk = { version = "0.32.2", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
+proptest = "1"
+# Decodes the write path's protobuf rows against the descriptor the crate built for them.
+prost-reflect = "0.16"
+# The raw HTTP/2 server behind the fake BigQuery gRPC endpoints in the unit tests.
+h2 = "0.4"
+criterion = "0.8"
+# A BYTES target the codec tests cover alongside `Vec<u8>`.
+serde_bytes = "0.11"
+
+[[bench]]
+name = "read_codec"
+harness = false
+
+[[bench]]
+name = "write_codec"
+harness = false
+
+[lints.clippy]
+unwrap_used = "deny"

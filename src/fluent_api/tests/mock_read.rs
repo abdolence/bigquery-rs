@@ -1,0 +1,1 @@
+//! `BigQueryReadSupport` for `MockDatabase`.
