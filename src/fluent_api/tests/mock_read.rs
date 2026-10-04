@@ -68,10 +68,14 @@ impl BigQueryReadSupport for MockDatabase {
 mod tests {
     use super::*;
     use crate::fluent_api::BigQueryExprBuilder;
+    use crate::paths;
     use crate::{BigQueryReadCompression, BigQueryReadOptions, BigQueryTableRef};
 
     #[derive(serde::Deserialize)]
-    struct Row {}
+    struct Row {
+        name: String,
+        n: i64,
+    }
 
     #[tokio::test]
     async fn select_chain_passes_params_to_support() -> BigQueryResult<()> {
@@ -83,7 +87,7 @@ mod tests {
         let select = || {
             BigQueryExprBuilder::new(&db)
                 .select()
-                .fields(["name", "n"])
+                .fields(paths!(Row::{name, n}))
                 .from(("p", "ds", "t"))
                 .filter("n > 10")
                 .snapshot_time(at)

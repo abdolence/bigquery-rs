@@ -106,8 +106,9 @@ fn classify(data_type: &DataType, metadata: &Metadata) -> Option<BqKind> {
         DataType::Time64(TimeUnit::Microsecond) => BqKind::Time,
         DataType::Timestamp(TimeUnit::Microsecond, None) => BqKind::DateTime,
         DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => BqKind::Timestamp,
-        DataType::Decimal128(38, 9) => BqKind::Numeric,
-        DataType::Decimal256(76, 38) => BqKind::BigNumeric,
+        // A `NUMERIC(P, S)` column arrives at its own precision and scale, not at (38, 9).
+        DataType::Decimal128(_, scale) if *scale >= 0 => BqKind::Numeric,
+        DataType::Decimal256(_, scale) if *scale >= 0 => BqKind::BigNumeric,
         DataType::Interval(IntervalUnit::MonthDayNano) => BqKind::Interval,
         DataType::Struct(_)
             if metadata.get(GOOGLE_SQL_TYPE).map(String::as_str) == Some("range") =>

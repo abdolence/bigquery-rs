@@ -45,8 +45,10 @@ enum Cells<'a> {
     I64(&'a [i64]),
     F64(&'a [f64]),
     Bool(&'a BooleanArray),
-    /// STRING, JSON and GEOGRAPHY.
+    /// STRING and GEOGRAPHY.
     Str(&'a StringArray),
+    /// JSON: the text for a string target, parsed for any other.
+    Json(&'a StringArray),
     Bin(&'a BinaryArray),
     Date(&'a [i32]),
     Time(&'a [i64]),
@@ -74,9 +76,7 @@ impl<'a> Column<'a> {
         let unsupported = || unsupported_type(field);
         match field.data_type() {
             DataType::List(item) => {
-                let kind = BqKind::from_arrow_list_item(field, item)
-                    .or_else(|| parameterised_decimal(item.data_type()))
-                    .ok_or_else(unsupported)?;
+                let kind = BqKind::from_arrow_list_item(field, item).ok_or_else(unsupported)?;
                 let list = array.as_list::<i32>();
                 let child = Column::of_kind(kind, item, list.values(), ctx)?;
                 Ok(Column {
@@ -88,9 +88,7 @@ impl<'a> Column<'a> {
                 })
             }
             _ => {
-                let kind = BqKind::from_arrow(field)
-                    .or_else(|| parameterised_decimal(field.data_type()))
-                    .ok_or_else(unsupported)?;
+                let kind = BqKind::from_arrow(field).ok_or_else(unsupported)?;
                 Column::of_kind(kind, field, array, ctx)
             }
         }
@@ -108,9 +106,8 @@ impl<'a> Column<'a> {
             BqKind::Int64 => Cells::I64(array.as_primitive::<Int64Type>().values()),
             BqKind::Float64 => Cells::F64(array.as_primitive::<Float64Type>().values()),
             BqKind::Bool => Cells::Bool(array.as_boolean()),
-            BqKind::String | BqKind::Json | BqKind::Geography => {
-                Cells::Str(array.as_string::<i32>())
-            }
+            BqKind::String | BqKind::Geography => Cells::Str(array.as_string::<i32>()),
+            BqKind::Json => Cells::Json(array.as_string::<i32>()),
             BqKind::Bytes => Cells::Bin(array.as_binary::<i32>()),
             BqKind::Date => Cells::Date(array.as_primitive::<Date32Type>().values()),
             BqKind::Time => Cells::Time(array.as_primitive::<Time64MicrosecondType>().values()),
@@ -150,14 +147,19 @@ impl<'a> Column<'a> {
     }
 }
 
-/// A `NUMERIC(P, S)` or `BIGNUMERIC(P, S)` column, which BigQuery sends as `Decimal128(P, S)`
-/// or `Decimal256(P, S)` rather than at the unparameterised type's precision and scale.
-fn parameterised_decimal(data_type: &DataType) -> Option<BqKind> {
-    match data_type {
-        DataType::Decimal128(_, scale) if *scale >= 0 => Some(BqKind::Numeric),
-        DataType::Decimal256(_, scale) if *scale >= 0 => Some(BqKind::BigNumeric),
-        _ => None,
-    }
+/// Reads the JSON `text` of one cell with `read`, which must consume all of it. A parse error,
+/// or JSON that does not fit the target, is a `Custom` error, as it is for
+/// [`BigQueryJson`](crate::BigQueryJson).
+fn parse_json<'a, T>(
+    text: &'a str,
+    read: impl FnOnce(
+        &mut serde_json::Deserializer<serde_json::de::StrRead<'a>>,
+    ) -> Result<T, serde_json::Error>,
+) -> Result<T, CodecError> {
+    let mut de = serde_json::Deserializer::from_str(text);
+    read(&mut de)
+        .and_then(|value| de.end().map(|()| value))
+        .map_err(|err| codec_error(BigQueryCodecErrorKind::Custom, format!("JSON column: {err}")))
 }
 
 fn decimal_scale(data_type: &DataType, default: u32) -> u32 {
@@ -226,8 +228,7 @@ impl<'a> Node<'a> {
 
     fn plan(&self, fields: &'static [&'static str]) -> Rc<Plan> {
         let key = (fields.as_ptr() as usize, fields.len());
-        if let Some((_, _, plan)) = self.plans.borrow().iter().find(|(a, l, _)| (*a, *l) == key)
-        {
+        if let Some((_, _, plan)) = self.plans.borrow().iter().find(|(a, l, _)| (*a, *l) == key) {
             return plan.clone();
         }
         let names: Vec<&str> = self.fields.iter().map(|f| f.name().as_str()).collect();
@@ -560,6 +561,7 @@ impl<'c, 'a> ValueDe<'c, 'a> {
             Cells::F64(a) => v.visit_f64(a[r]),
             Cells::Bool(a) => v.visit_bool(a.value(r)),
             Cells::Str(a) => v.visit_borrowed_str(a.value(r)),
+            Cells::Json(a) => parse_json(a.value(r), |de| de::Deserializer::deserialize_any(de, v)),
             Cells::Bin(a) => v.visit_borrowed_bytes(a.value(r)),
             Cells::List { offsets, child } => {
                 let (start, end) = (offsets[r] as usize, offsets[r + 1] as usize);
@@ -583,6 +585,9 @@ impl<'c, 'a> ValueDe<'c, 'a> {
     /// and its parse error would read as a bad text; it is reported as the range error it is.
     fn string<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
+        if let Cells::Json(a) = &self.col.cells {
+            return v.visit_borrowed_str(a.value(self.row));
+        }
         if let Cells::Ts(a) = &self.col.cells {
             let micros = a[self.row];
             let mut s = String::with_capacity(32);
@@ -786,13 +791,16 @@ impl<'a> de::Deserializer<'a> for ValueDe<'_, 'a> {
 
     fn deserialize_enum<V: Visitor<'a>>(
         self,
-        _name: &'static str,
-        _variants: &'static [&'static str],
+        name: &'static str,
+        variants: &'static [&'static str],
         v: V,
     ) -> Result<V::Value, CodecError> {
         self.non_null()?;
         match &self.col.cells {
             Cells::Str(a) => v.visit_enum(BorrowedStrDeserializer::new(a.value(self.row))),
+            Cells::Json(a) => parse_json(a.value(self.row), |de| {
+                de::Deserializer::deserialize_enum(de, name, variants, v)
+            }),
             _ => self.any_non_null(v),
         }
     }

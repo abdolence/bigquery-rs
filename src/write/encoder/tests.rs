@@ -1245,3 +1245,111 @@ fn cdc_pseudo_columns_follow_the_row() {
         (BigQueryCodecErrorKind::UnknownField, CHANGE_TYPE_COLUMN)
     );
 }
+
+#[test]
+fn json_column_prints_any_shape_but_a_string_as_json() {
+    use BigQueryFieldMode::*;
+    let plan = Arc::new(WritePlan::new(
+        &BigQueryTableSchema {
+            fields: vec![
+                nullable("js", BigQueryFieldType::Json),
+                field("ajs", BigQueryFieldType::Json, Repeated),
+            ],
+        },
+        false,
+    ));
+    #[derive(Serialize)]
+    struct Doc {
+        a: i64,
+        b: Vec<&'static str>,
+    }
+    #[derive(Serialize)]
+    struct Row<J: Serialize, A: Serialize> {
+        js: J,
+        ajs: A,
+    }
+    let js_of = |m: DynamicMessage| (str_of(&m, "js"), list_of(&m, "ajs"));
+    let text = |s: &str| Value::String(s.into());
+
+    let doc = Doc { a: 1, b: vec!["x"] };
+    assert_eq!(
+        js_of(decoded(
+            &plan,
+            &Row {
+                js: &doc,
+                ajs: [&doc]
+            }
+        )),
+        (
+            Some(r#"{"a":1,"b":["x"]}"#.into()),
+            vec![text(r#"{"a":1,"b":["x"]}"#)]
+        )
+    );
+    let value = serde_json::json!({"k": [1, null]});
+    assert_eq!(
+        js_of(decoded(
+            &plan,
+            &Row {
+                js: &value,
+                ajs: vec![serde_json::json!(true), serde_json::json!(2)]
+            }
+        )),
+        (
+            Some(r#"{"k":[1,null]}"#.into()),
+            vec![text("true"), text("2")]
+        )
+    );
+    let map = std::collections::BTreeMap::from([("z", 1.5)]);
+    assert_eq!(
+        js_of(decoded(
+            &plan,
+            &Row {
+                js: &map,
+                ajs: [vec![1, 2]]
+            }
+        )),
+        (Some(r#"{"z":1.5}"#.into()), vec![text("[1,2]")])
+    );
+    assert_eq!(
+        js_of(decoded(
+            &plan,
+            &Row {
+                js: r#"{"raw": true}"#,
+                ajs: ["[ 1 ]"]
+            }
+        )),
+        (Some(r#"{"raw": true}"#.into()), vec![text("[ 1 ]")]),
+        "a string is the JSON text as it is"
+    );
+    assert_eq!(
+        js_of(decoded(
+            &plan,
+            &Row {
+                js: Some(serde_json::Value::Null),
+                ajs: [(); 0]
+            }
+        )),
+        (Some("null".into()), vec![]),
+        "JSON null is text, apart from SQL NULL"
+    );
+    assert_eq!(
+        js_of(decoded(
+            &plan,
+            &Row {
+                js: None::<serde_json::Value>,
+                ajs: [(); 0]
+            }
+        )),
+        (None, vec![])
+    );
+    assert_eq!(
+        js_of(decoded(
+            &plan,
+            &Row {
+                js: BigQueryJson(&doc),
+                ajs: [BigQueryJson("s")]
+            }
+        )),
+        (Some(r#"{"a":1,"b":["x"]}"#.into()), vec![text(r#""s""#)])
+    );
+}

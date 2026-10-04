@@ -46,6 +46,9 @@ fn kind_from_arrow_field_recognises_extension_metadata() {
         (f(utc), Some(BqKind::Timestamp)),
         (f(DataType::Decimal128(38, 9)), Some(BqKind::Numeric)),
         (f(DataType::Decimal256(76, 38)), Some(BqKind::BigNumeric)),
+        (f(DataType::Decimal128(10, 2)), Some(BqKind::Numeric)),
+        (f(DataType::Decimal256(40, 0)), Some(BqKind::BigNumeric)),
+        (f(DataType::Decimal128(10, -2)), None),
         (
             f(DataType::Interval(IntervalUnit::MonthDayNano))
                 .with_metadata(ext("google:sqlType:interval")),

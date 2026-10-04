@@ -5,13 +5,17 @@ use std::marker::PhantomData;
 
 pub(crate) const TAG_JSON: &str = "BigQueryJson";
 
-/// A JSON column holding a parsed value, such as a `serde_json::Value` or a typed document.
+/// A JSON value carried as its JSON text, whatever the serde format.
 ///
-/// The column is JSON text in both directions, so a bare `String` field gets the raw text and a
-/// bare `serde_json::Value` gets a `Value::String` of it; this wrapper parses the text instead.
-/// SQL NULL and JSON `null` stay apart: `None` against `Some(BigQueryJson(Value::Null))`. In
-/// other serde formats it is the JSON text as a string. Text that does not parse into `T` fails
-/// its row with [`Custom`](crate::errors::BigQueryCodecErrorKind::Custom).
+/// The crate's codecs need no wrapper on a JSON column: a `String` field is the JSON text as
+/// it is, and any other shape, such as `serde_json::Value` or a typed document, is parsed on
+/// read and printed on write. This wrapper is for the two cases that rule leaves out: a
+/// `BigQueryJson<String>` holds a JSON string parsed into a `String`, not the text, and in other
+/// serde formats the value is the JSON text as a string.
+///
+/// SQL NULL and JSON `null` stay apart: `None` against `Some(BigQueryJson(Value::Null))`. Text
+/// that does not parse into `T` fails its row with
+/// [`Custom`](crate::errors::BigQueryCodecErrorKind::Custom).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BigQueryJson<T>(pub T);
 

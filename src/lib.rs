@@ -46,6 +46,12 @@ mod query;
 
 pub use query::*;
 
+mod struct_path_macro;
+
+/// The `struct_path` crate the [`path!`] and [`paths!`] macros expand to, for its
+/// `StructPath` derive.
+pub extern crate struct_path;
+
 pub use arrow_array;
 pub use arrow_schema;
 pub use jiff;

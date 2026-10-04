@@ -18,8 +18,9 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    pub async fn create(db: BigQueryDb, project: &str) -> TestResult<Self> {
-        let dataset = scratch_dataset_id("bqp4")?;
+    /// Creates `<prefix>_<timestamp>`.
+    pub async fn create(db: BigQueryDb, project: &str, prefix: &str) -> TestResult<Self> {
+        let dataset = scratch_dataset_id(prefix)?;
         db.dataset_client()
             .insert_dataset(bq::InsertDatasetRequest {
                 project_id: project.to_string(),
@@ -110,10 +111,20 @@ impl Scratch {
     }
 }
 
-/// Runs `body` against a fresh scratch dataset and deletes the dataset whatever `body` did,
-/// a panic included,
-/// printing the bytes its statements billed as `LIVE bytes billed <name>: <n>`.
+/// Runs `body` against a fresh `bqp4_*` scratch dataset and deletes the dataset whatever
+/// `body` did, a panic included, printing the bytes its statements billed as
+/// `LIVE bytes billed <name>: <n>`.
+#[allow(dead_code, reason = "each test binary uses one of the two")]
 pub async fn with_scratch<F>(name: &str, body: F) -> TestResult
+where
+    F: for<'s> AsyncFnOnce(&'s Scratch) -> TestResult,
+{
+    with_scratch_prefixed("bqp4", name, body).await
+}
+
+/// [`with_scratch`] with a dataset named `<prefix>_<timestamp>`.
+#[allow(dead_code, reason = "each test binary uses one of the two")]
+pub async fn with_scratch_prefixed<F>(prefix: &str, name: &str, body: F) -> TestResult
 where
     F: for<'s> AsyncFnOnce(&'s Scratch) -> TestResult,
 {
@@ -122,7 +133,7 @@ where
         return Ok(());
     };
     let db = crate::common::setup(&project).await?;
-    let scratch = Scratch::create(db, &project).await?;
+    let scratch = Scratch::create(db, &project, prefix).await?;
     // A failed assertion panics, and the dataset has to go even then.
     let result = std::panic::AssertUnwindSafe(body(&scratch))
         .catch_unwind()

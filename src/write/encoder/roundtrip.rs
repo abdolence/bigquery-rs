@@ -41,6 +41,7 @@ enum Target {
     BqTimestamp(BigQueryTimestamp),
     Decimal(BigQueryDecimal<String>),
     Json(BigQueryJson<serde_json::Value>),
+    Value(serde_json::Value),
     Interval(BigQueryInterval),
     RangeDate(BigQueryRange<jiff::civil::Date>),
     RangeBqDate(BigQueryRange<BigQueryDate>),
@@ -163,7 +164,16 @@ fn targets(value: &Canonical) -> Vec<Target> {
             vec![T::Decimal(BigQueryDecimal(s.clone())), T::Str(s)]
         }
         Canonical::Geography(s) => vec![T::Str(s)],
-        Canonical::Json(v) => vec![T::Str(v.to_string()), T::Json(BigQueryJson(v))],
+        Canonical::Json(v) => {
+            let mut out = vec![T::Str(v.to_string())];
+            // A top-level `Value::String` serializes as a string, which a JSON column takes
+            // as the JSON text itself.
+            if !v.is_string() {
+                out.push(T::Value(v.clone()));
+            }
+            out.push(T::Json(BigQueryJson(v)));
+            out
+        }
         Canonical::Interval(iv) => vec![T::Str(text(|o| iv.write_bq(o))), T::Interval(iv)],
         Canonical::Range {
             element,

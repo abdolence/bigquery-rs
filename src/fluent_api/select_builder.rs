@@ -30,8 +30,9 @@ where
         }
     }
 
-    /// Reads only these top-level columns, sent to BigQuery as they are. A name the table does
-    /// not have fails the read with
+    /// Reads only these columns, sent to BigQuery as they are: a top-level column by its name,
+    /// a STRUCT subfield as `rec.field`. [`paths!`](crate::paths!) builds them from a struct's
+    /// fields. A name the table does not have fails the read with
     /// [`SchemaMismatchError`](crate::errors::BigQueryError::SchemaMismatchError); BigQuery
     /// also reports a column added or renamed in the last 30 seconds or so that way.
     ///

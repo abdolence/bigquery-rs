@@ -383,12 +383,13 @@ impl<'r, 'e, 'p> MsgSer<'r, 'e, 'p> {
         let result = if f.repeated {
             v.serialize(RepSer { st: self.st, f })
         } else {
-            v.serialize(ValSer {
+            ValSer {
                 st: self.st,
                 f,
                 packed: false,
                 in_array: false,
-            })
+            }
+            .value(v)
         };
         result.map_err(|e| e.at_field(&self.msg.names[idx]))
     }
@@ -595,12 +596,13 @@ impl SeqSer<'_, '_, '_> {
     fn element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
         let i = self.i;
         self.i += 1;
-        v.serialize(ValSer {
+        ValSer {
             st: self.st,
             f: self.f,
             packed: self.mark.is_some(),
             in_array: true,
-        })
+        }
+        .value(v)
         .map_err(|e| e.at_index(i))
     }
 
@@ -686,6 +688,16 @@ struct ValSer<'r, 'e, 'p> {
 }
 
 impl<'r, 'e, 'p> ValSer<'r, 'e, 'p> {
+    /// Writes `v`, which a JSON column takes in any shape.
+    #[inline]
+    fn value<T: Serialize + ?Sized>(self, v: &T) -> Result<(), CodecError> {
+        if self.f.kind == BqKind::Json {
+            v.serialize(JsonSer(self))
+        } else {
+            v.serialize(self)
+        }
+    }
+
     #[inline]
     fn key(&mut self) {
         if !self.packed {
@@ -1122,6 +1134,348 @@ impl<'r, 'e, 'p> ser::Serializer for ValSer<'r, 'e, 'p> {
         _: usize,
     ) -> Result<Self::SerializeStructVariant, CodecError> {
         Err(mismatch(self.f, "an enum variant with data"))
+    }
+}
+
+fn json_error(err: serde_json::Error) -> CodecError {
+    CodecError::new(
+        BigQueryCodecErrorKind::Custom,
+        format!("JSON column: {err}"),
+    )
+}
+
+// `serde_json`'s `Value` serializer, whose compound states own their content, so a JSON
+// column's value can be built inside the row's serializer.
+use serde_json::value::Serializer as JsonValueSer;
+type JsonValueSeq = <JsonValueSer as ser::Serializer>::SerializeSeq;
+type JsonValueTupleVariant = <JsonValueSer as ser::Serializer>::SerializeTupleVariant;
+type JsonValueMap = <JsonValueSer as ser::Serializer>::SerializeMap;
+type JsonValueStructVariant = <JsonValueSer as ser::Serializer>::SerializeStructVariant;
+
+/// One value of a JSON column. A string is the JSON text as it is, and `None` is SQL NULL;
+/// any other shape, `()` and `serde_json::Value::Null` included, is printed as JSON text.
+/// Inside a printed value, strings are JSON strings.
+struct JsonSer<'r, 'e, 'p>(ValSer<'r, 'e, 'p>);
+
+impl JsonSer<'_, '_, '_> {
+    fn print(self, value: Result<serde_json::Value, serde_json::Error>) -> Result<(), CodecError> {
+        let text = value.map_err(json_error)?.to_string();
+        self.0.text(&text)
+    }
+}
+
+impl<'r, 'e, 'p> ser::Serializer for JsonSer<'r, 'e, 'p> {
+    type Ok = ();
+    type Error = CodecError;
+    type SerializeSeq = JsonCompound<'r, 'e, 'p, JsonValueSeq>;
+    type SerializeTuple = JsonCompound<'r, 'e, 'p, JsonValueSeq>;
+    type SerializeTupleStruct = JsonCompound<'r, 'e, 'p, JsonValueSeq>;
+    type SerializeTupleVariant = JsonCompound<'r, 'e, 'p, JsonValueTupleVariant>;
+    type SerializeMap = JsonCompound<'r, 'e, 'p, JsonValueMap>;
+    type SerializeStruct = JsonCompound<'r, 'e, 'p, JsonValueMap>;
+    type SerializeStructVariant = JsonCompound<'r, 'e, 'p, JsonValueStructVariant>;
+
+    fn serialize_bool(self, v: bool) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_bool(v))
+    }
+
+    fn serialize_i8(self, v: i8) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_i8(v))
+    }
+
+    fn serialize_i16(self, v: i16) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_i16(v))
+    }
+
+    fn serialize_i32(self, v: i32) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_i32(v))
+    }
+
+    fn serialize_i64(self, v: i64) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_i64(v))
+    }
+
+    fn serialize_i128(self, v: i128) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_i128(v))
+    }
+
+    fn serialize_u8(self, v: u8) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_u8(v))
+    }
+
+    fn serialize_u16(self, v: u16) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_u16(v))
+    }
+
+    fn serialize_u32(self, v: u32) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_u32(v))
+    }
+
+    fn serialize_u64(self, v: u64) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_u64(v))
+    }
+
+    fn serialize_u128(self, v: u128) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_u128(v))
+    }
+
+    fn serialize_f32(self, v: f32) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_f32(v))
+    }
+
+    fn serialize_f64(self, v: f64) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_f64(v))
+    }
+
+    fn serialize_char(self, v: char) -> Result<(), CodecError> {
+        self.0.serialize_char(v)
+    }
+
+    fn serialize_str(self, v: &str) -> Result<(), CodecError> {
+        self.0.text(v)
+    }
+
+    fn serialize_bytes(self, v: &[u8]) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_bytes(v))
+    }
+
+    fn serialize_none(self) -> Result<(), CodecError> {
+        self.0.null()
+    }
+
+    fn serialize_some<T: Serialize + ?Sized>(self, v: &T) -> Result<(), CodecError> {
+        v.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_unit())
+    }
+
+    fn serialize_unit_struct(self, name: &'static str) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_unit_struct(name))
+    }
+
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        index: u32,
+        variant: &'static str,
+    ) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_unit_variant(name, index, variant))
+    }
+
+    /// The crate's wrappers keep their own rules, so `BigQueryJson` stays the JSON text it
+    /// printed; any other newtype is transparent, as in `serde_json`.
+    fn serialize_newtype_struct<T: Serialize + ?Sized>(
+        self,
+        name: &'static str,
+        v: &T,
+    ) -> Result<(), CodecError> {
+        if matches!(name, TAG_JSON | TAG_DECIMAL) || temporal_tag_kind(name).is_some() {
+            self.0.serialize_newtype_struct(name, v)
+        } else {
+            v.serialize(self)
+        }
+    }
+
+    fn serialize_newtype_variant<T: Serialize + ?Sized>(
+        self,
+        name: &'static str,
+        index: u32,
+        variant: &'static str,
+        v: &T,
+    ) -> Result<(), CodecError> {
+        self.print(JsonValueSer.serialize_newtype_variant(name, index, variant, v))
+    }
+
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, CodecError> {
+        JsonCompound::new(self, JsonValueSer.serialize_seq(len))
+    }
+
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, CodecError> {
+        JsonCompound::new(self, JsonValueSer.serialize_tuple(len))
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, CodecError> {
+        JsonCompound::new(self, JsonValueSer.serialize_tuple_struct(name, len))
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        name: &'static str,
+        index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, CodecError> {
+        JsonCompound::new(
+            self,
+            JsonValueSer.serialize_tuple_variant(name, index, variant, len),
+        )
+    }
+
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, CodecError> {
+        JsonCompound::new(self, JsonValueSer.serialize_map(len))
+    }
+
+    fn serialize_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, CodecError> {
+        JsonCompound::new(self, JsonValueSer.serialize_struct(name, len))
+    }
+
+    fn serialize_struct_variant(
+        self,
+        name: &'static str,
+        index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, CodecError> {
+        JsonCompound::new(
+            self,
+            JsonValueSer.serialize_struct_variant(name, index, variant, len),
+        )
+    }
+}
+
+/// A compound value of a JSON column, built as a [`serde_json::Value`] and printed at its end.
+struct JsonCompound<'r, 'e, 'p, C> {
+    target: JsonSer<'r, 'e, 'p>,
+    inner: C,
+}
+
+impl<'r, 'e, 'p, C> JsonCompound<'r, 'e, 'p, C> {
+    fn new(target: JsonSer<'r, 'e, 'p>, inner: Result<C, serde_json::Error>) -> Result<Self, CodecError> {
+        Ok(JsonCompound {
+            target,
+            inner: inner.map_err(json_error)?,
+        })
+    }
+}
+
+impl<C: ser::SerializeSeq<Ok = serde_json::Value, Error = serde_json::Error>> ser::SerializeSeq
+    for JsonCompound<'_, '_, '_, C>
+{
+    type Ok = ();
+    type Error = CodecError;
+
+    fn serialize_element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
+        self.inner.serialize_element(v).map_err(json_error)
+    }
+
+    fn end(self) -> Result<(), CodecError> {
+        self.target.print(self.inner.end())
+    }
+}
+
+impl<C: ser::SerializeTuple<Ok = serde_json::Value, Error = serde_json::Error>> ser::SerializeTuple
+    for JsonCompound<'_, '_, '_, C>
+{
+    type Ok = ();
+    type Error = CodecError;
+
+    fn serialize_element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
+        self.inner.serialize_element(v).map_err(json_error)
+    }
+
+    fn end(self) -> Result<(), CodecError> {
+        self.target.print(self.inner.end())
+    }
+}
+
+impl<C: ser::SerializeTupleStruct<Ok = serde_json::Value, Error = serde_json::Error>>
+    ser::SerializeTupleStruct for JsonCompound<'_, '_, '_, C>
+{
+    type Ok = ();
+    type Error = CodecError;
+
+    fn serialize_field<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
+        self.inner.serialize_field(v).map_err(json_error)
+    }
+
+    fn end(self) -> Result<(), CodecError> {
+        self.target.print(self.inner.end())
+    }
+}
+
+impl<C: ser::SerializeTupleVariant<Ok = serde_json::Value, Error = serde_json::Error>>
+    ser::SerializeTupleVariant for JsonCompound<'_, '_, '_, C>
+{
+    type Ok = ();
+    type Error = CodecError;
+
+    fn serialize_field<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
+        self.inner.serialize_field(v).map_err(json_error)
+    }
+
+    fn end(self) -> Result<(), CodecError> {
+        self.target.print(self.inner.end())
+    }
+}
+
+impl<C: ser::SerializeMap<Ok = serde_json::Value, Error = serde_json::Error>> ser::SerializeMap
+    for JsonCompound<'_, '_, '_, C>
+{
+    type Ok = ();
+    type Error = CodecError;
+
+    fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), CodecError> {
+        self.inner.serialize_key(key).map_err(json_error)
+    }
+
+    fn serialize_value<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), CodecError> {
+        self.inner.serialize_value(v).map_err(json_error)
+    }
+
+    fn end(self) -> Result<(), CodecError> {
+        self.target.print(self.inner.end())
+    }
+}
+
+impl<C: ser::SerializeStruct<Ok = serde_json::Value, Error = serde_json::Error>>
+    ser::SerializeStruct for JsonCompound<'_, '_, '_, C>
+{
+    type Ok = ();
+    type Error = CodecError;
+
+    fn serialize_field<T: Serialize + ?Sized>(
+        &mut self,
+        key: &'static str,
+        v: &T,
+    ) -> Result<(), CodecError> {
+        self.inner.serialize_field(key, v).map_err(json_error)
+    }
+
+    fn skip_field(&mut self, key: &'static str) -> Result<(), CodecError> {
+        self.inner.skip_field(key).map_err(json_error)
+    }
+
+    fn end(self) -> Result<(), CodecError> {
+        self.target.print(self.inner.end())
+    }
+}
+
+impl<C: ser::SerializeStructVariant<Ok = serde_json::Value, Error = serde_json::Error>>
+    ser::SerializeStructVariant for JsonCompound<'_, '_, '_, C>
+{
+    type Ok = ();
+    type Error = CodecError;
+
+    fn serialize_field<T: Serialize + ?Sized>(
+        &mut self,
+        key: &'static str,
+        v: &T,
+    ) -> Result<(), CodecError> {
+        self.inner.serialize_field(key, v).map_err(json_error)
+    }
+
+    fn end(self) -> Result<(), CodecError> {
+        self.target.print(self.inner.end())
     }
 }
 

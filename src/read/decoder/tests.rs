@@ -711,18 +711,78 @@ fn required_range_unbounded_end_reads_as_epoch() {
 }
 
 #[test]
-fn json_column_into_bare_value_is_a_string() {
-    let (f, a) = col("js", StringArray::from(vec![r#"{"a":1}"#]));
-    let b = batch(vec![(f.with_metadata(ext_meta("google:sqlType:json")), a)]);
+fn json_column_parses_into_any_shape_but_a_string() {
+    let meta = || ext_meta("google:sqlType:json");
+    let (f, a) = col(
+        "js",
+        StringArray::from(vec![Some(r#"{"a":1,"b":["x"]}"#), Some("null"), None]),
+    );
+    let (lf, la) = list_with(
+        "ajs",
+        vec![0, 2, 2, 2],
+        Arc::new(StringArray::from(vec![r#"{"a":2,"b":[]}"#, "[1,2]"])),
+        meta(),
+    );
+    let b = batch(vec![(f.with_metadata(meta()), a), (lf, la)]);
+
     #[derive(Deserialize, Debug, PartialEq)]
-    struct J {
-        js: serde_json::Value,
+    struct Doc {
+        a: i64,
+        b: Vec<String>,
     }
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Typed {
+        js: Option<Doc>,
+    }
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Values {
+        js: Option<serde_json::Value>,
+        ajs: Vec<serde_json::Value>,
+    }
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Raw {
+        js: Option<String>,
+        ajs: Vec<String>,
+    }
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Maps {
+        js: HashMap<String, serde_json::Value>,
+    }
+
     assert_eq!(
-        row::<J>(&b, 0),
-        Ok(J {
-            js: serde_json::Value::String(r#"{"a":1}"#.into())
+        row::<Typed>(&b, 0),
+        Ok(Typed { js: Some(Doc { a: 1, b: vec!["x".into()] }) })
+    );
+    assert_eq!(
+        row::<Values>(&b, 0),
+        Ok(Values {
+            js: Some(serde_json::json!({"a": 1, "b": ["x"]})),
+            ajs: vec![serde_json::json!({"a": 2, "b": []}), serde_json::json!([1, 2])],
         })
+    );
+    assert_eq!(
+        row::<Values>(&b, 1),
+        Ok(Values { js: Some(serde_json::Value::Null), ajs: vec![] }),
+        "JSON null stays apart from SQL NULL"
+    );
+    assert_eq!(row::<Values>(&b, 2), Ok(Values { js: None, ajs: vec![] }));
+    assert_eq!(
+        row::<Raw>(&b, 0),
+        Ok(Raw {
+            js: Some(r#"{"a":1,"b":["x"]}"#.into()),
+            ajs: vec![r#"{"a":2,"b":[]}"#.into(), "[1,2]".into()],
+        }),
+        "a String gets the JSON text as it is"
+    );
+    assert_eq!(
+        row::<Maps>(&b, 0).map(|m| m.js.len()),
+        Ok(2)
+    );
+    let e = row_err::<Typed>(&b, 1);
+    assert_eq!(
+        (e.path.as_str(), e.kind),
+        ("js", BigQueryCodecErrorKind::Custom),
+        "JSON null is not an Option's None"
     );
 }
 
@@ -1489,6 +1549,7 @@ fn checks(kind: BqKind, v: &[Canonical]) -> Result<(), TestCaseError> {
             check_target(kind, "BigQueryJson<Value>", v, |j: BigQueryJson<serde_json::Value>| {
                 C::Json(j.0)
             })?;
+            check_target(kind, "Value", v, C::Json)?;
         }
         BqKind::Interval => {
             check_target(kind, "BigQueryInterval", v, C::Interval)?;

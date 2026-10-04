@@ -1,0 +1,210 @@
+/// Builds the BigQuery column path for one field of `Struct` as a `String`.
+///
+/// Use it wherever a fluent call takes a column name, such as `select().fields(..)`. Reach into
+/// a STRUCT column with `.`: `path!(Row::home.county)` builds `home.county`, the form BigQuery
+/// takes for a STRUCT subfield in `selected_fields`. The path is built from the token stream at
+/// compile time, so a renamed field shows up as a compile error at the call site instead of a
+/// read that fails on a column the table does not have.
+///
+/// The path is the Rust field name. A field under `#[serde(rename)]` needs the camelCase
+/// variant, [`path_camel_case!`](crate::path_camel_case!), or the column name as a plain string.
+///
+/// ```rust
+/// use bigquery::path;
+///
+/// struct Home {
+///     county: String,
+/// }
+///
+/// struct Resident {
+///     some_id: String,
+///     home: Home,
+/// }
+///
+/// assert_eq!(path!(Resident::some_id), "some_id");
+/// assert_eq!(path!(Resident::home.county), "home.county");
+/// ```
+///
+/// Options follow after a `;`: `delim` sets the separator between path segments, and
+/// `case="camel"` or `case="pascal"` converts each segment. The `struct_path` crate docs list
+/// the rest.
+#[macro_export]
+macro_rules! path {
+    ($($x:tt)*) => {{
+        $crate::struct_path::path!($($x)*).to_string()
+    }};
+}
+
+/// Builds the BigQuery column paths for several fields of `Struct` as a `Vec<String>`.
+///
+/// Use it to read a subset of a table's columns, for example
+/// `.fields(paths!(Row::{a, b, c}))`. See [`path!`] for a single field.
+///
+/// ```rust
+/// use bigquery::paths;
+///
+/// struct Resident {
+///     some_id: String,
+///     some_num: u64,
+/// }
+///
+/// assert_eq!(
+///     paths!(Resident::{some_id, some_num}),
+///     vec!["some_id".to_string(), "some_num".to_string()]
+/// );
+/// ```
+///
+/// `Struct::*` returns every field declared with plain `pub`, without listing them by hand;
+/// it needs `Struct` to carry `#[derive(bigquery::struct_path::StructPath)]`.
+/// `Struct::*; visibility="all"` returns every declared field instead. It only works inside the
+/// crate that defines `Struct`, because the derive caps the consts for non-`pub` fields at
+/// `pub(crate)`; from another crate the call fails with E0624.
+///
+/// ```rust
+/// use bigquery::paths;
+///
+/// #[derive(bigquery::struct_path::StructPath)]
+/// struct Resident {
+///     pub some_id: String,
+///     some_internal: u64,
+/// }
+///
+/// assert_eq!(paths!(Resident::*), vec!["some_id".to_string()]);
+/// assert_eq!(
+///     paths!(Resident::*; visibility="all"),
+///     vec!["some_id".to_string(), "some_internal".to_string()]
+/// );
+/// ```
+///
+/// `Parent::child.(Child::*)` prefixes every field of `Child` with the `child` path, and
+/// `Parent::child~(Child::*)` does the same for an `Option<Child>` field.
+///
+/// ```rust
+/// use bigquery::paths;
+///
+/// #[derive(bigquery::struct_path::StructPath)]
+/// struct Home {
+///     pub county: String,
+/// }
+///
+/// struct Resident {
+///     home: Home,
+///     summer_home: Option<Home>,
+/// }
+///
+/// assert_eq!(paths!(Resident::home.(Home::*)), vec!["home.county".to_string()]);
+/// assert_eq!(
+///     paths!(Resident::summer_home~(Home::*)),
+///     vec!["summer_home.county".to_string()]
+/// );
+/// ```
+#[macro_export]
+macro_rules! paths {
+    ($($x:tt)*) => {{
+        $crate::struct_path::paths!($($x)*).iter().map(|s| s.to_string()).collect::<Vec<String>>()
+    }};
+}
+
+/// Builds the BigQuery column path for one field of `Struct`, converting it to camelCase.
+///
+/// Use this instead of [`path!`] when the struct carries `#[serde(rename_all = "camelCase")]`,
+/// so the path matches the column name the table actually has.
+///
+/// ```rust
+/// use bigquery::path_camel_case;
+///
+/// struct Resident {
+///     one_more_string: String,
+/// }
+///
+/// assert_eq!(path_camel_case!(Resident::one_more_string), "oneMoreString");
+/// ```
+///
+/// Options can follow after a `;`, same as [`path!`]. This macro appends `case="camel"` after
+/// them, so a `case` passed by the caller is overridden and the path is always camelCase.
+#[macro_export]
+macro_rules! path_camel_case {
+    ($($x:tt)*) => {{
+        $crate::struct_path::path!($($x)*; case="camel").to_string()
+    }};
+}
+
+/// Builds the BigQuery column paths for several fields of `Struct`, converting each to
+/// camelCase.
+///
+/// The camelCase counterpart of [`paths!`]; use it the same way with a
+/// `#[serde(rename_all = "camelCase")]` struct.
+///
+/// ```rust
+/// use bigquery::paths_camel_case;
+///
+/// struct Resident {
+///     some_id: String,
+///     one_more_string: String,
+/// }
+///
+/// assert_eq!(
+///     paths_camel_case!(Resident::{some_id, one_more_string}),
+///     vec!["someId".to_string(), "oneMoreString".to_string()]
+/// );
+/// ```
+///
+/// `Struct::*` works the same way as in [`paths!`], with the same `visibility="all"` option.
+/// This macro appends `case="camel"` after the caller's options. A field list ignores a
+/// `case` passed by the caller and stays camelCase. `Struct::*` accepts `case="camel"` from
+/// the caller, and any other `case` is a compile error.
+///
+/// ```rust
+/// use bigquery::paths_camel_case;
+///
+/// #[derive(bigquery::struct_path::StructPath)]
+/// struct Resident {
+///     pub some_id: String,
+///     some_internal: u64,
+/// }
+///
+/// assert_eq!(paths_camel_case!(Resident::*), vec!["someId".to_string()]);
+/// assert_eq!(
+///     paths_camel_case!(Resident::*; visibility="all"),
+///     vec!["someId".to_string(), "someInternal".to_string()]
+/// );
+/// ```
+///
+/// ```compile_fail
+/// use bigquery::paths_camel_case;
+///
+/// #[derive(bigquery::struct_path::StructPath)]
+/// struct Resident {
+///     pub some_id: String,
+/// }
+///
+/// let _ = paths_camel_case!(Resident::*; case="pascal");
+/// ```
+#[macro_export]
+macro_rules! paths_camel_case {
+    ($($x:tt)*) => {{
+        $crate::struct_path::paths!($($x)*; case="camel").into_iter().map(|s| s.to_string()).collect::<Vec<String>>()
+    }};
+}
+
+#[cfg(test)]
+mod tests {
+    struct Inner {
+        x: i64,
+    }
+
+    struct Rec {
+        inner: Inner,
+    }
+
+    struct Row {
+        id: i64,
+        rec: Rec,
+    }
+
+    #[test]
+    fn nested_path_is_bigquery_dotted_selected_field() {
+        assert_eq!(path!(Row::rec.inner.x), "rec.inner.x");
+        assert_eq!(paths!(Row::{id, rec.inner.x}), ["id", "rec.inner.x"]);
+    }
+}
