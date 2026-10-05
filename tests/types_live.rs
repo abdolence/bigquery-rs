@@ -15,7 +15,7 @@ use read_common::run_sql;
 async fn write<T: Serialize + Sync>(s: &Scratch, table: &str, rows: &[T]) -> BigQueryResult<()> {
     s.db.fluent()
         .insert()
-        .into(s.dataset_ref()?.table(table.parse()?))
+        .into(s.dataset_ref()?.table(s.table_id(table)))
         .objects(rows)
         .execute()
         .await
@@ -29,7 +29,7 @@ async fn read<T: for<'de> Deserialize<'de> + Send + 'static>(
     Ok(s.db
         .fluent()
         .select()
-        .from(s.dataset.table(table.parse()?))
+        .from(s.table(table))
         .obj()
         .query()
         .await?)
@@ -44,7 +44,14 @@ struct Price {
 #[tokio::test]
 async fn numeric_with_precision_and_scale_round_trips() -> TestResult {
     with_scratch("numeric_with_precision_and_scale_round_trips", async |s| {
-        run_sql(s, "CREATE TABLE prices (id INT64, amount NUMERIC(10, 2))").await?;
+        run_sql(
+            s,
+            &format!(
+                "CREATE TABLE {} (id INT64, amount NUMERIC(10, 2))",
+                s.table_sql("prices")
+            ),
+        )
+        .await?;
         let within = [
             Price {
                 id: 1,
@@ -155,8 +162,11 @@ async fn json_columns_round_trip_any_serde_shape() -> TestResult {
     with_scratch("json_columns_round_trip_any_serde_shape", async |s| {
         run_sql(
             s,
-            "CREATE TABLE docs (id INT64, value JSON, doc JSON, rec STRUCT<j JSON>, \
-             arr ARRAY<JSON>)",
+            &format!(
+                "CREATE TABLE {} (id INT64, value JSON, doc JSON, rec STRUCT<j JSON>, \
+                 arr ARRAY<JSON>)",
+                s.table_sql("docs")
+            ),
         )
         .await?;
         let rows = json_rows();
@@ -178,7 +188,11 @@ struct RawJson {
 #[tokio::test]
 async fn invalid_json_text_is_rejected_by_bigquery() -> TestResult {
     with_scratch("invalid_json_text_is_rejected_by_bigquery", async |s| {
-        run_sql(s, "CREATE TABLE raw (id INT64, value JSON)").await?;
+        run_sql(
+            s,
+            &format!("CREATE TABLE {} (id INT64, value JSON)", s.table_sql("raw")),
+        )
+        .await?;
         let outcome = write(
             s,
             "raw",
@@ -207,7 +221,7 @@ async fn invalid_json_text_is_rejected_by_bigquery() -> TestResult {
         let stored: Vec<serde_json::Value> =
             s.db.fluent()
                 .select()
-                .from(s.dataset.table(BigQueryTableId::from_static("raw")))
+                .from(s.table("raw"))
                 .obj()
                 .query()
                 .await?;

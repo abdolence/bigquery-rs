@@ -79,7 +79,7 @@ async fn cdc_upsert_then_delete() -> TestResult {
             scratch,
             &format!(
                 "SELECT id, name FROM {} ORDER BY id",
-                table_sql(scratch, "t")
+                scratch.table_sql("t")
             ),
         )
         .await?;

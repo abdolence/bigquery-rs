@@ -248,8 +248,11 @@ There are unit tests next to the code, many of them against a fake BigQuery gRPC
 code in the book is compiled as doctests. The integration tests in the tests directory run for
 every push to master against a real BigQuery project allocated for testing purposes, or locally when
 `GCP_PROJECT` is set. Other branches run only the unit tests and doctests.
-Each test creates its own scratch dataset and deletes it at the end. Be aware not to introduce
-huge reads, writes or queries there, since they are billed.
+All of them work in one dataset, `bigquery_rs_ci`, under an account whose BigQuery access is that
+dataset and nothing else: it can run jobs and read sessions, but it cannot create a dataset or
+read or write data outside this one. Each test makes its own tables there, named after its run,
+and drops them at the end; the dataset expires anything left behind after an hour. Be aware not
+to introduce huge reads, writes or queries there, since they are billed.
 
 ## Licence
 

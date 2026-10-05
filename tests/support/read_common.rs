@@ -3,9 +3,9 @@
 use bigquery::errors::BigQueryError;
 use gcloud_sdk::google::cloud::bigquery::v2 as bq;
 
-use crate::common::{Scratch, TestResult};
+use crate::common::{Scratch, TestResult, CI_LOCATION};
 
-/// Runs one GoogleSQL statement with the scratch dataset as the default and waits for it.
+/// Runs one GoogleSQL statement in the CI dataset's location and waits for it.
 pub async fn run_sql(s: &Scratch, sql: &str) -> TestResult {
     let mut response =
         s.db.job_client()
@@ -15,11 +15,7 @@ pub async fn run_sql(s: &Scratch, sql: &str) -> TestResult {
                     query: sql.to_string(),
                     use_legacy_sql: Some(false),
                     timeout_ms: Some(60_000),
-                    default_dataset: Some(bq::DatasetReference {
-                        dataset_id: s.dataset.to_string(),
-                        project_id: s.project.clone(),
-                    }),
-                    location: "US".into(),
+                    location: CI_LOCATION.to_string(),
                     ..Default::default()
                 }),
             })
@@ -38,7 +34,7 @@ pub async fn run_sql(s: &Scratch, sql: &str) -> TestResult {
                     job_id: job.job_id.clone(),
                     max_results: Some(0),
                     timeout_ms: Some(60_000),
-                    location: "US".into(),
+                    location: CI_LOCATION.to_string(),
                     ..Default::default()
                 })
                 .await

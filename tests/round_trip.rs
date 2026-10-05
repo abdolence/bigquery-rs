@@ -122,23 +122,30 @@ async fn round_trip_every_type_through_dml() -> TestResult {
     with_scratch("round_trip_every_type_through_dml", async |s: &Scratch| {
         run_sql(
             s,
-            "CREATE TABLE residents (id INT64 NOT NULL, name STRING NOT NULL, born DATE NOT NULL, \
-             seen TIMESTAMP NOT NULL, seen_fast TIMESTAMP NOT NULL, wakes TIME NOT NULL, \
-             balance NUMERIC NOT NULL, photo BYTES NOT NULL, tags ARRAY<STRING>, \
-             home STRUCT<county STRING, zip INT64>)",
+            &format!(
+                "CREATE TABLE {} (id INT64 NOT NULL, name STRING NOT NULL, \
+                 born DATE NOT NULL, seen TIMESTAMP NOT NULL, seen_fast TIMESTAMP NOT NULL, \
+                 wakes TIME NOT NULL, balance NUMERIC NOT NULL, photo BYTES NOT NULL, \
+                 tags ARRAY<STRING>, home STRUCT<county STRING, zip INT64>)",
+                s.table_sql("residents")
+            ),
         )
         .await?;
         let expected = residents();
         let values: Vec<String> = expected.iter().map(row_literal).collect();
         run_sql(
             s,
-            &format!("INSERT INTO residents VALUES {}", values.join(", ")),
+            &format!(
+                "INSERT INTO {} VALUES {}",
+                s.table_sql("residents"),
+                values.join(", ")
+            ),
         )
         .await?;
         let mut got: Vec<Resident> =
             s.db.fluent()
                 .select()
-                .from(s.dataset.table(BigQueryTableId::from_static("residents")))
+                .from(s.table("residents"))
                 .obj()
                 .query()
                 .await?;
@@ -221,9 +228,9 @@ struct EveryType {
     a_struct: Vec<Pair>,
 }
 
-/// The GoogleSQL type of each `<mode>_<name>` column of [`EveryType`].
-const EVERY_TYPE: BigQueryTableId = BigQueryTableId::from_static("every_type");
+const EVERY_TYPE: &str = "every_type";
 
+/// The GoogleSQL type of each `<mode>_<name>` column of [`EveryType`].
 const EVERY_TYPE_COLUMNS: &[(&str, &str)] = &[
     ("int64", "INT64"),
     ("float64", "FLOAT64"),
@@ -245,14 +252,18 @@ const EVERY_TYPE_COLUMNS: &[(&str, &str)] = &[
     ("struct", "STRUCT<a INT64, b STRING>"),
 ];
 
-fn every_type_table_sql() -> String {
+fn every_type_table_sql(s: &Scratch) -> String {
     let mut columns = vec!["id INT64 NOT NULL".to_string()];
     for (name, ty) in EVERY_TYPE_COLUMNS {
         columns.push(format!("n_{name} {ty}"));
         columns.push(format!("r_{name} {ty} NOT NULL"));
         columns.push(format!("a_{name} ARRAY<{ty}>"));
     }
-    format!("CREATE TABLE every_type ({})", columns.join(", "))
+    format!(
+        "CREATE TABLE {} ({})",
+        s.table_sql(EVERY_TYPE),
+        columns.join(", ")
+    )
 }
 
 fn bounded<T>(start: T, end: T) -> BigQueryRange<T> {
@@ -393,12 +404,12 @@ async fn round_trip_every_type_and_mode_through_the_writer() -> TestResult {
     with_scratch(
         "round_trip_every_type_and_mode_through_the_writer",
         async |s: &Scratch| {
-            run_sql(s, &every_type_table_sql()).await?;
+            run_sql(s, &every_type_table_sql(s)).await?;
             let expected = every_type_rows();
             let summary =
                 s.db.fluent()
                     .insert()
-                    .into(s.dataset_ref()?.table(EVERY_TYPE))
+                    .into(s.dataset_ref()?.table(s.table_id(EVERY_TYPE)))
                     .objects(&expected)
                     .execute()
                     .await?;
@@ -406,7 +417,7 @@ async fn round_trip_every_type_and_mode_through_the_writer() -> TestResult {
             let mut got: Vec<EveryType> =
                 s.db.fluent()
                     .select()
-                    .from(s.dataset.table(EVERY_TYPE))
+                    .from(s.table(EVERY_TYPE))
                     .obj()
                     .query()
                     .await?;

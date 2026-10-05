@@ -1,5 +1,5 @@
-//! Live table reads against BigQuery, on tables of a few rows in a scratch dataset. They run
-//! only with `GCP_PROJECT` set.
+//! Live table reads against BigQuery, on tables of a few rows in the CI dataset. They run only
+//! with `GCP_PROJECT` set.
 
 use bigquery::arrow_schema::DataType;
 use bigquery::*;
@@ -113,7 +113,7 @@ const TYPES: &[(&str, &str, &str, &str, &str)] = &[
 /// `t_all`: row 1 holds every value, row 2 NULLs and empty arrays. Two more columns pin
 /// BigQuery behaviour: a parameterised NUMERIC, which arrives at its own precision and scale,
 /// and a REQUIRED RANGE with an unbounded end.
-fn all_types_sql() -> String {
+fn all_types_sql(s: &Scratch) -> String {
     let mut columns = vec!["id INT64 NOT NULL".to_string()];
     let mut first = vec!["1 AS id".to_string()];
     let mut second = vec!["2".to_string()];
@@ -135,7 +135,8 @@ fn all_types_sql() -> String {
     first.push("RANGE<DATE> '[UNBOUNDED, 2024-01-01)'".into());
     second.push("RANGE<DATE> '[2024-01-01, UNBOUNDED)'".into());
     format!(
-        "CREATE TABLE t_all ({}) AS SELECT {} UNION ALL SELECT {}",
+        "CREATE TABLE {} ({}) AS SELECT {} UNION ALL SELECT {}",
+        s.table_sql("t_all"),
         columns.join(", "),
         first.join(", "),
         second.join(", ")
@@ -409,8 +410,8 @@ fn expected(id: i64) -> AllTypes {
 #[tokio::test]
 async fn read_every_type_and_mode() -> TestResult {
     with_scratch("read_every_type_and_mode", async |s: &Scratch| {
-        run_sql(s, &all_types_sql()).await?;
-        let table = s.dataset.table(BigQueryTableId::from_static("t_all"));
+        run_sql(s, &all_types_sql(s)).await?;
+        let table = s.table("t_all");
         let mut rows: Vec<AllTypes> =
             s.db.fluent()
                 .select()
@@ -439,7 +440,9 @@ async fn read_every_type_and_mode() -> TestResult {
 }
 
 /// `people`: twelve rows of Swedish names, with counties and birth years.
-const PEOPLE_SQL: &str = "CREATE TABLE people AS
+fn people_sql(s: &Scratch) -> String {
+    format!(
+        "CREATE TABLE {} AS
     SELECT id, name, county, 1990 + id * 3 AS year
     FROM UNNEST([
         STRUCT(1 AS id, 'Åsa' AS name, 'Skåne' AS county),
@@ -447,7 +450,10 @@ const PEOPLE_SQL: &str = "CREATE TABLE people AS
         (5, 'Märta', 'Gävleborg'), (6, 'Göran', 'Jönköping'), (7, 'Saga', 'Uppsala'),
         (8, 'Håkan', 'Västerbotten'), (9, 'Elsa', 'Dalarna'), (10, 'Sören', 'Kalmar'),
         (11, 'Maja', 'Halland'), (12, 'Åke', 'Norrbotten')
-    ])";
+    ])",
+        s.table_sql("people")
+    )
+}
 
 #[derive(Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Person {
@@ -460,8 +466,8 @@ async fn read_projection_and_row_restriction() -> TestResult {
     with_scratch(
         "read_projection_and_row_restriction",
         async |s: &Scratch| {
-            run_sql(s, PEOPLE_SQL).await?;
-            let table = s.dataset.table(BigQueryTableId::from_static("people"));
+            run_sql(s, &people_sql(s)).await?;
+            let table = s.table("people");
 
             let recent: BTreeSet<Person> =
                 s.db.fluent()
@@ -522,10 +528,11 @@ async fn read_projection_and_row_restriction() -> TestResult {
 async fn read_streams_merge() -> TestResult {
     with_scratch("read_streams_merge", async |s: &Scratch| {
         // Separate statements leave separate storage files, which the session can split.
-        run_sql(s, "CREATE TABLE parts (id INT64, county STRING)").await?;
+        let parts = s.table_sql("parts");
+        run_sql(s, &format!("CREATE TABLE {parts} (id INT64, county STRING)")).await?;
         for part in 0..4 {
             run_sql(s, &format!(
-                "INSERT INTO parts SELECT {part} * 10 + n, 'Gotland' FROM UNNEST(GENERATE_ARRAY(1, 10)) AS n"
+                "INSERT INTO {parts} SELECT {part} * 10 + n, 'Gotland' FROM UNNEST(GENERATE_ARRAY(1, 10)) AS n"
             ))
             .await?;
         }
@@ -539,8 +546,10 @@ async fn read_streams_merge() -> TestResult {
                 parent: format!("projects/{}", s.project),
                 read_session: Some(storage::ReadSession {
                     table: format!(
-                        "projects/{}/datasets/{}/tables/parts",
-                        s.project, s.dataset
+                        "projects/{}/datasets/{}/tables/{}",
+                        s.project,
+                        s.dataset,
+                        s.table_id("parts")
                     ),
                     data_format: storage::DataFormat::Arrow.into(),
                     ..Default::default()
@@ -561,7 +570,7 @@ async fn read_streams_merge() -> TestResult {
             .db
             .fluent()
             .select()
-            .from(s.dataset.table(BigQueryTableId::from_static("parts")))
+            .from(s.table("parts"))
             .options(options)
             .obj::<Part>()
             .stream_query_with_errors()

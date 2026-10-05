@@ -13,11 +13,11 @@ use std::collections::BTreeSet;
 mod common;
 #[path = "support/read_common.rs"]
 mod read_common;
-use common::{with_scratch, Scratch, TestResult};
+use common::{with_scratch, Scratch, TestResult, CI_LOCATION};
 use read_common::run_sql;
 
-const HOSTILE: BigQueryTableId = BigQueryTableId::from_static("hostile");
-const LITERAL_KINDS: BigQueryTableId = BigQueryTableId::from_static("literal_kinds");
+const HOSTILE: &str = "hostile";
+const LITERAL_KINDS: &str = "literal_kinds";
 
 /// Every character class the escaper has a rule for: all of C0 and C1, DEL, the invisible
 /// format characters, a non-BMP character and the tag block.
@@ -90,13 +90,13 @@ struct Count {
 /// The ids of the rows of `table` that `filter` matches, read through Storage Read.
 async fn ids(
     s: &Scratch,
-    table: BigQueryTableId,
+    table: &str,
     filter: impl FnOnce(BigQueryFilterBuilder) -> Option<BigQueryFilter>,
 ) -> TestResult<BTreeSet<i64>> {
     let rows: Vec<BigQueryResult<ReadRow>> =
         s.db.fluent()
             .select()
-            .from(s.dataset.table(table))
+            .from(s.table(table))
             .filter(filter)
             .obj::<ReadRow>()
             .stream_query_with_errors()
@@ -135,9 +135,11 @@ async fn filter_matches_hostile_values_literally() -> TestResult {
             let total = i64::try_from(rows.len())?;
             let outcome =
                 s.db.fluent()
-                    .query("CREATE TABLE hostile AS SELECT * FROM UNNEST(@rows)")
-                    .default_dataset(s.dataset_ref()?)
-                    .location(BigQueryLocation::from_static("US"))
+                    .query(format!(
+                        "CREATE TABLE {} AS SELECT * FROM UNNEST(@rows)",
+                        s.table_sql(HOSTILE)
+                    ))
+                    .location(CI_LOCATION)
                     .param("rows", &rows)
                     .execute()
                     .await?;
@@ -184,9 +186,11 @@ async fn filter_matches_hostile_values_literally() -> TestResult {
 
             let count: Vec<Count> =
                 s.db.fluent()
-                    .query("SELECT COUNT(*) AS n FROM hostile")
-                    .default_dataset(s.dataset_ref()?)
-                    .location(BigQueryLocation::from_static("US"))
+                    .query(format!(
+                        "SELECT COUNT(*) AS n FROM {}",
+                        s.table_sql(HOSTILE)
+                    ))
+                    .location(CI_LOCATION)
                     .obj::<Count>()
                     .query()
                     .await?;
@@ -197,11 +201,11 @@ async fn filter_matches_hostile_values_literally() -> TestResult {
     .await
 }
 
-/// `literal_kinds`, written as hand-made GoogleSQL so that the stored side shares no code with
+/// The rows of `literal_kinds`, written as hand-made GoogleSQL so that the stored side shares no code with
 /// the crate's literal renderer. Row 1 holds the values the filters look for; row 2 holds the
 /// opposite extreme of each kind, which a literal BigQuery read as a different value, or a
 /// condition that matches every row, would select too.
-const CREATE_LITERAL_KINDS: &str = r#"CREATE TABLE literal_kinds AS
+const LITERAL_KINDS_SELECT: &str = r#"
 SELECT * FROM UNNEST([
   STRUCT(
     1 AS id,
@@ -253,7 +257,14 @@ async fn filter_literals_parse_back_to_their_values() -> TestResult {
     with_scratch(
         "filter_literals_parse_back_to_their_values",
         async |scratch: &Scratch| {
-            run_sql(scratch, CREATE_LITERAL_KINDS).await?;
+            run_sql(
+                scratch,
+                &format!(
+                    "CREATE TABLE {} AS{LITERAL_KINDS_SELECT}",
+                    scratch.table_sql(LITERAL_KINDS)
+                ),
+            )
+            .await?;
             let target = BTreeSet::from([1]);
             let opposite = BTreeSet::from([2]);
             let first_day = jiff::civil::date(1, 1, 1);

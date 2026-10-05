@@ -1,5 +1,5 @@
-//! The tables the live write tests create in their scratch dataset, and the queries that read
-//! them back.
+//! The tables the live write tests create in the CI dataset, and the queries that read them
+//! back.
 
 use crate::common::*;
 use bigquery::errors::BigQueryError;
@@ -7,11 +7,11 @@ use bigquery::*;
 use gcloud_sdk::google::cloud::bigquery::v2 as bq;
 use gcloud_sdk::prost_types::value::Kind;
 
-/// A table with `columns` in the scratch dataset, with `primary_key` as a
+/// This run's table `name` with `columns`, with `primary_key` as a
 /// `PRIMARY KEY ... NOT ENFORCED` if set.
 pub async fn create_table(
     s: &Scratch,
-    table: &str,
+    name: &str,
     columns: Vec<BigQueryFieldSchema>,
     primary_key: Option<&str>,
 ) -> TestResult<BigQueryTableRef> {
@@ -24,7 +24,7 @@ pub async fn create_table(
                 table_reference: Some(bq::TableReference {
                     project_id: s.project.clone(),
                     dataset_id: s.dataset.to_string(),
-                    table_id: table.to_string(),
+                    table_id: s.table_id(name).to_string(),
                 }),
                 schema: Some(bq::TableSchema::from(&schema)),
                 table_constraints: primary_key.map(|key| bq::TableConstraints {
@@ -38,7 +38,7 @@ pub async fn create_table(
         })
         .await
         .map_err(BigQueryError::from)?;
-    Ok(s.dataset_ref()?.table(table.parse()?))
+    Ok(s.dataset_ref()?.table(s.table_id(name)))
 }
 
 /// The rows of `sql` as text cells, `None` for NULL, and the bytes BigQuery billed.
@@ -86,8 +86,4 @@ pub async fn query_rows(s: &Scratch, sql: &str) -> TestResult<(Vec<Vec<Option<St
         })
         .collect();
     Ok((rows, response.total_bytes_billed.unwrap_or_default()))
-}
-
-pub fn table_sql(s: &Scratch, table: &str) -> String {
-    format!("`{}.{}.{table}`", s.project, s.dataset)
 }

@@ -88,7 +88,7 @@ async fn write_each_mode_then_count() -> TestResult {
             );
             let (n, b) = count(
                 scratch,
-                &format!("SELECT COUNT(*) FROM {}", table_sql(scratch, table)),
+                &format!("SELECT COUNT(*) FROM {}", scratch.table_sql(table)),
             )
             .await?;
             billed += b;
@@ -106,7 +106,7 @@ async fn write_each_mode_then_count() -> TestResult {
         writer.write_all(&rows(5)).await?;
         let finalized = writer.finalize().await?;
         assert_eq!(finalized.row_count, 5);
-        let sql = format!("SELECT COUNT(*) FROM {}", table_sql(scratch, "t_pending"));
+        let sql = format!("SELECT COUNT(*) FROM {}", scratch.table_sql("t_pending"));
         let (before, b) = count(scratch, &sql).await?;
         billed += b;
         assert_eq!(before, 0, "pending rows are invisible before the commit");
@@ -144,7 +144,7 @@ async fn committed_resend_writes_no_duplicates() -> TestResult {
                 scratch,
                 &format!(
                     "SELECT COUNT(*), COUNT(DISTINCT id) FROM {}",
-                    table_sql(scratch, "t")
+                    scratch.table_sql("t")
                 ),
             )
             .await?;
