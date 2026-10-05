@@ -21,8 +21,8 @@ impl ArrowWriterSchema {
     /// Serializes `schema` as an IPC schema message.
     ///
     /// # Errors
-    /// [`BigQueryError::SerializeError`](crate::errors::BigQueryError::SerializeError) of kind `UnsupportedType` for a schema the IPC writer
-    /// cannot encode.
+    /// [`BigQueryError::SerializeError`](crate::errors::BigQueryError::SerializeError) of kind
+    /// `UnsupportedType` for a schema the IPC writer cannot encode.
     pub(crate) fn new(schema: SchemaRef) -> BigQueryResult<Self> {
         let writer = StreamWriter::try_new(Vec::new(), &schema)
             .map_err(|err| Self::ipc_error(&err).into_serialize())?;
@@ -73,8 +73,8 @@ pub(crate) struct RecordBatchSlice {
 /// Slices of one record batch in row order, each as large as fits `capacity` request bytes
 /// and `max_rows` rows.
 ///
-/// A slice's size is measured by serializing it: a slice over the capacity is cut where the
-/// bytes per row so far say the capacity ends, and the rest follows as the next slice.
+/// A slice's size is measured by serializing it: a slice over the capacity is cut into slices
+/// of as many rows as its bytes per row say fit the capacity.
 pub(crate) struct RecordBatchSlices<'b> {
     batch: &'b RecordBatch,
     schema: &'b ArrowWriterSchema,
@@ -83,6 +83,9 @@ pub(crate) struct RecordBatchSlices<'b> {
     write_order: u64,
     /// The row ranges still to send, as `(first_row, row_count)`, the next one last.
     pending: Vec<(usize, usize)>,
+    /// The IPC bytes serialized so far, slices that did not fit included.
+    #[cfg(test)]
+    encoded_bytes: usize,
 }
 
 impl<'b> RecordBatchSlices<'b> {
@@ -106,6 +109,8 @@ impl<'b> RecordBatchSlices<'b> {
             capacity,
             write_order,
             pending,
+            #[cfg(test)]
+            encoded_bytes: 0,
         }
     }
 }
@@ -125,6 +130,10 @@ impl Iterator for RecordBatchSlices<'_> {
                 Ok(serialized) => serialized,
                 Err(err) => return Some(Err(err.with_row(self.write_order + first_row as u64))),
             };
+            #[cfg(test)]
+            {
+                self.encoded_bytes += serialized.len();
+            }
             let cost = 1 + encoded_len_varint(serialized.len() as u64) + serialized.len();
             if cost <= self.capacity {
                 return Some(Ok(RecordBatchSlice {
@@ -143,13 +152,17 @@ impl Iterator for RecordBatchSlices<'_> {
                 )
                 .with_row(self.write_order + first_row as u64)));
             }
-            // A sixteenth below the estimate leaves room for what does not grow with the rows,
-            // so the first part usually fits at once.
-            let estimate = (row_count as u128 * self.capacity as u128 * 15 / 16 / cost as u128)
-                .clamp(1, row_count as u128 - 1) as usize;
-            self.pending
-                .push((first_row + estimate, row_count - estimate));
-            self.pending.push((first_row, estimate));
+            // The measured bytes per row cut the whole range into slices at once, so each row
+            // is serialized about once more; a slice that still does not fit is cut again. A
+            // sixteenth below the estimate leaves room for what does not grow with the rows.
+            let rows_per_slice =
+                (row_count as u128 * self.capacity as u128 * 15 / 16 / cost as u128)
+                    .clamp(1, row_count as u128 - 1) as usize;
+            let slices = (first_row..first_row + row_count)
+                .step_by(rows_per_slice)
+                .map(|first| (first, rows_per_slice.min(first_row + row_count - first)))
+                .rev();
+            self.pending.extend(slices);
         }
     }
 }
@@ -259,6 +272,31 @@ mod tests {
             slices.len() <= fewest + 1,
             "{} slices for {whole} bytes",
             slices.len()
+        );
+    }
+
+    #[test]
+    fn a_batch_many_times_the_cap_is_serialized_about_twice() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let ids = Int64Array::from_iter_values(0..2_000_000);
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(ids)])
+            .expect("the column fits the schema");
+        let schema = ArrowWriterSchema::new(schema).expect("the schema serializes");
+        let mut slices = RecordBatchSlices::new(&batch, &schema, 1_000_000, None, 0);
+        let mut rows = 0;
+        for slice in slices.by_ref() {
+            rows += slice.expect("every row fits a request").row_count;
+        }
+        assert_eq!(rows, 2_000_000);
+        let whole = schema
+            .serialize(&batch)
+            .expect("the batch serializes")
+            .len();
+        // The whole batch once to learn its size, then every row once in its slice.
+        assert!(
+            slices.encoded_bytes <= whole * 21 / 10,
+            "{} bytes encoded for a batch of {whole}",
+            slices.encoded_bytes
         );
     }
 
