@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-9ad68c8f.js";
+            window.path_to_searchindex_js = "searchindex-e81f959d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-38498192.js"></script>
@@ -1709,6 +1709,9 @@ the same primary key, an upsert or a delete, and BigQuery applies the changes fo
 <p>The typical use is mirroring an OLTP database into BigQuery as a stream. You read the changes of
 a PostgreSQL or MySQL table from its log, and write each one as it comes. The BigQuery table then
 looks like the source table, with a delay you choose.</p>
+<p>This chapter is about the CDC API itself. To update or delete a few rows by primary key,
+<code>db.fluent().update()</code> and <code>db.fluent().delete()</code> are simpler, see
+<a href="update-and-delete.html">updating and deleting</a>.</p>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
 <p>A CDC table needs a primary key. BigQuery’s keys are <code>NOT ENFORCED</code>: BigQuery never checks them,
 so it is up to you that the key is unique in the source. A key can have up to 16 columns.</p>
@@ -1725,9 +1728,10 @@ arrived, so an old change that arrives late or twice does not overwrite a newer 
 <p>A sequence number is up to four sections of hexadecimal digits separated by <code>/</code>, each up to 16
 digits, from <code>0</code> to <code>FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF</code>.
 BigQuery compares the sections as numbers, from left to right. A PostgreSQL LSN such as
-<code>16/B374D848</code> is already in this form. If a key gets changes with sequence numbers, send one
-with every change to it: mixing changes with and without them on one key gives an unpredictable
-order.</p>
+<code>16/B374D848</code> is already in this form. Between two changes with the same number, the one
+BigQuery ingested last wins. Sequence numbers are a choice for the whole table: once a table gets
+changes with sequence numbers, send one with every change to it, mixing changes with and without
+them gives an unpredictable order.</p>
 <p>BigQuery does not rewrite the table on every change. It keeps the recent changes beside the table
 and applies them in the background. The table’s <code>max_staleness</code> option says how old the applied
 data may be:</p>
@@ -1817,7 +1821,7 @@ db.fluent()
     .execute()
     .await?;
 
-// Or plain rows as upserts, with no sequence numbers
+// Or plain rows as upserts, for a table that does not use sequence numbers
 let customer = Customer {
     id: 3,
     name: "Grace".to_string(),
@@ -1894,7 +1898,8 @@ reservation, which Standard edition does not have.</li>
 <li>a CDC writer always writes <code>_CHANGE_TYPE</code>, so write plain inserts to the same table with a
 separate writer. BigQuery’s CDC documentation says rows with and without a change type on one
 connection are not supported;</li>
-<li>a delete still serializes a whole row of the table’s type, but only its key columns matter;</li>
+<li>a delete serializes a whole row, but only its key columns matter. A struct of just the key
+works when every column it leaves out is <code>NULLABLE</code>;</li>
 <li>delivery is at least once, as on every default stream write. With sequence numbers a change
 sent twice is harmless.</li>
 </ul>
