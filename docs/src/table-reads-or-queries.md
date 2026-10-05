@@ -99,5 +99,94 @@ filter reduces the bytes billed for a table read, so I would not count on it.
 - **DML, DDL, or when you need job stats, labels on the job or a dry run**: a query;
 - **Arrow for your own processing**: either, both have `record_batches()`.
 
+## Many rows from a complex query
+
+A query with joins or aggregates that returns a lot of rows needs no table of your own and no
+second step. BigQuery writes every query result to a temporary table, and the library reads a
+large one from there through the Storage Read API, in parallel streams, see
+[Where the rows come from](./queries.md#where-the-rows-come-from). Stream the rows instead of
+collecting them all:
+
+```rust,no_run
+# use bigquery::*;
+# use futures::StreamExt;
+# use serde::Deserialize;
+#[derive(Debug, Deserialize)]
+struct OrderWithCity {
+    id: i64,
+    total: f64,
+    city: String,
+}
+
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+let mut orders = db
+    .fluent()
+    .query(
+        "SELECT o.id, o.total, c.city FROM shop.orders o \
+         JOIN shop.customers c ON c.id = o.customer_id \
+         WHERE o.total > @minimum",
+    )
+    .param("minimum", 100.0)
+    .obj::<OrderWithCity>()
+    .stream_query()
+    .await?;
+while let Some(order) = orders.next().await {
+    println!("{order:?}");
+}
+# Ok(())
+# }
+```
+
+Reading that temporary table is free, so you pay only for the query. `.read_options(..)` sets
+the number of read streams and the compression, as for a table read.
+
+BigQuery limits how large a query result can be in its temporary table, see the maximum response
+size in [Quotas and limits](https://cloud.google.com/bigquery/quotas#query_jobs). For a result
+above it, write the result into a table of your own with `CREATE TABLE ... AS SELECT`, read it
+with a table read, and delete it. Give the table an expiration, so it does not stay behind if
+your process stops before the delete:
+
+```rust,no_run
+# use bigquery::*;
+# use futures::StreamExt;
+# use serde::Deserialize;
+# #[derive(Debug, Deserialize)]
+# struct OrderWithCity {
+#     id: i64,
+#     total: f64,
+#     city: String,
+# }
+# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+# const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+db.fluent()
+    .query(
+        "CREATE TABLE shop.orders_export \
+         OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)) AS \
+         SELECT o.id, o.total, c.city FROM shop.orders o \
+         JOIN shop.customers c ON c.id = o.customer_id",
+    )
+    .execute()
+    .await?;
+
+let mut orders = db
+    .fluent()
+    .select()
+    .from(SHOP.table(ORDERS_EXPORT))
+    .obj::<OrderWithCity>()
+    .stream_query()
+    .await?;
+while let Some(order) = orders.next().await {
+    println!("{order:?}");
+}
+
+db.fluent().schema().table(SHOP.table(ORDERS_EXPORT)).delete().await?;
+# Ok(())
+# }
+```
+
+That table is not temporary, so its storage is billed while it exists, and the table read is
+billed as Storage Read, see [Billing hints](#billing-hints).
+
 Be aware not to splice values into SQL text in either path. Use `.filter(..)` instead of
 `.filter_sql(..)`, and `.param(..)` instead of `format!` in the query text.
