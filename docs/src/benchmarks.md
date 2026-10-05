@@ -6,9 +6,10 @@ The library was compared with Google's own clients on the same machine, region a
 - Python `google-cloud-bigquery` with `google-cloud-bigquery-storage` and `pyarrow`;
 - the `bq` CLI, for query latency only.
 
-The numbers are from 2026-10-04, both on 0.1.0: the full run of every scenario, and a second
-run of the query scenarios, the query run. They depend a lot on the network, so treat them as a
-comparison between the clients on one connection, not as absolute figures.
+The numbers are from 2026-10-04, both on the pre-release code before 0.5.0: the full run of
+every scenario, and a second run of the query scenarios, the query run. They depend a lot on
+the network, so treat them as a comparison between the clients on one connection, not as
+absolute figures.
 
 ## Method
 
@@ -51,7 +52,7 @@ Python asks Storage Read for `max_stream_count = 0` by default, which lets BigQu
 
 | Client | Versions |
 |---|---|
-| bigquery (this library) | 0.1.0; gcloud-sdk 0.32.4 (0.32.3 for the full run), tonic 0.14.6, arrow 60.0.0 |
+| bigquery (this library) | pre-release, before 0.5.0; gcloud-sdk 0.32.4 (0.32.3 for the full run), tonic 0.14.6, arrow 60.0.0 |
 | google-cloud-bigquery | 0.18.0, google-cloud-bigquery-v2 1.0.0, google-cloud-gax 1.15.0, google-cloud-auth 1.17.0 |
 | Python | Python 3.14.7, google-cloud-bigquery 3.46.1, google-cloud-bigquery-storage 2.42.0, pyarrow 25.0.1, pandas 3.0.6, grpcio 1.84.0 |
 | bq | BigQuery CLI 2.1.39 (Google Cloud SDK 587.0.0) |
