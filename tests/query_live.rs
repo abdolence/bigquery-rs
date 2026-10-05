@@ -475,3 +475,65 @@ async fn injection_payloads_stay_data() -> TestResult {
     })
     .await
 }
+
+#[tokio::test]
+async fn destination_table_takes_the_result_and_refuses_a_second_write() -> TestResult {
+    with_scratch(
+        "destination_table_takes_the_result_and_refuses_a_second_write",
+        async |scratch| {
+            let destination = scratch.table("destination");
+            // Generated rows read no table, so every job here bills 0 bytes.
+            let sql = "SELECT number, CONCAT('n', CAST(number AS STRING)) AS label \
+                       FROM UNNEST(GENERATE_ARRAY(1, 3)) AS number";
+            let mut pairs: Vec<Pair> = scratch_query(scratch, sql.to_string())
+                .destination_table(destination.clone())
+                .obj::<Pair>()
+                .query()
+                .await?;
+            pairs.sort_by_key(|pair| pair.number);
+            let expected: Vec<Pair> = (1..=3)
+                .map(|number| Pair {
+                    number,
+                    label: format!("n{number}"),
+                })
+                .collect();
+            assert_eq!(pairs, expected);
+
+            let mut stored: Vec<Pair> = scratch
+                .db
+                .fluent()
+                .select()
+                .from(destination.clone())
+                .obj::<Pair>()
+                .query()
+                .await?;
+            stored.sort_by_key(|pair| pair.number);
+            assert_eq!(
+                stored, expected,
+                "the result stays in the destination table"
+            );
+
+            let refused = scratch_query(scratch, sql.to_string())
+                .destination_table(destination.clone())
+                .execute()
+                .await;
+            assert!(
+                matches!(refused, Err(errors::BigQueryError::DataConflictError(_))),
+                "a non-empty destination is refused by default: {refused:?}"
+            );
+
+            let appended: Vec<Pair> = scratch_query(scratch, sql.to_string())
+                .append_to_destination_table(destination.clone())
+                .obj::<Pair>()
+                .query()
+                .await?;
+            assert_eq!(
+                appended.len(),
+                6,
+                "the rows read back after an append are the whole table's"
+            );
+            Ok(())
+        },
+    )
+    .await
+}

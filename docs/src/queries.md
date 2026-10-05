@@ -277,6 +277,8 @@ The query builder also has:
 - `.request_id(..)`: the idempotency key of the `Query` call, see [DML](#dml-and-ddl);
 - `.inline_rows_limit(..)` and `.read_options(..)`: how the rows come back, see
   [Where the rows come from](#where-the-rows-come-from).
+- `.destination_table(..)`: a table of your own for the result, see
+  [Destination tables](#destination-tables).
 
 ```rust,no_run
 use bigquery::*;
@@ -414,6 +416,9 @@ is a `JobError` with BigQuery's reason and messages.
 `dry_run()` validates the statement and returns the bytes it would process and the schema of its
 result, without running it. It never creates a job and bills nothing.
 
+With a [destination table](#destination-tables) the dry run is sent as a dry-run job with the
+same destination, so BigQuery checks that part too. It still creates no job and writes nothing.
+
 ```rust,no_run
 use bigquery::*;
 
@@ -531,6 +536,8 @@ Every query asks BigQuery for an Arrow result. Then:
   in that response;
 - a larger result, or one whose job outlived the first call, is read from the job's destination
   table through the Storage Read API, with several streams in parallel;
+- a query with a [destination table](#destination-tables) is always read from that table
+  through the Storage Read API;
 - a statement without rows, such as DML or DDL, reads nothing.
 
 Both paths use the same Arrow decoder as table reads, so a type maps the same way in a query and
@@ -567,3 +574,66 @@ let batches = db
 
 By default the read asks for as many streams as the machine has parallelism, with LZ4 compression,
 and BigQuery decides how many it actually gives.
+
+## Destination tables
+
+BigQuery writes every query result into a temporary table, and you can name a table of your own
+instead. The table is a setting of the job, so the query stays a plain `SELECT`:
+
+- `.destination_table(table)`: the job writes the result into `table`, and fails if the table
+  already holds rows. This is BigQuery's own default, `WRITE_EMPTY`, so nothing is overwritten
+  unless you ask for it;
+- `.append_to_destination_table(table)`: the result is added after the rows the table holds
+  (`WRITE_APPEND`);
+- `.dangerously_overwrite_destination_table(table)`: the result replaces every row of the table
+  and its schema (`WRITE_TRUNCATE`).
+
+BigQuery creates the table when it does not exist, with the schema of the result. Each write
+applies only when the job succeeds, as one update of the table.
+
+```rust,no_run
+use bigquery::*;
+use serde::Deserialize;
+
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const CITY_TOTALS: BigQueryTableId = BigQueryTableId::from_static("city_totals");
+
+#[derive(Debug, Deserialize)]
+struct CityTotal {
+    city: String,
+    total: f64,
+}
+
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+let totals: Vec<CityTotal> = db
+    .fluent()
+    .query(
+        "SELECT c.city, SUM(o.total) AS total FROM shop.orders o \
+         JOIN shop.customers c ON c.id = o.customer_id GROUP BY c.city",
+    )
+    .destination_table(SHOP.table(CITY_TOTALS))
+    .obj::<CityTotal>()
+    .query()
+    .await?;
+# let _ = totals;
+# Ok(())
+# }
+```
+
+Every terminal works with a destination. The rows are read back from the table through the
+Storage Read API, so after an append they are the whole table's, the rows it held before
+included. `execute()` writes the table and reads nothing back.
+
+A write into a table that already holds rows, with `.destination_table(..)`, fails with a
+`DataConflictError`, BigQuery's `AlreadyExists` for that table.
+
+The query always runs as a job, inserted with `InsertJob`, since the `Query` call has no
+destination field. So `.job_creation_required()`, `.inline_rows_limit(..)` and `.request_id(..)`
+do not apply: the job's own ID, new for each terminal call, makes a retried `InsertJob` safe. The
+query cache does not answer a query with a destination table either.
+
+Be aware the table is not temporary: it stays until you delete it or it expires, and its storage
+and the Storage Read of it are billed, see
+[Billing hints](./table-reads-or-queries.md#billing-hints).
+
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/query-destination-table.rs).

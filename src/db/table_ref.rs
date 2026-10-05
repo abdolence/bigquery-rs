@@ -226,6 +226,16 @@ impl BigQueryTableRef {
             table: self.table.to_string(),
         }
     }
+
+    /// The v2 `TableReference`, with `default_project_id` for an unset project.
+    pub(crate) fn table_reference(&self, default_project_id: &str) -> TableReference {
+        let ids = self.ids(default_project_id);
+        TableReference {
+            project_id: ids.project,
+            dataset_id: ids.dataset,
+            table_id: ids.table,
+        }
+    }
 }
 
 /// The project, dataset and table IDs of a table with its project resolved, as the v2 requests

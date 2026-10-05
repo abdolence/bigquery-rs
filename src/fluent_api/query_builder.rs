@@ -1,9 +1,10 @@
 use crate::errors::BigQueryError;
 use crate::query::{infer_param, struct_params, typed_param, ParamLabel};
 use crate::{
-    BigQueryDatasetRef, BigQueryDryRunResult, BigQueryJobCreation, BigQueryJobStats,
-    BigQueryParamType, BigQueryQueryOutcome, BigQueryQueryParams, BigQueryQuerySupport,
-    BigQueryReadOptions, BigQueryResult,
+    BigQueryDatasetRef, BigQueryDestinationWrite, BigQueryDryRunResult, BigQueryJobCreation,
+    BigQueryJobStats, BigQueryParamType, BigQueryQueryDestination, BigQueryQueryOutcome,
+    BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions, BigQueryResult,
+    BigQueryTableRef,
 };
 use crate::{BigQueryLabels, BigQueryLocation, BigQueryRequestId};
 use arrow_array::RecordBatch;
@@ -222,6 +223,51 @@ where
     pub fn read_options(self, options: BigQueryReadOptions) -> Self {
         Self {
             params: self.params.with_read_options(options),
+            ..self
+        }
+    }
+
+    /// Writes the result into `table`, a table of your own, and reads the rows back from it
+    /// through the Storage Read API. BigQuery creates the table when it does not exist, and
+    /// the job fails with
+    /// [`DataConflictError`](crate::errors::BigQueryError::DataConflictError) if the table
+    /// already holds rows, so nothing is overwritten.
+    ///
+    /// A destination table has no size limit on the result, which a query's temporary table
+    /// has. The query then always runs as a job, created with `InsertJob`, so
+    /// [`job_creation_required`](Self::job_creation_required),
+    /// [`inline_rows_limit`](Self::inline_rows_limit) and [`request_id`](Self::request_id) do
+    /// not apply. Unlike a temporary table, the table stays, and its storage and the read of
+    /// it are billed.
+    ///
+    /// [`dry_run`](Self::dry_run) sends the same job configuration as a dry run, so BigQuery
+    /// checks the destination too, and writes nothing.
+    pub fn destination_table(self, table: impl Into<BigQueryTableRef>) -> Self {
+        self.destination(table.into(), BigQueryDestinationWrite::IfEmpty)
+    }
+
+    /// Writes the result into `table` after the rows it already holds, as
+    /// [`destination_table`](Self::destination_table) otherwise. The rows read back are the
+    /// whole table's, the earlier ones included.
+    pub fn append_to_destination_table(self, table: impl Into<BigQueryTableRef>) -> Self {
+        self.destination(table.into(), BigQueryDestinationWrite::Append)
+    }
+
+    /// Replaces every row of `table` and its schema with the result, as
+    /// [`destination_table`](Self::destination_table) otherwise. The rows the table held are
+    /// lost once the job succeeds.
+    pub fn dangerously_overwrite_destination_table(
+        self,
+        table: impl Into<BigQueryTableRef>,
+    ) -> Self {
+        self.destination(table.into(), BigQueryDestinationWrite::Overwrite)
+    }
+
+    fn destination(self, table: BigQueryTableRef, write: BigQueryDestinationWrite) -> Self {
+        Self {
+            params: self
+                .params
+                .with_destination(BigQueryQueryDestination { table, write }),
             ..self
         }
     }

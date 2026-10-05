@@ -142,9 +142,9 @@ the number of read streams and the compression, as for a table read.
 
 BigQuery limits how large a query result can be in its temporary table, see the maximum response
 size in [Quotas and limits](https://cloud.google.com/bigquery/quotas#query_jobs). For a result
-above it, write the result into a table of your own with `CREATE TABLE ... AS SELECT`, read it
-with a table read, and delete it. Give the table an expiration, so it does not stay behind if
-your process stops before the delete:
+above it, write the result into a table of your own with `.destination_table(..)`, see
+[Destination tables](./queries.md#destination-tables). The query is the same, and the rows are
+read back from that table through the same Storage Read path:
 
 ```rust,no_run
 # use bigquery::*;
@@ -156,23 +156,17 @@ your process stops before the delete:
 #     total: f64,
 #     city: String,
 # }
-# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-# const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
-# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
-db.fluent()
-    .query(
-        "CREATE TABLE shop.orders_export \
-         OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)) AS \
-         SELECT o.id, o.total, c.city FROM shop.orders o \
-         JOIN shop.customers c ON c.id = o.customer_id",
-    )
-    .execute()
-    .await?;
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
 
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
 let mut orders = db
     .fluent()
-    .select()
-    .from(SHOP.table(ORDERS_EXPORT))
+    .query(
+        "SELECT o.id, o.total, c.city FROM shop.orders o \
+         JOIN shop.customers c ON c.id = o.customer_id",
+    )
+    .destination_table(SHOP.table(ORDERS_EXPORT))
     .obj::<OrderWithCity>()
     .stream_query()
     .await?;
@@ -185,8 +179,13 @@ db.fluent().schema().table(SHOP.table(ORDERS_EXPORT)).delete().await?;
 # }
 ```
 
-That table is not temporary, so its storage is billed while it exists, and the table read is
-billed as Storage Read, see [Billing hints](#billing-hints).
+The default refuses to write into a table that already holds rows, so a second run fails until
+the table is deleted. Use `.dangerously_overwrite_destination_table(..)` to replace it instead.
+Give the dataset a default table expiration, so the table does not stay behind if your process
+stops before the delete.
+
+That table is a table of your own, so its storage is billed while it exists, and reading it back
+is billed as Storage Read, see [Billing hints](#billing-hints).
 
 Be aware not to splice values into SQL text in either path. Use `.filter(..)` instead of
 `.filter_sql(..)`, and `.param(..)` instead of `format!` in the query text.

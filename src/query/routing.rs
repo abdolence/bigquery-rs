@@ -8,26 +8,33 @@
 //! Job creation is optional unless the caller requires it, so a short query is answered
 //! without a job. Whenever the first response leaves anything for a later call, BigQuery has
 //! created a job for it, and that job is what the rest of the route reads.
+//!
+//! A query with a caller's destination table cannot go through `Query`, whose request has no
+//! destination. It is inserted as a job with `InsertJob`, waited for like any other job, and
+//! its rows are always read from that table through the Storage Read API.
 
 use crate::errors::BigQueryError;
 use crate::query::params::parameter_mode;
 use crate::read::ArrowIpcDecoder;
 use crate::{
     BigQueryDb, BigQueryDryRunResult, BigQueryJobCreation, BigQueryJobRef, BigQueryJobStats,
-    BigQueryLocation, BigQueryQueryId, BigQueryQueryOutcome, BigQueryQueryParams,
-    BigQueryReadCompression, BigQueryResult, BigQueryStatementType, BigQueryTableRef,
-    BigQueryTableSchema,
+    BigQueryLocation, BigQueryQueryDestination, BigQueryQueryId, BigQueryQueryOutcome,
+    BigQueryQueryParams, BigQueryReadCompression, BigQueryResult, BigQueryStatementType,
+    BigQueryTableRef, BigQueryTableSchema,
 };
 use arrow_array::RecordBatch;
+use futures::future::BoxFuture;
 use gcloud_sdk::google::cloud::bigquery::v2::arrow_serialization_options::CompressionCodec;
 use gcloud_sdk::google::cloud::bigquery::v2::query_request::{
     JobCreationMode, QueryResultsFormat, ResultsFormatSerializationOptions,
 };
 use gcloud_sdk::google::cloud::bigquery::v2::query_response::{Results, ResultsSchema};
 use gcloud_sdk::google::cloud::bigquery::v2::{
-    ArrowSerializationOptions, DataFormatOptions, DatasetReference, GetQueryResultsResponse, Job,
-    PostQueryRequest, QueryRequest, QueryResponse,
+    ArrowSerializationOptions, DataFormatOptions, DatasetReference, GetQueryResultsResponse,
+    InsertJobRequest, Job, JobConfiguration, JobConfigurationQuery, JobReference, PostQueryRequest,
+    QueryRequest, QueryResponse,
 };
+use gcloud_sdk::tonic::{Code, Response};
 use rand::RngExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::field::Empty;
@@ -209,17 +216,163 @@ fn random_request_id() -> String {
     format!("{:032x}", rand::rng().random::<u128>())
 }
 
+/// A fresh ID for a job the crate inserts, which is also what makes its `InsertJob` safe to
+/// retry.
+fn random_job_id() -> String {
+    format!("bigquery_rs_{}", random_request_id())
+}
+
+impl BigQueryQueryParams {
+    /// The dataset unqualified table names resolve in, with `project_id` for an unset project.
+    fn default_dataset_reference(&self, project_id: &str) -> Option<DatasetReference> {
+        self.default_dataset.as_ref().map(|d| DatasetReference {
+            project_id: d.project_or(project_id).to_string(),
+            dataset_id: d.dataset().to_string(),
+        })
+    }
+}
+
 impl BigQueryDb {
+    /// Where the query's job runs: its own location, else the client's, else BigQuery's
+    /// choice.
+    fn query_location(&self, params: &BigQueryQueryParams) -> Option<String> {
+        params
+            .location
+            .as_ref()
+            .or(self.options().location.as_ref())
+            .map(ToString::to_string)
+    }
+
+    /// The `InsertJob` request of a query that writes into `destination`, with a fresh job ID.
+    fn query_job_request(
+        &self,
+        params: &BigQueryQueryParams,
+        destination: &BigQueryQueryDestination,
+        dry_run: bool,
+    ) -> BigQueryResult<InsertJobRequest> {
+        let project_id = self.options().google_project_id.clone();
+        let query = JobConfigurationQuery {
+            query: params.sql.clone(),
+            destination_table: Some(destination.table.table_reference(&project_id)),
+            create_disposition: "CREATE_IF_NEEDED".to_string(),
+            write_disposition: destination.write.disposition().to_string(),
+            default_dataset: params.default_dataset_reference(&project_id),
+            use_query_cache: params.use_query_cache,
+            maximum_bytes_billed: params.maximum_bytes_billed,
+            use_legacy_sql: Some(false),
+            parameter_mode: parameter_mode(&params.query_parameters)?.to_string(),
+            query_parameters: params.query_parameters.clone(),
+            ..Default::default()
+        };
+        Ok(InsertJobRequest {
+            project_id: project_id.clone(),
+            job: Some(Job {
+                job_reference: Some(JobReference {
+                    project_id,
+                    job_id: random_job_id(),
+                    location: self.query_location(params),
+                }),
+                configuration: Some(JobConfiguration {
+                    query: Some(query),
+                    dry_run: Some(dry_run),
+                    job_timeout_ms: params.job_timeout_ms()?,
+                    labels: params.labels.clone().into_iter().collect(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        })
+    }
+
+    /// Sends `InsertJob` for a query into `destination`. Every retry repeats the job ID, so
+    /// `AlreadyExists` for that job on a retry means an earlier attempt created it, and that
+    /// job is the one returned.
+    async fn insert_query_job(
+        &self,
+        params: &BigQueryQueryParams,
+        destination: &BigQueryQueryDestination,
+        dry_run: bool,
+        span: &Span,
+    ) -> BigQueryResult<Job> {
+        let request = self.query_job_request(params, destination, dry_run)?;
+        let sent = request
+            .job
+            .as_ref()
+            .and_then(|job| job.job_reference.clone());
+        let retrying = AtomicBool::new(false);
+        self.retry(span, "insert a query job", &request, |r| {
+            let retry = retrying.swap(true, Ordering::Relaxed);
+            let sent = sent.clone();
+            let mut client = self.job_client();
+            async move {
+                match client.insert_job(r).await {
+                    Err(status)
+                        if retry
+                            && status.code() == Code::AlreadyExists
+                            && sent
+                                .as_ref()
+                                .is_some_and(|job| status.message().contains(&job.job_id)) =>
+                    {
+                        Ok(Response::new(Job {
+                            job_reference: sent,
+                            ..Default::default()
+                        }))
+                    }
+                    other => other,
+                }
+            }
+        })
+        .await
+    }
+
+    /// Inserts the job of a query into `destination` and waits for it to finish.
+    ///
+    /// Boxed here rather than at the call: a debug build keeps a stack slot for the whole
+    /// future in every caller's frame, which overflows a test thread's stack on queries that
+    /// never set a destination.
+    fn run_query_job<'a>(
+        &'a self,
+        params: &'a BigQueryQueryParams,
+        destination: &'a BigQueryQueryDestination,
+        span: &'a Span,
+    ) -> BoxFuture<'a, BigQueryResult<(BigQueryJobStats, BigQueryJobRef, Job)>> {
+        Box::pin(async move {
+            let inserted = self
+                .insert_query_job(params, destination, false, span)
+                .await?;
+            let mut stats = BigQueryJobStats {
+                job: inserted.job_reference.map(BigQueryJobRef::from),
+                ..Default::default()
+            };
+            stats.record(span);
+            let (job, details) = self.finish_job(&mut stats, true, params, span).await?;
+            Ok((stats, job, details))
+        })
+    }
+
+    /// Sends the job of a query into `destination` as a dry run, boxed for the reason
+    /// [`run_query_job`](Self::run_query_job) is.
+    fn dry_run_query_job<'a>(
+        &'a self,
+        params: &'a BigQueryQueryParams,
+        destination: &'a BigQueryQueryDestination,
+        span: &'a Span,
+    ) -> BoxFuture<'a, BigQueryResult<BigQueryDryRunResult>> {
+        Box::pin(async move {
+            let job = self
+                .insert_query_job(params, destination, true, span)
+                .await?;
+            BigQueryDryRunResult::try_from(&job)
+        })
+    }
+
     fn query_request(
         &self,
         params: &BigQueryQueryParams,
         purpose: Purpose,
     ) -> BigQueryResult<PostQueryRequest> {
         let project_id = self.options().google_project_id.clone();
-        let default_dataset = params.default_dataset.as_ref().map(|d| DatasetReference {
-            project_id: d.project_or(&project_id).to_string(),
-            dataset_id: d.dataset().to_string(),
-        });
+        let default_dataset = params.default_dataset_reference(&project_id);
         let max_results = match purpose {
             Purpose::Rows => params.inline_rows_limit,
             Purpose::Execute => Some(0),
@@ -238,12 +391,7 @@ impl BigQueryDb {
                 use_legacy_sql: Some(false),
                 parameter_mode: parameter_mode(&params.query_parameters)?.to_string(),
                 query_parameters: params.query_parameters.clone(),
-                location: params
-                    .location
-                    .as_ref()
-                    .or(self.options().location.as_ref())
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
+                location: self.query_location(params).unwrap_or_default(),
                 format_options: Some(DataFormatOptions {
                     use_int64_timestamp: true,
                     ..Default::default()
@@ -303,6 +451,10 @@ impl BigQueryDb {
         params: &BigQueryQueryParams,
         span: &Span,
     ) -> BigQueryResult<(Rows, BigQueryJobStats)> {
+        if let Some(destination) = &params.destination {
+            let (stats, job, details) = self.run_query_job(params, destination, span).await?;
+            return Self::job_rows(stats, &job, &details, span);
+        }
         let response = self.post_query(params, Purpose::Rows, span).await?;
         let mut stats = BigQueryJobStats::first_response(&response, span);
         let complete = response.job_complete == Some(true);
@@ -317,6 +469,17 @@ impl BigQueryDb {
             }
         }
         let (job, details) = self.finish_job(&mut stats, !complete, params, span).await?;
+        Self::job_rows(stats, &job, &details, span)
+    }
+
+    /// Where the rows of the finished `job` are: its destination table, or none for a
+    /// statement without rows.
+    fn job_rows(
+        stats: BigQueryJobStats,
+        job: &BigQueryJobRef,
+        details: &Job,
+        span: &Span,
+    ) -> BigQueryResult<(Rows, BigQueryJobStats)> {
         let destination = details
             .configuration
             .as_ref()
@@ -358,6 +521,9 @@ impl BigQueryDb {
         params: &BigQueryQueryParams,
         span: &Span,
     ) -> BigQueryResult<BigQueryQueryOutcome> {
+        if let Some(destination) = &params.destination {
+            return Ok(self.run_query_job(params, destination, span).await?.0);
+        }
         let response = self.post_query(params, Purpose::Execute, span).await?;
         let mut stats = BigQueryJobStats::first_response(&response, span);
         if response.job_complete == Some(true) {
@@ -396,12 +562,35 @@ impl BigQueryDb {
         params: &BigQueryQueryParams,
         span: &Span,
     ) -> BigQueryResult<BigQueryDryRunResult> {
+        if let Some(destination) = &params.destination {
+            return self.dry_run_query_job(params, destination, span).await;
+        }
         let response = self.post_query(params, Purpose::DryRun, span).await?;
         Ok(BigQueryDryRunResult {
             total_bytes_processed: response.total_bytes_processed,
             schema: response
                 .schema
                 .as_ref()
+                .map(BigQueryTableSchema::try_from)
+                .transpose()?,
+        })
+    }
+}
+
+/// What a dry-run job reports: the bytes and the result schema of its query statistics, else
+/// the bytes of its job statistics.
+impl TryFrom<&Job> for BigQueryDryRunResult {
+    type Error = BigQueryError;
+
+    fn try_from(job: &Job) -> Result<Self, Self::Error> {
+        let statistics = job.statistics.as_ref();
+        let query = statistics.and_then(|statistics| statistics.query.as_ref());
+        Ok(Self {
+            total_bytes_processed: query
+                .and_then(|query| query.total_bytes_processed)
+                .or(statistics.and_then(|statistics| statistics.total_bytes_processed)),
+            schema: query
+                .and_then(|query| query.schema.as_ref())
                 .map(BigQueryTableSchema::try_from)
                 .transpose()?,
         })

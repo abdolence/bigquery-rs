@@ -9,13 +9,13 @@ use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::{
     BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobId, BigQueryJobRef,
     BigQueryJobStats, BigQueryLocation, BigQueryQueryId, BigQueryQueryOutcome, BigQueryRequestId,
-    BigQueryResult, BigQueryStatementType,
+    BigQueryResult, BigQueryStatementType, BigQueryTableId,
 };
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::{StreamExt, TryStreamExt};
 use gcloud_sdk::google::cloud::bigquery::v2::{
-    query_response, ArrowRecordBatch, DmlStats, ErrorProto, GetQueryResultsResponse,
+    query_response, ArrowRecordBatch, DmlStats, ErrorProto, GetQueryResultsResponse, Job,
     JobCancelResponse, JobStatistics, JobStatistics2, JobStatus, PostQueryRequest, QueryResponse,
     TableFieldSchema, TableSchema,
 };
@@ -1357,6 +1357,315 @@ async fn a_skipped_row_log_line_names_the_row_and_field_and_not_the_cell() -> Bi
     assert!(
         fields.values().all(|value| !value.contains(CELL)),
         "{fields:?}"
+    );
+    Ok(())
+}
+
+const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
+
+/// The `Job` that `InsertJob` returns for the fake job, still running.
+fn running_job() -> Job {
+    Job {
+        job_reference: Some(job_reference()),
+        status: Some(JobStatus {
+            state: "RUNNING".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Answers a query job with a destination table: the job runs, completes with `total_rows`
+/// rows in `shop.orders_export`, and that table holds `table`.
+async fn destination_job(mut call: FakeCall, table: &FakeReadTable, total_rows: u64) {
+    match call.method() {
+        "InsertJob" => {
+            call.insert_job_request().await;
+            call.reply(&running_job());
+        }
+        "GetQueryResults" => {
+            call.query_results_request().await;
+            call.reply(&GetQueryResultsResponse {
+                job_reference: Some(job_reference()),
+                job_complete: Some(true),
+                total_rows: Some(total_rows),
+                ..Default::default()
+            });
+        }
+        "GetJob" => {
+            call.get_job_request().await;
+            call.reply(&done_job("shop", "orders_export"));
+        }
+        _ => storage_read(call, table).await,
+    }
+}
+
+#[tokio::test]
+async fn destination_table_query_runs_as_a_job_and_reads_its_table() -> BigQueryResult<()> {
+    let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1, 2])]]));
+    let fake = FakeBigQuery::start(move |call: FakeCall| {
+        let table = table.clone();
+        async move { destination_job(call, &table, 2).await }
+    })
+    .await;
+    let mut people_read: Vec<Person> = fake
+        .db
+        .fluent()
+        .query("SELECT big")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .obj::<Person>()
+        .query()
+        .await?;
+    people_read.sort();
+    assert_eq!(people_read, [person(1), person(2)]);
+    let batches: Vec<RecordBatch> = fake
+        .db
+        .fluent()
+        .query("SELECT big")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .record_batches()
+        .await?
+        .try_collect()
+        .await?;
+    assert_eq!(batches, [people(&[1, 2])]);
+    assert_eq!(
+        fake.calls(),
+        [
+            "InsertJob SELECT big into fake-project.shop.orders_export WRITE_EMPTY CREATE_IF_NEEDED",
+            "GetQueryResults job1 at US max_results=Some(0)",
+            "GetJob job1 at US",
+            "GetTable shop.orders_export",
+            "CreateReadSession [id,name]",
+            "ReadRows s0 at 0",
+            "InsertJob SELECT big into fake-project.shop.orders_export WRITE_EMPTY CREATE_IF_NEEDED",
+            "GetQueryResults job1 at US max_results=Some(0)",
+            "GetJob job1 at US",
+            "CreateReadSession []",
+            "ReadRows s0 at 0",
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn destination_write_and_job_settings_reach_the_job_configuration() -> BigQueryResult<()> {
+    let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1])]]));
+    let fake = FakeBigQuery::start(move |mut call: FakeCall| {
+        let table = table.clone();
+        async move {
+            if call.method() != "InsertJob" {
+                return destination_job(call, &table, 0).await;
+            }
+            let request = call.insert_job_request().await;
+            let job = request.job.unwrap_or_default();
+            let reference = job.job_reference.unwrap_or_default();
+            let configuration = job.configuration.unwrap_or_default();
+            let query = configuration.query.unwrap_or_default();
+            let mut labels: Vec<_> = configuration.labels.into_iter().collect();
+            labels.sort();
+            call.log(format!(
+                "project={} job_id_len={} location={:?} params={} mode={} dataset={:?} \
+                 labels={labels:?} max_bytes={:?} cache={:?} legacy={:?} job_timeout_ms={:?} \
+                 dry_run={:?}",
+                request.project_id,
+                reference.job_id.len(),
+                reference.location,
+                query.query_parameters.len(),
+                query.parameter_mode,
+                query
+                    .default_dataset
+                    .map(|dataset| format!("{}.{}", dataset.project_id, dataset.dataset_id)),
+                query.maximum_bytes_billed,
+                query.use_query_cache,
+                query.use_legacy_sql,
+                configuration.job_timeout_ms,
+                configuration.dry_run,
+            ));
+            call.reply(&running_job());
+        }
+    })
+    .await;
+    fake.db
+        .fluent()
+        .query("SELECT @a")
+        .param("a", 1)
+        .location(BigQueryLocation::from_static("EU"))
+        .default_dataset(SHOP)
+        .label("team", "data")
+        .maximum_bytes_billed(10)
+        .use_query_cache(false)
+        .job_timeout(Duration::from_secs(60))
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .execute()
+        .await?;
+    fake.db
+        .fluent()
+        .query("SELECT more")
+        .append_to_destination_table(SHOP.table(ORDERS_EXPORT))
+        .execute()
+        .await?;
+    fake.db
+        .fluent()
+        .query("SELECT fresh")
+        .dangerously_overwrite_destination_table(
+            BigQueryDatasetRef::new("other", SHOP)?.table(ORDERS_EXPORT),
+        )
+        .execute()
+        .await?;
+    let configurations: Vec<String> = fake
+        .calls()
+        .into_iter()
+        .filter(|line| line.starts_with("InsertJob ") || line.starts_with("project="))
+        .collect();
+    assert_eq!(
+        configurations,
+        [
+            "InsertJob SELECT @a into fake-project.shop.orders_export WRITE_EMPTY CREATE_IF_NEEDED",
+            "project=fake-project job_id_len=44 location=Some(\"EU\") params=1 mode=NAMED \
+             dataset=Some(\"fake-project.shop\") labels=[(\"team\", \"data\")] \
+             max_bytes=Some(10) cache=Some(false) legacy=Some(false) \
+             job_timeout_ms=Some(60000) dry_run=Some(false)",
+            "InsertJob SELECT more into fake-project.shop.orders_export WRITE_APPEND CREATE_IF_NEEDED",
+            "project=fake-project job_id_len=44 location=None params=0 mode= dataset=None \
+             labels=[] max_bytes=None cache=None legacy=Some(false) job_timeout_ms=None \
+             dry_run=Some(false)",
+            "InsertJob SELECT fresh into other.shop.orders_export WRITE_TRUNCATE CREATE_IF_NEEDED",
+            "project=fake-project job_id_len=44 location=None params=0 mode= dataset=None \
+             labels=[] max_bytes=None cache=None legacy=Some(false) job_timeout_ms=None \
+             dry_run=Some(false)",
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn retried_insert_job_keeps_its_job_id_and_takes_the_job_it_created() -> BigQueryResult<()> {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1])]]));
+    let fake = FakeBigQuery::start(move |mut call: FakeCall| {
+        let (attempts, table) = (attempts.clone(), table.clone());
+        async move {
+            if call.method() != "InsertJob" {
+                return destination_job(call, &table, 0).await;
+            }
+            let request = call.insert_job_request().await;
+            let job_id = request
+                .job
+                .and_then(|job| job.job_reference)
+                .map(|reference| reference.job_id)
+                .unwrap_or_default();
+            call.log(format!("job_id={job_id}"));
+            match attempts.fetch_add(1, Ordering::SeqCst) {
+                0 => call.fail(Code::Unavailable, "backend went away"),
+                _ => call.fail(
+                    Code::AlreadyExists,
+                    &format!("Already Exists: Job fake-project:US.{job_id}"),
+                ),
+            }
+        }
+    })
+    .await;
+    let outcome = fake
+        .db
+        .fluent()
+        .query("SELECT once")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .execute()
+        .await?;
+    let calls = fake.calls();
+    let job_ids: Vec<&String> = calls
+        .iter()
+        .filter(|line| line.starts_with("job_id="))
+        .collect();
+    assert_eq!(job_ids.len(), 2, "{calls:?}");
+    assert_eq!(job_ids[0], job_ids[1], "a retry repeats the job ID");
+    let sent_job_id = job_ids[0].trim_start_matches("job_id=");
+    assert_eq!(
+        outcome.job.map(|job| job.job_id),
+        Some(BigQueryJobId::new(sent_job_id)?),
+        "the job the first attempt created is the query's job"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn already_existing_job_on_a_first_attempt_is_a_conflict() {
+    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+        call.insert_job_request().await;
+        call.fail(
+            Code::AlreadyExists,
+            "Already Exists: Job fake-project:US.taken",
+        );
+    })
+    .await;
+    let result = fake
+        .db
+        .fluent()
+        .query("SELECT once")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .execute()
+        .await;
+    assert!(
+        matches!(result, Err(BigQueryError::DataConflictError(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        fake.calls(),
+        ["InsertJob SELECT once into fake-project.shop.orders_export WRITE_EMPTY CREATE_IF_NEEDED"],
+        "a first attempt is not retried"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_with_a_destination_is_a_dry_run_job() -> BigQueryResult<()> {
+    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+        let request = call.insert_job_request().await;
+        let dry_run = request
+            .job
+            .and_then(|job| job.configuration)
+            .and_then(|configuration| configuration.dry_run);
+        call.log(format!("dry_run={dry_run:?}"));
+        call.reply(&Job {
+            statistics: Some(JobStatistics {
+                total_bytes_processed: Some(1234),
+                query: Some(JobStatistics2 {
+                    total_bytes_processed: Some(1234),
+                    schema: Some(TableSchema {
+                        fields: vec![TableFieldSchema {
+                            name: "n".into(),
+                            r#type: "INTEGER".into(),
+                            mode: "NULLABLE".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    })
+    .await;
+    let result = fake
+        .db
+        .fluent()
+        .query("SELECT n FROM t")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .dry_run()
+        .await?;
+    assert_eq!(result.total_bytes_processed, Some(1234));
+    let fields: Vec<String> = result
+        .schema
+        .map(|schema| schema.fields.into_iter().map(|field| field.name).collect())
+        .unwrap_or_default();
+    assert_eq!(fields, ["n"]);
+    assert_eq!(
+        fake.calls(),
+        [
+            "InsertJob SELECT n FROM t into fake-project.shop.orders_export WRITE_EMPTY CREATE_IF_NEEDED",
+            "dry_run=Some(true)"
+        ]
     );
     Ok(())
 }

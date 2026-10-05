@@ -1,11 +1,12 @@
-//! Fake answers for the query RPCs: `Query`, `GetQueryResults`, `GetJob` and `CancelJob`.
+//! Fake answers for the query RPCs: `Query`, `InsertJob`, `GetQueryResults`, `GetJob` and
+//! `CancelJob`.
 
 use super::FakeCall;
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
 use gcloud_sdk::google::cloud::bigquery::v2::{
     query_response, ArrowRecordBatch, ArrowSchema, CancelJobRequest, GetJobRequest,
-    GetQueryResultsRequest, Job, JobReference, PostQueryRequest, QueryResponse,
+    GetQueryResultsRequest, InsertJobRequest, Job, JobReference, PostQueryRequest, QueryResponse,
 };
 
 /// The job every fake query runs as.
@@ -27,6 +28,32 @@ impl FakeCall {
             .map(|q| q.query.clone())
             .unwrap_or_default();
         self.log(format!("Query {sql}"));
+        request
+    }
+
+    /// Reads an `InsertJob` request and logs it as
+    /// `InsertJob <sql> into <project>.<dataset>.<table> WRITE_EMPTY CREATE_IF_NEEDED`.
+    pub(crate) async fn insert_job_request(&mut self) -> InsertJobRequest {
+        let request: InsertJobRequest = self.next_request().await.expect("an InsertJob request");
+        let query = request
+            .job
+            .as_ref()
+            .and_then(|job| job.configuration.as_ref())
+            .and_then(|configuration| configuration.query.clone())
+            .unwrap_or_default();
+        let destination = query
+            .destination_table
+            .map(|table| {
+                format!(
+                    "{}.{}.{}",
+                    table.project_id, table.dataset_id, table.table_id
+                )
+            })
+            .unwrap_or_default();
+        self.log(format!(
+            "InsertJob {} into {destination} {} {}",
+            query.query, query.write_disposition, query.create_disposition
+        ));
         request
     }
 

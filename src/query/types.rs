@@ -4,7 +4,7 @@ use crate::errors::BigQueryError;
 use crate::BigQueryResult;
 use crate::{
     BigQueryDatasetRef, BigQueryFieldType, BigQueryReadOptions, BigQueryStatementType,
-    BigQueryTableSchema,
+    BigQueryTableRef, BigQueryTableSchema,
 };
 use crate::{BigQueryJobId, BigQueryLabels, BigQueryLocation, BigQueryQueryId, BigQueryRequestId};
 use gcloud_sdk::google::cloud::bigquery::v2::QueryParameter;
@@ -54,6 +54,14 @@ pub struct BigQueryQueryParams {
     /// [`Optional`](BigQueryJobCreation::Optional).
     #[default = "BigQueryJobCreation::Optional"]
     pub job_creation: BigQueryJobCreation,
+    /// The table of your own that the job writes the result into. Unset, BigQuery writes it
+    /// into a temporary table of the job.
+    ///
+    /// With a destination the query always runs as a job, created with `InsertJob`, so
+    /// [`job_creation`](Self::job_creation), [`inline_rows_limit`](Self::inline_rows_limit) and
+    /// [`request_id`](Self::request_id) do not apply: the rows are read from the table through
+    /// the Storage Read API, and the job's own ID is what makes a retried `InsertJob` safe.
+    pub destination: Option<BigQueryQueryDestination>,
 }
 
 /// How long `Query` waits for the job by default, BigQuery's own default.
@@ -93,6 +101,43 @@ pub enum BigQueryJobCreation {
     /// Every query creates a job, so that the outcome always names one for the job calls to
     /// read or cancel.
     Required,
+}
+
+/// The table a query writes its result into, and what happens to the rows the table already
+/// holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BigQueryQueryDestination {
+    /// The table. BigQuery creates it when it does not exist, with the result's schema.
+    pub table: BigQueryTableRef,
+    /// What the job does when the table already holds rows.
+    pub write: BigQueryDestinationWrite,
+}
+
+/// What a query does when its destination table already holds rows. Each one applies only
+/// if the job succeeds, as one atomic update of the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum BigQueryDestinationWrite {
+    /// The job fails if the table holds any rows, so nothing is ever overwritten
+    /// (`WRITE_EMPTY`, BigQuery's default).
+    #[default]
+    IfEmpty,
+    /// The result is added to the rows the table holds (`WRITE_APPEND`).
+    Append,
+    /// The table's rows and schema are replaced by the result (`WRITE_TRUNCATE`), so every row
+    /// it held is lost.
+    Overwrite,
+}
+
+impl BigQueryDestinationWrite {
+    /// The `write_disposition` of the job configuration.
+    pub(crate) fn disposition(self) -> &'static str {
+        match self {
+            Self::IfEmpty => "WRITE_EMPTY",
+            Self::Append => "WRITE_APPEND",
+            Self::Overwrite => "WRITE_TRUNCATE",
+        }
+    }
 }
 
 /// The type of a query parameter, for a value whose type cannot be inferred.

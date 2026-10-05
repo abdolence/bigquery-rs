@@ -188,13 +188,11 @@ impl BigQueryDb {
     ) -> BigQueryResult<()> {
         let ids = self.ids(table);
         let request = v2::InsertTableRequest {
-            project_id: ids.project.clone(),
-            dataset_id: ids.dataset.clone(),
-            table: Some(target.insert_body(v2::TableReference {
-                project_id: ids.project,
-                dataset_id: ids.dataset,
-                table_id: ids.table,
-            })?),
+            table: Some(
+                target.insert_body(table.table_reference(&self.options().google_project_id))?,
+            ),
+            project_id: ids.project,
+            dataset_id: ids.dataset,
         };
         self.retry(span, "create a table", &request, |r| {
             let mut client = self.table_client();
