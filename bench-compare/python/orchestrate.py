@@ -55,6 +55,7 @@ SCENARIOS = [
     ("scan_rows", ["ours", "official", "python"]),
     ("scan_arrow", ["ours", "official", "python"]),
     ("write", ["ours", "official", "python"]),
+    ("write_arrow", ["ours", "official"]),
     ("decode", ["ours", "official"]),
 ]
 
@@ -422,7 +423,7 @@ def summarise(runs, logical_scan_bytes):
             if scenario.startswith("scan") or scenario == "decode":
                 entry["logical_mb_per_sec"] = logical_scan_bytes / med / 1e6
             sent = [r["outcome"].get("bytes") for r in rs if r["outcome"].get("bytes")]
-            if scenario == "write" and sent:
+            if scenario.startswith("write") and sent:
                 entry["mb_sent_per_run"] = statistics.median(sent) / 1e6
                 entry["sent_mb_per_sec"] = statistics.median(sent) / med / 1e6
             out[scenario][client] = entry

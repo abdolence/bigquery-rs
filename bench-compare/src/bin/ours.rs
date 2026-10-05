@@ -147,6 +147,7 @@ struct Ours {
     job_required: bool,
     spans: SpanFields,
     write_rows: Option<Vec<ScanRow>>,
+    write_batches: Option<Vec<RecordBatch>>,
     decode_batches: Option<Vec<RecordBatch>>,
 }
 
@@ -211,6 +212,7 @@ impl Ours {
             Scenario::ScanRows => self.scan_rows().await,
             Scenario::ScanArrow => self.scan_arrow().await,
             Scenario::Write => self.write().await,
+            Scenario::WriteArrow => self.write_arrow().await,
             Scenario::Decode => self.decode().await,
         }
     }
@@ -331,6 +333,43 @@ impl Ours {
         })
     }
 
+    /// Writes record batches built before the timed region, the same batches the official
+    /// contender writes in its `write_arrow` run, so the time is the encoding and the appends.
+    async fn write_arrow(&mut self) -> anyhow::Result<Outcome> {
+        if self.write_batches.is_none() {
+            self.write_batches = Some(write_batches()?);
+        }
+        let batches = self.write_batches.as_ref().expect("built above");
+        let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        let table = self.table("write_ours_arrow")?;
+        let (secs, summary) = timed(async || {
+            Ok(self
+                .db
+                .fluent()
+                .insert()
+                .into(table)
+                .record_batches(batches.iter().cloned())
+                .execute()
+                .await?)
+        })
+        .await?;
+        anyhow::ensure!(
+            summary.rows_written == rows as u64 && summary.rows_failed == 0,
+            "{summary:?}"
+        );
+        let mut extra = serde_json::Map::new();
+        extra.insert("requests".into(), summary.batches.into());
+        extra.insert("batch_rows".into(), WRITE_BATCH_ROWS.into());
+        Ok(Outcome {
+            secs,
+            rows: summary.rows_written,
+            bytes: Some(summary.bytes_sent),
+            path: Some("storage_write_default_stream_arrow".into()),
+            extra,
+            ..Default::default()
+        })
+    }
+
     async fn decode(&mut self) -> anyhow::Result<Outcome> {
         if self.decode_batches.is_none() {
             let table = self.table(SCAN_TABLE)?;
@@ -385,6 +424,8 @@ impl Ours {
             format!("CREATE TABLE {ds}.{SCAN_TABLE} AS {}", scan_select()),
             format!("CREATE TABLE {ds}.write_ours LIKE {ds}.{SCAN_TABLE}"),
             format!("CREATE TABLE {ds}.write_official LIKE {ds}.{SCAN_TABLE}"),
+            format!("CREATE TABLE {ds}.write_ours_arrow LIKE {ds}.{SCAN_TABLE}"),
+            format!("CREATE TABLE {ds}.write_official_arrow LIKE {ds}.{SCAN_TABLE}"),
         ] {
             let outcome = self
                 .query(sql)
@@ -409,7 +450,12 @@ impl Ours {
 
     async fn teardown(&self) -> anyhow::Result<serde_json::Value> {
         let mut tables = serde_json::Map::new();
-        for name in ["write_ours", "write_official"] {
+        for name in [
+            "write_ours",
+            "write_official",
+            "write_ours_arrow",
+            "write_official_arrow",
+        ] {
             if let Ok(table) = self
                 .db
                 .fluent()
@@ -510,6 +556,7 @@ async fn main() -> anyhow::Result<()> {
         args: args.clone(),
         spans,
         write_rows: None,
+        write_batches: None,
         decode_batches: None,
     };
     let print = |v: serde_json::Value| println!("{v}");

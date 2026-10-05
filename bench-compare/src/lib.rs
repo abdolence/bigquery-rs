@@ -6,8 +6,15 @@
 //! and tokens warm, so the orchestrator can interleave the clients run by run without paying
 //! a process start in every measurement.
 
+use arrow_array::builder::{
+    BooleanBuilder, Date32Builder, Decimal128Builder, Float64Builder, Int64Builder, ListBuilder,
+    StringBuilder, TimestampMicrosecondBuilder,
+};
+use arrow_array::{ArrayRef, RecordBatch, StructArray};
+use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Rows in the table scan and in every write run.
@@ -16,6 +23,9 @@ pub const SCAN_ROWS: i64 = 1_000_000;
 pub const LARGE_QUERY_ROWS: i64 = 200_000;
 /// The scan table every reader reads in full.
 pub const SCAN_TABLE: &str = "scan_1m";
+/// Rows per Arrow record batch in the Arrow writes, so one batch goes as one `AppendRows`
+/// request well under the official writer's 10 MB limit (about 5.5 MB measured).
+pub const WRITE_BATCH_ROWS: usize = 25_000;
 
 /// The scenarios, as named in the requests and the results.
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +41,7 @@ pub enum Scenario {
     ScanRows,
     ScanArrow,
     Write,
+    WriteArrow,
     Decode,
 }
 
@@ -147,6 +158,145 @@ impl PlainRow {
 /// The rows of one write run.
 pub fn write_rows() -> Vec<PlainRow> {
     (1..=SCAN_ROWS).map(PlainRow::generate).collect()
+}
+
+impl PlainRow {
+    /// The scan table's columns as BigQuery's Storage Write expects them in Arrow: NUMERIC as
+    /// `Decimal128(38, 9)`, DATE as `Date32` and TIMESTAMP as microseconds in UTC.
+    pub fn arrow_schema() -> Schema {
+        let st = Fields::from(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        let ts = DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
+        let dec = DataType::Decimal128(38, 9);
+        Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("i1", DataType::Int64, true),
+            Field::new("i2", DataType::Int64, true),
+            Field::new("i3", DataType::Int64, true),
+            Field::new("f1", DataType::Float64, true),
+            Field::new("f2", DataType::Float64, true),
+            Field::new("f3", DataType::Float64, true),
+            Field::new("s1", DataType::Utf8, true),
+            Field::new("s2", DataType::Utf8, true),
+            Field::new("s3", DataType::Utf8, true),
+            Field::new("b1", DataType::Boolean, true),
+            Field::new("b2", DataType::Boolean, true),
+            Field::new("n1", dec.clone(), true),
+            Field::new("n2", dec, true),
+            Field::new("d1", DataType::Date32, true),
+            Field::new("d2", DataType::Date32, true),
+            Field::new("t1", ts.clone(), true),
+            Field::new("t2", ts, true),
+            Field::new("st", DataType::Struct(st), true),
+            Field::new(
+                "arr",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
+            ),
+        ])
+    }
+
+    /// Builds one Arrow batch of `schema` (see [`PlainRow::arrow_schema`]) from plain rows, the step
+    /// a caller of an Arrow writer does themselves.
+    pub fn record_batch(schema: &Arc<Schema>, rows: &[PlainRow]) -> anyhow::Result<RecordBatch> {
+        let n = rows.len();
+        let ints = |f: fn(&PlainRow) -> i64| -> ArrayRef {
+            let mut b = Int64Builder::with_capacity(n);
+            rows.iter().for_each(|r| b.append_value(f(r)));
+            Arc::new(b.finish())
+        };
+        let floats = |f: fn(&PlainRow) -> Option<f64>| -> ArrayRef {
+            let mut b = Float64Builder::with_capacity(n);
+            rows.iter().for_each(|r| b.append_option(f(r)));
+            Arc::new(b.finish())
+        };
+        let strings = |f: fn(&PlainRow) -> Option<&str>| -> ArrayRef {
+            let mut b = StringBuilder::with_capacity(n, n * 16);
+            rows.iter().for_each(|r| b.append_option(f(r)));
+            Arc::new(b.finish())
+        };
+        let bools = |f: fn(&PlainRow) -> Option<bool>| -> ArrayRef {
+            let mut b = BooleanBuilder::with_capacity(n);
+            rows.iter().for_each(|r| b.append_option(f(r)));
+            Arc::new(b.finish())
+        };
+        let decimals = |f: fn(&PlainRow) -> rust_decimal::Decimal| -> anyhow::Result<ArrayRef> {
+            let mut b = Decimal128Builder::with_capacity(n);
+            rows.iter().for_each(|r| b.append_value(decimal9(f(r))));
+            Ok(Arc::new(b.finish().with_precision_and_scale(38, 9)?))
+        };
+        let dates = |f: fn(&PlainRow) -> jiff::civil::Date| -> ArrayRef {
+            let mut b = Date32Builder::with_capacity(n);
+            rows.iter().for_each(|r| b.append_value(days(f(r))));
+            Arc::new(b.finish())
+        };
+        let stamps = |f: fn(&PlainRow) -> jiff::Timestamp| -> ArrayRef {
+            let mut b = TimestampMicrosecondBuilder::with_capacity(n);
+            rows.iter()
+                .for_each(|r| b.append_value(f(r).as_microsecond()));
+            Arc::new(b.finish().with_timezone("UTC"))
+        };
+        let st_fields = match schema.field_with_name("st")?.data_type() {
+            DataType::Struct(fields) => fields.clone(),
+            _ => anyhow::bail!("st is a STRUCT"),
+        };
+        let st = StructArray::try_new(
+            st_fields,
+            vec![ints(|r| r.st_a), strings(|r| Some(r.st_b.as_str()))],
+            None,
+        )?;
+        let mut arr = ListBuilder::with_capacity(Int64Builder::with_capacity(n * 3), n)
+            .with_field(Arc::new(Field::new("item", DataType::Int64, true)));
+        for r in rows {
+            arr.values().append_slice(&r.arr);
+            arr.append(true);
+        }
+        let columns: Vec<ArrayRef> = vec![
+            ints(|r| r.id),
+            ints(|r| r.i1),
+            ints(|r| r.i2),
+            ints(|r| r.i3),
+            floats(|r| Some(r.f1)),
+            floats(|r| Some(r.f2)),
+            floats(|r| r.f3),
+            strings(|r| Some(r.s1.as_str())),
+            strings(|r| Some(r.s2.as_str())),
+            strings(|r| r.s3.as_deref()),
+            bools(|r| Some(r.b1)),
+            bools(|r| r.b2),
+            decimals(|r| r.n1)?,
+            decimals(|r| r.n2)?,
+            dates(|r| r.d1),
+            dates(|r| r.d2),
+            stamps(|r| r.t1),
+            stamps(|r| r.t2),
+            Arc::new(st),
+            Arc::new(arr.finish()),
+        ];
+        Ok(RecordBatch::try_new(schema.clone(), columns)?)
+    }
+}
+
+/// The NUMERIC value as the unscaled `i128` of a scale-9 decimal.
+fn decimal9(d: rust_decimal::Decimal) -> i128 {
+    let mut d = d;
+    d.rescale(9);
+    d.mantissa()
+}
+
+fn days(d: jiff::civil::Date) -> i32 {
+    (d - jiff::civil::date(1970, 1, 1)).get_days()
+}
+
+/// The rows of one Arrow write run, as batches of [`WRITE_BATCH_ROWS`] rows.
+pub fn write_batches() -> anyhow::Result<Vec<RecordBatch>> {
+    let schema = Arc::new(PlainRow::arrow_schema());
+    write_rows()
+        .chunks(WRITE_BATCH_ROWS)
+        .map(|chunk| PlainRow::record_batch(&schema, chunk))
+        .collect()
 }
 
 /// A request from the orchestrator.
