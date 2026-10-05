@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1666f472.js";
+            window.path_to_searchindex_js = "searchindex-9ad68c8f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-38498192.js"></script>
@@ -326,7 +326,7 @@ task ends. <code>insert()</code> and the CDC writer go through the same writer, 
 </thead>
 <tbody>
 <tr><td><code>/bigquery/table</code></td><td>the table being written</td><td>the writer, when the span opens</td></tr>
-<tr><td><code>/bigquery/write_mode</code></td><td><code>Default</code>, <code>Committed</code> or <code>Pending</code></td><td>the writer’s options, when the span opens</td></tr>
+<tr><td><code>/bigquery/write_mode</code></td><td><code>Default</code>, <code>Committed</code>, <code>Pending</code> or <code>Buffered</code></td><td>the writer’s options, when the span opens</td></tr>
 <tr><td><code>/bigquery/rows_appended</code></td><td>rows in the batches BigQuery acknowledged</td><td>counted by the writer, the same as <code>rows_written</code> in <code>BigQueryWriteSummary</code></td></tr>
 <tr><td><code>/bigquery/bytes_sent</code></td><td>the encoded size of every <code>AppendRows</code> request sent, resends included, before gRPC framing</td><td>counted by the writer, the same as <code>bytes_sent</code> in <code>BigQueryWriteSummary</code></td></tr>
 <tr><td><code>/bigquery/appends</code></td><td><code>AppendRows</code> requests sent, resends included</td><td>counted by the writer</td></tr>

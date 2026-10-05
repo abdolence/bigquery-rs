@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1666f472.js";
+            window.path_to_searchindex_js = "searchindex-9ad68c8f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-38498192.js"></script>
@@ -1525,8 +1525,9 @@ faster than the network slows down to its speed instead of buffering rows in mem
 fails only when the writer itself failed for good; a failed batch is reported on the response
 stream and in the summary.</li>
 <li><code>finish()</code> flushes, waits for every acknowledgement and closes the writer, then returns the
-<code>BigQueryWriteSummary</code>. On the default stream that is all; a committed stream is finalized, and
-a pending one is finalized and committed.</li>
+<code>BigQueryWriteSummary</code>. On the default stream that is all; a committed stream is finalized, a
+buffered one is flushed up to its last row and finalized, and a pending one is finalized and
+committed.</li>
 </ul>
 <h2 id="write-modes"><a class="header" href="#write-modes">Write modes</a></h2>
 <p>The mode decides which write stream the rows go through, and with it the delivery guarantee:</p>
@@ -1539,6 +1540,7 @@ a pending one is finalized and committed.</li>
 <tr><td>Default</td><td><code>.objects(..)</code></td><td><code>BigQueryWriteMode::Default</code></td><td>as soon as each batch is acknowledged</td><td>at least once: a batch resent after a reconnect can be stored twice</td></tr>
 <tr><td>Exactly once</td><td><code>.exactly_once()</code></td><td><code>BigQueryWriteMode::Committed</code></td><td>as soon as each batch is acknowledged</td><td>exactly once: every request has an offset, and BigQuery recognises a resent one</td></tr>
 <tr><td>Atomic</td><td><code>.atomic()</code></td><td><code>BigQueryWriteMode::Pending</code></td><td>all together, at the commit</td><td>all rows or none</td></tr>
+<tr><td>Buffered</td><td><code>.buffered()</code></td><td><code>BigQueryWriteMode::Buffered</code></td><td>up to the offset you flush</td><td>exactly once, as committed</td></tr>
 <tr><td>CDC</td><td><code>.changes(..)</code> or <code>.upsert()</code></td><td>default stream</td><td>after BigQuery applies the changes</td><td>upserts and deletes by primary key, see <a href="#change-data-capture">change data capture</a></td></tr>
 </tbody>
 </table>
@@ -1605,6 +1607,59 @@ let commit_time = db.commit_write_streams(streams).await?;
 println!("committed at {commit_time}");
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
+<h2 id="buffered-streams"><a class="header" href="#buffered-streams">Buffered streams</a></h2>
+<p>A buffered stream keeps the rows it acknowledged invisible until you flush them. A flush makes
+every row up to an offset readable, and a later flush moves that offset further. It suits a
+producer that has to decide when its rows count, for example only after it saved its own
+checkpoint:</p>
+<ul>
+<li><code>flush_rows()</code> sends the open batch, waits for every acknowledgement and flushes the stream up
+to its last row. It returns the flushed offset, or <code>None</code> while the stream has no rows;</li>
+<li><code>flush_rows_to(offset)</code> flushes up to and including <code>offset</code>, the stream offset of a row. The
+last row of an acknowledged batch is at <code>offset + row_count - 1</code> of its
+<code>BigQueryWriteResponse</code>. It does not wait for the batches in flight, and BigQuery checks the
+offset.</li>
+</ul>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::Serialize;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">#[derive(Serialize)]
+</span><span class="boring">struct Order {
+</span><span class="boring">    id: i64,
+</span><span class="boring">}
+</span><span class="boring">async fn save_checkpoint(offset: i64) {}
+</span><span class="boring">async fn example(db: BigQueryDb, orders: Vec&lt;Order&gt;) -&gt; BigQueryResult&lt;()&gt; {
+</span>let (mut writer, _responses) = db
+    .create_streaming_writer_with_options::&lt;Order&gt;(
+        SHOP.table(ORDERS),
+        BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
+    )
+    .await?;
+
+for chunk in orders.chunks(1_000) {
+    writer.write_all(chunk).await?;
+    // The rows of this chunk become readable here, not before
+    if let Some(offset) = writer.flush_rows().await? {
+        save_checkpoint(offset).await;
+    }
+}
+
+let summary = writer.finish().await?;
+println!("{} rows written", summary.rows_written);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p><code>finish()</code> flushes the rest before it finalizes the stream, so every row you wrote becomes
+readable. Finalizing alone does not flush, and only flushed rows are readable. If you need the
+unflushed rows to stay unread, drop the writer instead of finishing it; it logs a warning and the
+stream is never finalized.</p>
+<p>After the writer failed for good, <code>flush_rows_to(..)</code> still works, since it does not need the
+connection. Flush to the last acknowledged row to make every acknowledged row readable.</p>
+<p><code>.buffered()</code> on an insert writes through a buffered stream and flushes once at the end. Unlike
+<code>.atomic()</code>, a failed batch does not hold back the others.</p>
+<p>Google itself calls the buffered type an advanced one, for the Apache Beam connector mostly. If
+you only need a few rows to appear together, the exactly once mode with all of them in one batch
+does that too.</p>
 <h2 id="errors-1"><a class="header" href="#errors-1">Errors</a></h2>
 <ul>
 <li>A row that does not fit the table’s schema fails a streaming writer’s <code>write()</code> with
@@ -3051,7 +3106,7 @@ task ends. <code>insert()</code> and the CDC writer go through the same writer, 
 </thead>
 <tbody>
 <tr><td><code>/bigquery/table</code></td><td>the table being written</td><td>the writer, when the span opens</td></tr>
-<tr><td><code>/bigquery/write_mode</code></td><td><code>Default</code>, <code>Committed</code> or <code>Pending</code></td><td>the writer’s options, when the span opens</td></tr>
+<tr><td><code>/bigquery/write_mode</code></td><td><code>Default</code>, <code>Committed</code>, <code>Pending</code> or <code>Buffered</code></td><td>the writer’s options, when the span opens</td></tr>
 <tr><td><code>/bigquery/rows_appended</code></td><td>rows in the batches BigQuery acknowledged</td><td>counted by the writer, the same as <code>rows_written</code> in <code>BigQueryWriteSummary</code></td></tr>
 <tr><td><code>/bigquery/bytes_sent</code></td><td>the encoded size of every <code>AppendRows</code> request sent, resends included, before gRPC framing</td><td>counted by the writer, the same as <code>bytes_sent</code> in <code>BigQueryWriteSummary</code></td></tr>
 <tr><td><code>/bigquery/appends</code></td><td><code>AppendRows</code> requests sent, resends included</td><td>counted by the writer</td></tr>
