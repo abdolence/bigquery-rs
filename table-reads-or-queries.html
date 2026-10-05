@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-cb8c088a.js";
+            window.path_to_searchindex_js = "searchindex-32fb944c.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-3c2ed37c.js"></script>
@@ -273,6 +273,84 @@ call, while a table read opens a session first;</li>
 <li><strong>DML, DDL, or when you need job stats, labels on the job or a dry run</strong>: a query;</li>
 <li><strong>Arrow for your own processing</strong>: either, both have <code>record_batches()</code>.</li>
 </ul>
+<h2 id="many-rows-from-a-complex-query"><a class="header" href="#many-rows-from-a-complex-query">Many rows from a complex query</a></h2>
+<p>A query with joins or aggregates that returns a lot of rows needs no table of your own and no
+second step. BigQuery writes every query result to a temporary table, and the library reads a
+large one from there through the Storage Read API, in parallel streams, see
+<a href="./queries.html#where-the-rows-come-from">Where the rows come from</a>. Stream the rows instead of
+collecting them all:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use futures::StreamExt;
+</span><span class="boring">use serde::Deserialize;
+</span>#[derive(Debug, Deserialize)]
+struct OrderWithCity {
+    id: i64,
+    total: f64,
+    city: String,
+}
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let mut orders = db
+    .fluent()
+    .query(
+        "SELECT o.id, o.total, c.city FROM shop.orders o \
+         JOIN shop.customers c ON c.id = o.customer_id \
+         WHERE o.total &gt; @minimum",
+    )
+    .param("minimum", 100.0)
+    .obj::&lt;OrderWithCity&gt;()
+    .stream_query()
+    .await?;
+while let Some(order) = orders.next().await {
+    println!("{order:?}");
+}
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Reading that temporary table is free, so you pay only for the query. <code>.read_options(..)</code> sets
+the number of read streams and the compression, as for a table read.</p>
+<p>BigQuery limits how large a query result can be in its temporary table, see the maximum response
+size in <a href="https://cloud.google.com/bigquery/quotas#query_jobs">Quotas and limits</a>. For a result
+above it, write the result into a table of your own with <code>CREATE TABLE ... AS SELECT</code>, read it
+with a table read, and delete it. Give the table an expiration, so it does not stay behind if
+your process stops before the delete:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use futures::StreamExt;
+</span><span class="boring">use serde::Deserialize;
+</span><span class="boring">#[derive(Debug, Deserialize)]
+</span><span class="boring">struct OrderWithCity {
+</span><span class="boring">    id: i64,
+</span><span class="boring">    total: f64,
+</span><span class="boring">    city: String,
+</span><span class="boring">}
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>db.fluent()
+    .query(
+        "CREATE TABLE shop.orders_export \
+         OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)) AS \
+         SELECT o.id, o.total, c.city FROM shop.orders o \
+         JOIN shop.customers c ON c.id = o.customer_id",
+    )
+    .execute()
+    .await?;
+
+let mut orders = db
+    .fluent()
+    .select()
+    .from(SHOP.table(ORDERS_EXPORT))
+    .obj::&lt;OrderWithCity&gt;()
+    .stream_query()
+    .await?;
+while let Some(order) = orders.next().await {
+    println!("{order:?}");
+}
+
+db.fluent().schema().table(SHOP.table(ORDERS_EXPORT)).delete().await?;
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>That table is not temporary, so its storage is billed while it exists, and the table read is
+billed as Storage Read, see <a href="#billing-hints">Billing hints</a>.</p>
 <p>Be aware not to splice values into SQL text in either path. Use <code>.filter(..)</code> instead of
 <code>.filter_sql(..)</code>, and <code>.param(..)</code> instead of <code>format!</code> in the query text.</p>
 
