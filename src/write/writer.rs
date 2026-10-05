@@ -690,6 +690,13 @@ impl BigQueryStreamingWriter<RecordBatch> {
 
 /// The stream's side of the writer, which does not depend on how rows are encoded.
 impl<T> BigQueryStreamingWriter<T> {
+    fn from_core(core: WriterCore) -> Self {
+        Self {
+            core,
+            _row: PhantomData,
+        }
+    }
+
     /// Sends the open batch and waits until every batch written so far has an outcome.
     ///
     /// # Errors
@@ -804,13 +811,7 @@ impl BigQueryDb {
         BoxStream<'b, BigQueryResult<BigQueryWriteResponse>>,
     )> {
         let (core, responses) = WriterCore::open(self, table.into(), options, false).await?;
-        Ok((
-            BigQueryStreamingWriter {
-                core,
-                _row: PhantomData,
-            },
-            responses,
-        ))
+        Ok((BigQueryStreamingWriter::from_core(core), responses))
     }
 
     /// Opens a writer of Arrow record batches on `table` with default options: the default
@@ -844,13 +845,7 @@ impl BigQueryDb {
         BoxStream<'b, BigQueryResult<BigQueryWriteResponse>>,
     )> {
         let (core, responses) = WriterCore::open(self, table.into(), options, false).await?;
-        Ok((
-            BigQueryStreamingWriter {
-                core,
-                _row: PhantomData,
-            },
-            responses,
-        ))
+        Ok((BigQueryStreamingWriter::from_core(core), responses))
     }
 
     /// Commits finalized pending streams of one table together: all of their rows become

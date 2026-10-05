@@ -24,6 +24,15 @@ pub struct BigQueryCdcWriter<T> {
     _row: PhantomData<fn(&T)>,
 }
 
+impl<T> BigQueryCdcWriter<T> {
+    fn from_core(core: WriterCore) -> Self {
+        Self {
+            core,
+            _row: PhantomData,
+        }
+    }
+}
+
 impl<T: Serialize> BigQueryCdcWriter<T> {
     async fn change(
         &mut self,
@@ -100,12 +109,6 @@ impl BigQueryDb {
         BoxStream<'b, BigQueryResult<BigQueryWriteResponse>>,
     )> {
         let (core, responses) = WriterCore::open(self, table.into(), options, true).await?;
-        Ok((
-            BigQueryCdcWriter {
-                core,
-                _row: PhantomData,
-            },
-            responses,
-        ))
+        Ok((BigQueryCdcWriter::from_core(core), responses))
     }
 }
