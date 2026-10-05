@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-dbecf342.js";
+            window.path_to_searchindex_js = "searchindex-cb8c088a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-3c2ed37c.js"></script>
@@ -261,11 +261,6 @@ already 1.0;</li>
 <li>It uses the REST API for v2, which is GA. The v2 API over gRPC this crate uses works for every
 call the library makes, but Google does not document it and it is pre-GA, so be aware it can
 change without notice;</li>
-<li>It has a documented client for every v2 service, including models, routines, row access
-policies and projects, and every field of the query request (sessions, external tables,
-encryption, slot limits, etc.). This crate has its own API for datasets, tables, jobs and the
-common query settings, and for the rest only the raw gRPC clients from gcloud-sdk, such as
-<code>model_client()</code> and <code>routine_client()</code>;</li>
 <li>Its writer takes Arrow record batches and supports buffered streams. This crate writes your
 structures as protobuf, through the default, committed and pending streams;</li>
 <li>It has stub traits to mock its clients in your tests. This crate has no public mocks.</li>
