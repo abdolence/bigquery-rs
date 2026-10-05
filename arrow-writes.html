@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Observability - BigQuery for Rust</title>
+        <title>Arrow record batches - BigQuery for Rust</title>
 
 
         <!-- Custom HTML head -->
@@ -177,177 +177,87 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="observability"><a class="header" href="#observability">Observability</a></h1>
-<p>The library uses <a href="https://github.com/tokio-rs/tracing">tracing</a>. Every call opens one span at the
-<code>DEBUG</code> level, and the spans carry what a call used besides how long it took: bytes processed
-and billed, slot milliseconds, rows and bytes read or sent, etc.</p>
-<p>The spans are:</p>
+                        <h1 id="arrow-record-batches"><a class="header" href="#arrow-record-batches">Arrow record batches</a></h1>
+<p>The library writes Arrow record batches as they are, the way reads return them with
+<code>.record_batches()</code>. Every write mode works the same as for structures:</p>
 <ul>
-<li><code>BigQuery Query</code>: one query terminal call, <code>query()</code>, <code>execute()</code>, <code>dry_run()</code> etc.;</li>
-<li><code>BigQuery Read</code>: one table read through the Storage Read API, including the read of a large
-query result;</li>
-<li><code>BigQuery streaming write</code>: one writer, from <code>insert()</code>, <code>create_streaming_writer</code> or
-<code>create_cdc_writer</code>;</li>
-<li><code>BigQuery commit write streams</code>: one <code>commit_write_streams</code> call;</li>
-<li><code>BigQuery Cancel Job</code>, and the admin spans <code>BigQuery dataset</code>, <code>BigQuery datasets</code>,
-<code>BigQuery table</code>, <code>BigQuery tables</code>, <code>BigQuery job</code>, <code>BigQuery jobs</code> and <code>BigQuery schema</code>,
-which carry only the resource they work on.</li>
+<li><code>.record_batches(..)</code> on an insert, with <code>.exactly_once()</code>, <code>.atomic()</code>, <code>.buffered()</code> and
+<code>.options(..)</code>;</li>
+<li><code>db.create_record_batch_writer(..)</code> for a long-running producer, with <code>write_batch(..)</code> and the
+same <code>flush()</code>, <code>finish()</code>, <code>finalize()</code>, <code>flush_rows()</code> and <code>flush_rows_to(..)</code>.</li>
 </ul>
-<p>Retries are logged at <code>WARN</code> inside the span of the call that retried.</p>
-<h2 id="showing-the-spans"><a class="header" href="#showing-the-spans">Showing the spans</a></h2>
-<p>Any tracing subscriber works. With <code>tracing-subscriber</code>, an <code>EnvFilter</code> that enables <code>DEBUG</code> for
-the library and span close events, you see every span with its fields when it ends:</p>
-<pre><code class="language-rust no_run">use bigquery::*;
-use tracing_subscriber::fmt::format::FmtSpan;
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use bigquery::arrow_array::{Int64Array, RecordBatch, StringArray};
+</span><span class="boring">use bigquery::arrow_schema::{DataType, Field, Schema};
+</span><span class="boring">use std::sync::Arc;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+</span>let schema = Arc::new(Schema::new(vec![
+    Field::new("id", DataType::Int64, false),
+    Field::new("customer", DataType::Utf8, true),
+]));
+let batch = RecordBatch::try_new(
+    schema,
+    vec![
+        Arc::new(Int64Array::from(vec![1, 2])),
+        Arc::new(StringArray::from(vec!["customer-1", "customer-2"])),
+    ],
+)?;
 
-<span class="boring">async fn example() -&gt; BigQueryResult&lt;()&gt; {
-</span>tracing_subscriber::fmt()
-    .with_env_filter("info,bigquery=debug")
-    .with_span_events(FmtSpan::CLOSE)
-    .init();
-
-let db = BigQueryDb::new("my-gcp-project-id").await?;
-let outcome = db
-    .fluent()
-    .query("SELECT word FROM `bigquery-public-data.samples.shakespeare` LIMIT 10")
+// An insert, here exactly once
+db.fluent()
+    .insert()
+    .into(SHOP.table(ORDERS))
+    .record_batches([batch.clone()])
+    .exactly_once()
     .execute()
     .await?;
-<span class="boring">let _ = outcome;
-</span><span class="boring">Ok(())
+
+// A streaming writer, here buffered
+let (mut writer, _responses) = db
+    .create_record_batch_writer_with_options(
+        SHOP.table(ORDERS),
+        BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
+    )
+    .await?;
+writer.write_batch(&amp;batch).await?;
+writer.flush_rows().await?;
+let summary = writer.finish().await?;
+println!("{} rows written", summary.rows_written);
+<span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/job-stats-tracing.rs">here</a>.</p>
-<h2 id="opentelemetry"><a class="header" href="#opentelemetry">OpenTelemetry</a></h2>
-<p>With <a href="https://github.com/tokio-rs/tracing-opentelemetry">tracing-opentelemetry</a> every span field
-becomes a span attribute with the same name, such as <code>/bigquery/bytes_billed</code>, so you can see the
-cost of a request next to its latency in Cloud Trace, Jaeger, etc.</p>
-<p>The fields are declared empty when the span opens and recorded once their value is known, which
-<code>tracing-opentelemetry</code> exports the same way as fields given at the start. Add its layer to your
-subscriber as usual:</p>
-<pre><code class="language-rust ignore">use opentelemetry::trace::TracerProvider;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-
-let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-    .with_batch_exporter(exporter) // any exporter, e.g. opentelemetry-otlp
-    .build();
-
-tracing_subscriber::registry()
-    .with(tracing_subscriber::EnvFilter::new("info,bigquery=debug"))
-    .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("my-service")))
-    .init();</code></pre>
-<p>Be aware the library spans are <code>DEBUG</code>, so your filter has to enable that level for <code>bigquery</code>.</p>
-<h2 id="common-rules-for-the-fields"><a class="header" href="#common-rules-for-the-fields">Common rules for the fields</a></h2>
+<p>Each batch goes with its own schema, and the library does not check it against the table, since
+BigQuery does. A batch that does not fit the table fails as a batch, on the response stream and
+in the summary. Google lists how Arrow types map to BigQuery types in
+<a href="https://cloud.google.com/bigquery/docs/supported-data-types">supported data types</a>. For
+example, a TIMESTAMP column takes <code>Timestamp(Microsecond, "UTC")</code>, a DATETIME column the same
+without a time zone, and a NUMERIC column <code>Decimal128</code>.
+BigQuery refuses dictionary-encoded columns, so cast them to their value type first, with
+<code>arrow::compute::cast</code> for instance.</p>
+<p>The batching is a bit different from structures:</p>
 <ul>
-<li>A figure BigQuery did not report is left unrecorded, never recorded as <code>0</code>. The two estimates of
-a read session are the exception: BigQuery sends them as plain numbers, with no way to tell <code>0</code>
-from unset.</li>
-<li>The library makes no call only for the stats. Every figure comes from a response the call
-receives anyway, or is counted locally.</li>
-<li>No span field carries the SQL text, a parameter value or a row filter. The query span has the
-length of the SQL only.</li>
-<li>A row that <code>stream_query()</code> or a table read skips is logged with the kind of error, the row and
-the field path, without the message, which can contain the cell’s text. A retry is logged with
-BigQuery’s error message, as BigQuery wrote it.</li>
+<li>a record batch is sent as it is written, it never shares a request with another one, so
+<code>max_batch_delay</code> does not apply. Many tiny batches are as many requests;</li>
+<li>a batch larger than <code>max_request_bytes</code> is sent as slices of it, one request each. The library
+serializes every slice to measure it, so no request goes over the limit. A single row too large
+for a request alone fails with <code>SerializeError</code> of kind <code>RowTooLarge</code>;</li>
+<li><code>max_batch_rows</code> caps the rows of every slice;</li>
+<li>a batch with another schema than the one before it opens a new connection, since BigQuery reads
+an Arrow schema from the first request of a connection only.</li>
 </ul>
-<h2 id="query-span"><a class="header" href="#query-span">Query span</a></h2>
-<p><code>BigQuery Query</code> covers a query from the <code>Query</code> call until the library knows where the rows are.
-It does not cover streaming the rows: a result read through Storage Read has its own
-<code>BigQuery Read</code> span, a sibling of the query span under your current span.</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Field</th><th>What it means</th><th>Where it comes from</th></tr>
-</thead>
-<tbody>
-<tr><td><code>/bigquery/sql_len</code></td><td>the length of the SQL text in bytes</td><td>the SQL, when the span opens</td></tr>
-<tr><td><code>/bigquery/job_id</code></td><td>the job that ran the query; unset for a query BigQuery ran without a job</td><td>the job reference of the <code>Query</code> response</td></tr>
-<tr><td><code>/bigquery/query_id</code></td><td>the ID BigQuery gave the query, with or without a job</td><td>the <code>Query</code> response</td></tr>
-<tr><td><code>/bigquery/location</code></td><td>where the query ran</td><td>the job reference, otherwise the location of the <code>Query</code> response</td></tr>
-<tr><td><code>/bigquery/statement_type</code></td><td><code>SELECT</code>, <code>INSERT</code>, <code>UPDATE</code>, <code>CREATE_TABLE</code>, etc.</td><td>the <code>Query</code> response, otherwise the job’s query statistics</td></tr>
-<tr><td><code>/bigquery/bytes_processed</code></td><td>bytes the query processed</td><td>the <code>Query</code> response, <code>GetQueryResults</code>, then the job’s statistics</td></tr>
-<tr><td><code>/bigquery/bytes_billed</code></td><td>bytes billed, after BigQuery’s rounding and minimums</td><td>the <code>Query</code> response, then the job’s query statistics</td></tr>
-<tr><td><code>/bigquery/slot_ms</code></td><td>slot milliseconds the query used</td><td>the <code>Query</code> response, then the job’s statistics</td></tr>
-<tr><td><code>/bigquery/cache_hit</code></td><td>whether the query cache answered</td><td>the <code>Query</code> response, <code>GetQueryResults</code>, then the job’s query statistics</td></tr>
-<tr><td><code>/bigquery/dml_rows</code></td><td>rows a DML statement changed</td><td>the same three as <code>cache_hit</code></td></tr>
-<tr><td><code>/bigquery/total_rows</code></td><td>rows in the result</td><td>the <code>Query</code> response, then <code>GetQueryResults</code></td></tr>
-<tr><td><code>/bigquery/route</code></td><td>where the rows came from: <code>inline</code>, <code>storage_read</code> or <code>none</code></td><td>the library, for the terminals that read rows</td></tr>
-</tbody>
-</table>
-</div>
-<p>Each figure is taken from the first response that reports it, in the order of the table. Which of
-them a query can have depends on its route:</p>
-<ul>
-<li><strong>Inline</strong>, a result complete in the first response: only the <code>Query</code> response’s own figures,
-since there is no further call on this route. In the live tests BigQuery reported bytes
-processed, bytes billed, slot milliseconds and cache hit there;</li>
-<li><strong>Storage Read</strong>, a larger result: the <code>Query</code> response, and then the statistics of the job that
-the library reads anyway to find the destination table;</li>
-<li><strong>Polled</strong>, a job that was not complete in the first response: <code>GetQueryResults</code> and the job’s
-statistics. <code>GetQueryResults</code> has no bytes billed and no slot milliseconds, so those come from
-the job only;</li>
-<li><strong><code>execute()</code></strong>: the same as inline when the job completes in the first response. <code>route</code> is not
-recorded, since <code>execute()</code> reads no rows;</li>
-<li><strong><code>dry_run()</code></strong>: none of the figures. Its estimate is in <code>BigQueryDryRunResult</code> instead.</li>
-</ul>
-<p>The same figures are in <code>BigQueryJobStats</code> from <code>query_with_stats()</code>, <code>stream_query_with_stats()</code>
-and <code>execute()</code>, see <a href="./queries.html#job-stats">Job stats</a>.</p>
-<p><code>slot_ms</code> is not <code>0</code> even for a query that reads no table. On 1,000 generated rows BigQuery
-reported 0 bytes processed and billed, and 25 slot ms inline, 152 slot ms through Storage Read.</p>
-<h2 id="read-span"><a class="header" href="#read-span">Read span</a></h2>
-<p><code>BigQuery Read</code> covers one read session, from opening it until the stream of rows or batches is
-dropped.</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Field</th><th>What it means</th><th>Where it comes from</th></tr>
-</thead>
-<tbody>
-<tr><td><code>/bigquery/table</code></td><td>the table being read, <code>project.dataset.table</code> or <code>dataset.table</code></td><td>the read, when the span opens</td></tr>
-<tr><td><code>/bigquery/streams</code></td><td>the read streams BigQuery gave the session</td><td>the read session</td></tr>
-<tr><td><code>/bigquery/estimated_bytes_scanned</code></td><td>BigQuery’s estimate of the bytes the session scans</td><td>the read session, as BigQuery sends it</td></tr>
-<tr><td><code>/bigquery/estimated_rows</code></td><td>BigQuery’s estimate of the rows the session returns</td><td>the read session, as BigQuery sends it</td></tr>
-<tr><td><code>/bigquery/rows_read</code></td><td>rows received over every stream</td><td>the sum of the row counts of every <code>ReadRows</code> response</td></tr>
-<tr><td><code>/bigquery/bytes_read</code></td><td>uncompressed bytes received</td><td>the sum of the uncompressed sizes the <code>ReadRows</code> responses report, when any of them does</td></tr>
-<tr><td><code>/bigquery/throttle_percent</code></td><td>how much BigQuery throttled the read, 0 to 100</td><td>the highest throttle state any <code>ReadRows</code> response reported, when any of them does</td></tr>
-</tbody>
-</table>
-</div>
-<p>The three running totals are recorded when the stream is dropped, which also happens when it ends
-or fails. A read you drop early records what it got so far.</p>
-<p>The number of streams is what BigQuery gave, which can be fewer than the library asked for. In the
-benchmarks the library asked for 16 and got 4 for a 1M-row table.</p>
-<h2 id="write-span"><a class="header" href="#write-span">Write span</a></h2>
-<p><code>BigQuery streaming write</code> covers one writer, from opening its write stream until its background
-task ends. <code>insert()</code> and the CDC writer go through the same writer, so they have the same span.</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Field</th><th>What it means</th><th>Where it comes from</th></tr>
-</thead>
-<tbody>
-<tr><td><code>/bigquery/table</code></td><td>the table being written</td><td>the writer, when the span opens</td></tr>
-<tr><td><code>/bigquery/write_mode</code></td><td><code>Default</code>, <code>Committed</code>, <code>Pending</code> or <code>Buffered</code></td><td>the writer’s options, when the span opens</td></tr>
-<tr><td><code>/bigquery/rows_appended</code></td><td>rows in the batches BigQuery acknowledged</td><td>counted by the writer, the same as <code>rows_written</code> in <code>BigQueryWriteSummary</code></td></tr>
-<tr><td><code>/bigquery/bytes_sent</code></td><td>the encoded size of every <code>AppendRows</code> request sent, resends included, before gRPC framing</td><td>counted by the writer, the same as <code>bytes_sent</code> in <code>BigQueryWriteSummary</code></td></tr>
-<tr><td><code>/bigquery/appends</code></td><td><code>AppendRows</code> requests sent, resends included</td><td>counted by the writer</td></tr>
-<tr><td><code>/bigquery/retries</code></td><td>requests that sent a batch again</td><td>counted by the writer</td></tr>
-</tbody>
-</table>
-</div>
-<p>The four counts are recorded when the writer’s background task ends: after <code>finish()</code> or
-<code>finalize()</code>, when the writer is dropped, and when it fails for good.</p>
-<p><code>BigQuery commit write streams</code> has only <code>/bigquery/table</code>; the commit time is in the result of the
-commit.</p>
+<p>CDC writes take structures only, since the change columns have to go as protobuf.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batch-writes.rs">here</a>.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="types.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="buffered-streams.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="benchmarks.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="update-and-delete.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -357,11 +267,11 @@ commit.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="types.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="buffered-streams.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="benchmarks.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="update-and-delete.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

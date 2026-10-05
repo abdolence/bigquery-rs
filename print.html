@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-47662f20.js";
+            window.path_to_searchindex_js = "searchindex-5a971c71.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-afc68995.js"></script>
+        <script src="toc-403efbef.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1602,7 +1602,7 @@ committed.</li>
 <tr><td>Default</td><td><code>.objects(..)</code></td><td><code>BigQueryWriteMode::Default</code></td><td>as soon as each batch is acknowledged</td><td>at least once: a batch resent after a reconnect can be stored twice</td></tr>
 <tr><td>Exactly once</td><td><code>.exactly_once()</code></td><td><code>BigQueryWriteMode::Committed</code></td><td>as soon as each batch is acknowledged</td><td>exactly once: every request has an offset, and BigQuery recognises a resent one</td></tr>
 <tr><td>Atomic</td><td><code>.atomic()</code></td><td><code>BigQueryWriteMode::Pending</code></td><td>all together, at the commit</td><td>all rows or none</td></tr>
-<tr><td>Buffered</td><td><code>.buffered()</code></td><td><code>BigQueryWriteMode::Buffered</code></td><td>up to the offset you flush</td><td>exactly once, as committed</td></tr>
+<tr><td>Buffered</td><td><code>.buffered()</code></td><td><code>BigQueryWriteMode::Buffered</code></td><td>up to the offset you flush</td><td>exactly once, as committed, see <a href="#buffered-streams">buffered streams</a></td></tr>
 <tr><td>CDC</td><td><code>.changes(..)</code> or <code>.upsert()</code></td><td>default stream</td><td>after BigQuery applies the changes</td><td>upserts and deletes by primary key, see <a href="#change-data-capture">change data capture</a></td></tr>
 </tbody>
 </table>
@@ -1669,7 +1669,48 @@ let commit_time = db.commit_write_streams(streams).await?;
 println!("committed at {commit_time}");
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<h2 id="buffered-streams"><a class="header" href="#buffered-streams">Buffered streams</a></h2>
+<h2 id="errors-1"><a class="header" href="#errors-1">Errors</a></h2>
+<ul>
+<li>A row that does not fit the table’s schema fails a streaming writer’s <code>write()</code> with
+<code>SerializeError</code>, naming the row by its index in write order. Nothing of it is sent, and the
+writer goes on.</li>
+<li><code>insert().execute()</code> stops at the first row that does not serialize and returns
+<code>SerializeError</code>. On the default and committed streams the earlier rows may or may not be
+written: the requests already sent stay written, and the rows still in the open or queued
+batches are dropped. With the default batch size a short insert usually has all of its rows in
+one open batch, so nothing is written. A pending stream (<code>.atomic()</code>) commits nothing.</li>
+<li>A batch BigQuery rejects is <code>RowErrors</code> with every row BigQuery named, by its index in write
+order, so you can find and resend them. None of the batch’s rows are written, and the other
+batches are not affected.</li>
+<li>A retryable connection failure makes the writer reconnect and resend every batch not
+acknowledged yet, up to the client’s <code>max_retries</code>. In the default mode that is where a row can
+be stored twice.</li>
+<li>Once the writer failed for good, every <code>write()</code> returns that error.</li>
+</ul>
+<h2 id="schema-changes"><a class="header" href="#schema-changes">Schema changes</a></h2>
+<p>The writer follows the table’s schema while it runs. A column added to the table is picked up for
+the next batches, from BigQuery’s own notice or when a row has a field the writer did not know.</p>
+<p>Be aware not to drop a column while a writer still sends it. BigQuery keeps accepting the values
+for about 9 seconds and drops them silently, before it starts rejecting the rows. Stop every
+writer from sending the column first, then drop it.</p>
+<p>A field a row leaves out is stored as NULL by default. <code>missing_value</code> with
+<code>BigQueryMissingValue::DefaultValue</code> asks BigQuery to use the column’s default value expression
+instead. The library sends it as BigQuery’s <code>default_missing_value_interpretation</code> and has no live
+test for it yet.</p>
+<h2 id="caveats"><a class="header" href="#caveats">Caveats</a></h2>
+<ul>
+<li>A large <code>.atomic()</code> load stays invisible, and holds its rows in a pending stream, until it is
+committed. It suits a single load with a clear end. For an endless stream use the default or
+the exactly once mode.</li>
+<li>Rows from two writers on one table can interleave, nothing orders rows between writers.</li>
+<li>Only a CDC sequence number orders changes to the same key, see
+<a href="#change-data-capture">change data capture</a>.</li>
+<li>Every insert pays the round trip to open its write stream; share a streaming writer for many
+small writes.</li>
+</ul>
+<p>The <a href="#benchmarks">benchmarks</a> have a Storage Write run of 1M rows against the official crate.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="buffered-streams"><a class="header" href="#buffered-streams">Buffered streams</a></h1>
 <p>A buffered stream keeps the rows it acknowledged invisible until you flush them. A flush makes
 every row up to an offset readable, and a later flush moves that offset further. It suits a
 producer that has to decide when its rows count, for example only after it saved its own
@@ -1722,7 +1763,8 @@ connection. Flush to the last acknowledged row to make every acknowledged row re
 <p>Google itself calls the buffered type an advanced one, for the Apache Beam connector mostly. If
 you only need a few rows to appear together, the exactly once mode with all of them in one batch
 does that too.</p>
-<h2 id="arrow-record-batches"><a class="header" href="#arrow-record-batches">Arrow record batches</a></h2>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="arrow-record-batches"><a class="header" href="#arrow-record-batches">Arrow record batches</a></h1>
 <p>The library writes Arrow record batches as they are, the way reads return them with
 <code>.record_batches()</code>. Every write mode works the same as for structures:</p>
 <ul>
@@ -1793,46 +1835,6 @@ an Arrow schema from the first request of a connection only.</li>
 </ul>
 <p>CDC writes take structures only, since the change columns have to go as protobuf.</p>
 <p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batch-writes.rs">here</a>.</p>
-<h2 id="errors-1"><a class="header" href="#errors-1">Errors</a></h2>
-<ul>
-<li>A row that does not fit the table’s schema fails a streaming writer’s <code>write()</code> with
-<code>SerializeError</code>, naming the row by its index in write order. Nothing of it is sent, and the
-writer goes on.</li>
-<li><code>insert().execute()</code> stops at the first row that does not serialize and returns
-<code>SerializeError</code>. On the default and committed streams the earlier rows may or may not be
-written: the requests already sent stay written, and the rows still in the open or queued
-batches are dropped. With the default batch size a short insert usually has all of its rows in
-one open batch, so nothing is written. A pending stream (<code>.atomic()</code>) commits nothing.</li>
-<li>A batch BigQuery rejects is <code>RowErrors</code> with every row BigQuery named, by its index in write
-order, so you can find and resend them. None of the batch’s rows are written, and the other
-batches are not affected.</li>
-<li>A retryable connection failure makes the writer reconnect and resend every batch not
-acknowledged yet, up to the client’s <code>max_retries</code>. In the default mode that is where a row can
-be stored twice.</li>
-<li>Once the writer failed for good, every <code>write()</code> returns that error.</li>
-</ul>
-<h2 id="schema-changes"><a class="header" href="#schema-changes">Schema changes</a></h2>
-<p>The writer follows the table’s schema while it runs. A column added to the table is picked up for
-the next batches, from BigQuery’s own notice or when a row has a field the writer did not know.</p>
-<p>Be aware not to drop a column while a writer still sends it. BigQuery keeps accepting the values
-for about 9 seconds and drops them silently, before it starts rejecting the rows. Stop every
-writer from sending the column first, then drop it.</p>
-<p>A field a row leaves out is stored as NULL by default. <code>missing_value</code> with
-<code>BigQueryMissingValue::DefaultValue</code> asks BigQuery to use the column’s default value expression
-instead. The library sends it as BigQuery’s <code>default_missing_value_interpretation</code> and has no live
-test for it yet.</p>
-<h2 id="caveats"><a class="header" href="#caveats">Caveats</a></h2>
-<ul>
-<li>A large <code>.atomic()</code> load stays invisible, and holds its rows in a pending stream, until it is
-committed. It suits a single load with a clear end. For an endless stream use the default or
-the exactly once mode.</li>
-<li>Rows from two writers on one table can interleave, nothing orders rows between writers.</li>
-<li>Only a CDC sequence number orders changes to the same key, see
-<a href="#change-data-capture">change data capture</a>.</li>
-<li>Every insert pays the round trip to open its write stream; share a streaming writer for many
-small writes.</li>
-</ul>
-<p>The <a href="#benchmarks">benchmarks</a> have a Storage Write run of 1M rows against the official crate.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="updating-and-deleting"><a class="header" href="#updating-and-deleting">Updating and deleting</a></h1>
 <p>BigQuery tables are made for appending rows, but the library supports updates and deletes by
