@@ -460,7 +460,7 @@ println!("{}", response.into_inner().email);
 <p>Their types come from gcloud-sdk, which the library does not re-export, so they can change in a
 patch release.</p>
 <h2 id="running-the-examples"><a class="header" href="#running-the-examples">Running the examples</a></h2>
-<p>All examples available in the <a href="https://github.com/abdolence/bigquery-rs/tree/main/examples">examples</a> directory.
+<p>All examples available in the <a href="https://github.com/abdolence/bigquery-rs/tree/master/examples">examples</a> directory.
 Each one creates its own scratch dataset and deletes it at the end.</p>
 <p>To run an example:</p>
 <pre><code class="language-bash">PROJECT_ID=&lt;your-google-project-id&gt; cargo run --example query
@@ -682,7 +682,7 @@ typed the same way as the named ones:</p>
 </span><span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
 <p>Named and positional parameters cannot be mixed in one query.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/query.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/query.rs">here</a>.</p>
 <h3 id="errors"><a class="header" href="#errors">Errors</a></h3>
 <p>The builder methods never fail. A parameter that cannot be encoded is kept in the builder, and the
 terminal returns its error, <code>InvalidParametersError</code> or <code>SerializeError</code>, without sending
@@ -832,7 +832,7 @@ if let Some(schema) = estimate.schema {
 }
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/dml-and-dry-run.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/dml-and-dry-run.rs">here</a>.</p>
 <h2 id="job-stats"><a class="header" href="#job-stats">Job stats</a></h2>
 <p><code>query_with_stats()</code> returns the rows together with what the query used, as <code>BigQueryJobStats</code>:</p>
 <ul>
@@ -877,7 +877,7 @@ waits for its job to finish before the first row streams, so every job figure is
 then. What reading the rows cost is on the read’s span, see <a href="#observability">Observability</a>.</p>
 <p>Even a query that reads no table uses slots. On 1,000 generated rows BigQuery reported 0 bytes
 processed and billed, and 25 slot ms answered inline, 152 slot ms read through Storage Read.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/job-stats-tracing.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/job-stats-tracing.rs">here</a>.</p>
 <h2 id="cancellation"><a class="header" href="#cancellation">Cancellation</a></h2>
 <p>Dropping a query’s stream or future does not cancel its job, BigQuery runs it to the end. To limit
 how long a job can run, set <code>.job_timeout(..)</code>, and BigQuery cancels it itself.</p>
@@ -1057,7 +1057,7 @@ INT64, <code>BigQueryTimestamp</code> a TIMESTAMP, etc. A condition can name any
 <li>a value without a literal form fails the read before any request, with <code>SerializeError</code>;</li>
 <li>the whole restriction is at most 1 MB, a limit BigQuery checks.</li>
 </ul>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/select-table.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/select-table.rs">here</a>.</p>
 <h3 id="raw-sql-filters"><a class="header" href="#raw-sql-filters">Raw SQL filters</a></h3>
 <p><code>.filter_sql(..)</code> sends condition text as it is, for example <code>"year &gt; 2010 AND city != ''"</code>.</p>
 <p>Be aware not to build this text from user input. It is SQL, and a value spliced into it can
@@ -1144,7 +1144,7 @@ while let Some(batch) = batches.try_next().await? {
 </span><span class="boring">}</span></code></pre>
 <p><code>BigQueryBatchRows</code> is not <code>Send</code>, so decode a batch where you hold it and do not keep the iterator
 across an <code>.await</code>.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/record-batches.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batches.rs">here</a>.</p>
 <h2 id="parallel-streams-and-resume"><a class="header" href="#parallel-streams-and-resume">Parallel streams and resume</a></h2>
 <p>One read opens one read session, and BigQuery splits the table into several read streams. Each
 stream runs on its own task: <code>ReadRows</code>, the Arrow decode and, for typed reads, the row decode.
@@ -1339,7 +1339,7 @@ the requests already sent can land, and the rows still waiting in a batch are dr
 all rows or none, use <code>.atomic()</code> or check the rows before the insert.</p>
 <p>Every <code>execute()</code> opens a write stream first, which is a round trip of about 300 ms. That is fine
 for a load of many rows, but for many small writes keep one streaming writer instead.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/insert.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/insert.rs">here</a>.</p>
 <h2 id="streaming-writer"><a class="header" href="#streaming-writer">Streaming writer</a></h2>
 <pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
 </span><span class="boring">use futures::StreamExt;
@@ -1389,7 +1389,7 @@ way.</p>
 rows not acknowledged yet and leaves a pending stream uncommitted.</p>
 <p><code>db.create_streaming_writer_with_options(..)</code> takes <code>BigQueryStreamingWriteOptions</code>, the same
 options as <code>.options(..)</code> on an insert.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/streaming-writer.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/streaming-writer.rs">here</a>.</p>
 <h2 id="built-in-batching"><a class="header" href="#built-in-batching">Built-in batching</a></h2>
 <p>Rows are encoded as you write them and collected into a batch, one <code>AppendRows</code> request. A batch
 is sent when one of these comes first:</p>
@@ -1725,7 +1725,7 @@ println!("{} changes written", summary.rows_written);
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
 <p><code>writer.upsert(&amp;row)</code> and <code>writer.delete(&amp;row)</code> write a change without a sequence number.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/cdc-upsert.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/cdc-upsert.rs">here</a>.</p>
 <h2 id="why-protobuf"><a class="header" href="#why-protobuf">Why protobuf</a></h2>
 <p>BigQuery takes CDC changes only as protobuf rows on the default write stream, Apache Arrow rows
 are not supported for CDC. This is the main reason the library writes every row as protobuf: one
@@ -2063,7 +2063,7 @@ silently for a few seconds and then fails. <code>renamed_from(..)</code> is not 
 <code>.prune_undeclared()</code>, so the rename runs in whichever sync carries it. Be aware not to add
 <code>renamed_from(..)</code> to the declaration the first step runs: add it only to the one used after the
 rollout, once the writers have moved to the new name. Only top-level columns can be renamed.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/schema-sync.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/schema-sync.rs">here</a>.</p>
 <h2 id="widening-a-column"><a class="header" href="#widening-a-column">Widening a column</a></h2>
 <p>A declared type that is wider than the column’s is withheld with <code>AllowWidening</code> until
 <code>.allow_widening()</code> is set. Then <code>.sync()</code> widens it with <code>ALTER COLUMN SET DATA TYPE</code>, and the
@@ -2165,7 +2165,7 @@ old rows and the old schema. Readers have to start a new session.</li>
 </ul>
 <p>So stop writers and readers before a recreate. A dangerous recreate is logged at <code>warn</code> with the row
 count it read.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/recreate-table.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/recreate-table.rs">here</a>.</p>
 <h2 id="logs-and-spans"><a class="header" href="#logs-and-spans">Logs and spans</a></h2>
 <p>Every <code>.plan()</code> and <code>.sync()</code> runs in a <code>BigQuery schema</code> span with the table in the
 <code>/bigquery/table</code> field. A created table and every applied write are logged at <code>info</code>, and
@@ -2325,7 +2325,7 @@ stream’s last item instead. <code>page_size(..)</code> sets how many items one
 <p>The listings return summaries, <code>BigQueryDatasetSummary</code> and <code>BigQueryTableSummary</code>, with what
 BigQuery’s list calls return: the reference, the location or table type, the labels, etc. Read the
 full value with <code>get()</code>.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/datasets-admin.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/datasets-admin.rs">here</a>.</p>
 <h2 id="tables"><a class="header" href="#tables">Tables</a></h2>
 <p>Tables are created and changed through the declarative schemas, see
 <a href="#schema-management">Schema management</a>. The same builder has two plain calls, which act on the
@@ -2722,7 +2722,7 @@ struct is an <code>Option</code>, so use <code>Option&lt;Address&gt;</code> for 
 <code>shipping.inner.zip</code>, and a REQUIRED subfield the row never wrote with <code>MissingRequiredField</code>;</li>
 <li>a tuple works as a whole row only, a STRUCT column into a tuple is <code>TypeMismatch</code>.</li>
 </ul>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/nested-structs-and-json.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/nested-structs-and-json.rs">here</a>.</p>
 <h2 id="field-names-and-serde-attributes"><a class="header" href="#field-names-and-serde-attributes">Field names and serde attributes</a></h2>
 <p>Fields are matched to columns by name, so the order of the fields does not matter. The usual serde
 attributes work in both directions:</p>
@@ -2855,7 +2855,7 @@ let outcome = db
 <span class="boring">let _ = outcome;
 </span><span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/job-stats-tracing.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/job-stats-tracing.rs">here</a>.</p>
 <h2 id="opentelemetry"><a class="header" href="#opentelemetry">OpenTelemetry</a></h2>
 <p>With <a href="https://github.com/tokio-rs/tracing-opentelemetry">tracing-opentelemetry</a> every span field
 becomes a span attribute with the same name, such as <code>/bigquery/bytes_billed</code>, so you can see the
@@ -3220,7 +3220,7 @@ probably why typed and Arrow scans take almost the same time.</p>
 query run billed 0 bytes. Every other query read generated rows and billed 0 bytes. The scans
 went through the Storage Read free tier, and the writes ingested about 215 MB per 1M rows under the Storage Write free tier.</p>
 <h2 id="reproducing"><a class="header" href="#reproducing">Reproducing</a></h2>
-<p>The harness is in <a href="https://github.com/abdolence/bigquery-rs/tree/main/bench-compare">bench-compare</a>,
+<p>The harness is in <a href="https://github.com/abdolence/bigquery-rs/tree/master/bench-compare">bench-compare</a>,
 an unpublished crate with the Rust contenders and a <a href="https://docs.astral.sh/uv/">uv</a> project for
 Python. You need application default credentials and optionally the <code>bq</code> CLI:</p>
 <pre><code class="language-sh">bench-compare/run.sh --project my-project

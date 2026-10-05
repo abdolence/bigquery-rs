@@ -341,7 +341,7 @@ println!("{} changes written", summary.rows_written);
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
 <p><code>writer.upsert(&amp;row)</code> and <code>writer.delete(&amp;row)</code> write a change without a sequence number.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/cdc-upsert.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/cdc-upsert.rs">here</a>.</p>
 <h2 id="why-protobuf"><a class="header" href="#why-protobuf">Why protobuf</a></h2>
 <p>BigQuery takes CDC changes only as protobuf rows on the default write stream, Apache Arrow rows
 are not supported for CDC. This is the main reason the library writes every row as protobuf: one

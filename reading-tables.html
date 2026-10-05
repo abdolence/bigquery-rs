@@ -292,7 +292,7 @@ INT64, <code>BigQueryTimestamp</code> a TIMESTAMP, etc. A condition can name any
 <li>a value without a literal form fails the read before any request, with <code>SerializeError</code>;</li>
 <li>the whole restriction is at most 1 MB, a limit BigQuery checks.</li>
 </ul>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/select-table.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/select-table.rs">here</a>.</p>
 <h3 id="raw-sql-filters"><a class="header" href="#raw-sql-filters">Raw SQL filters</a></h3>
 <p><code>.filter_sql(..)</code> sends condition text as it is, for example <code>"year &gt; 2010 AND city != ''"</code>.</p>
 <p>Be aware not to build this text from user input. It is SQL, and a value spliced into it can
@@ -379,7 +379,7 @@ while let Some(batch) = batches.try_next().await? {
 </span><span class="boring">}</span></code></pre>
 <p><code>BigQueryBatchRows</code> is not <code>Send</code>, so decode a batch where you hold it and do not keep the iterator
 across an <code>.await</code>.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/record-batches.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batches.rs">here</a>.</p>
 <h2 id="parallel-streams-and-resume"><a class="header" href="#parallel-streams-and-resume">Parallel streams and resume</a></h2>
 <p>One read opens one read session, and BigQuery splits the table into several read streams. Each
 stream runs on its own task: <code>ReadRows</code>, the Arrow decode and, for typed reads, the row decode.

@@ -418,7 +418,7 @@ probably why typed and Arrow scans take almost the same time.</p>
 query run billed 0 bytes. Every other query read generated rows and billed 0 bytes. The scans
 went through the Storage Read free tier, and the writes ingested about 215 MB per 1M rows under the Storage Write free tier.</p>
 <h2 id="reproducing"><a class="header" href="#reproducing">Reproducing</a></h2>
-<p>The harness is in <a href="https://github.com/abdolence/bigquery-rs/tree/main/bench-compare">bench-compare</a>,
+<p>The harness is in <a href="https://github.com/abdolence/bigquery-rs/tree/master/bench-compare">bench-compare</a>,
 an unpublished crate with the Rust contenders and a <a href="https://docs.astral.sh/uv/">uv</a> project for
 Python. You need application default credentials and optionally the <code>bq</code> CLI:</p>
 <pre><code class="language-sh">bench-compare/run.sh --project my-project

@@ -393,7 +393,7 @@ typed the same way as the named ones:</p>
 </span><span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
 <p>Named and positional parameters cannot be mixed in one query.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/query.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/query.rs">here</a>.</p>
 <h3 id="errors"><a class="header" href="#errors">Errors</a></h3>
 <p>The builder methods never fail. A parameter that cannot be encoded is kept in the builder, and the
 terminal returns its error, <code>InvalidParametersError</code> or <code>SerializeError</code>, without sending
@@ -543,7 +543,7 @@ if let Some(schema) = estimate.schema {
 }
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/dml-and-dry-run.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/dml-and-dry-run.rs">here</a>.</p>
 <h2 id="job-stats"><a class="header" href="#job-stats">Job stats</a></h2>
 <p><code>query_with_stats()</code> returns the rows together with what the query used, as <code>BigQueryJobStats</code>:</p>
 <ul>
@@ -588,7 +588,7 @@ waits for its job to finish before the first row streams, so every job figure is
 then. What reading the rows cost is on the read’s span, see <a href="./observability.html">Observability</a>.</p>
 <p>Even a query that reads no table uses slots. On 1,000 generated rows BigQuery reported 0 bytes
 processed and billed, and 25 slot ms answered inline, 152 slot ms read through Storage Read.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/job-stats-tracing.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/job-stats-tracing.rs">here</a>.</p>
 <h2 id="cancellation"><a class="header" href="#cancellation">Cancellation</a></h2>
 <p>Dropping a query’s stream or future does not cancel its job, BigQuery runs it to the end. To limit
 how long a job can run, set <code>.job_timeout(..)</code>, and BigQuery cancels it itself.</p>

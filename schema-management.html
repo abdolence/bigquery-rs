@@ -481,7 +481,7 @@ silently for a few seconds and then fails. <code>renamed_from(..)</code> is not 
 <code>.prune_undeclared()</code>, so the rename runs in whichever sync carries it. Be aware not to add
 <code>renamed_from(..)</code> to the declaration the first step runs: add it only to the one used after the
 rollout, once the writers have moved to the new name. Only top-level columns can be renamed.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/schema-sync.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/schema-sync.rs">here</a>.</p>
 <h2 id="widening-a-column"><a class="header" href="#widening-a-column">Widening a column</a></h2>
 <p>A declared type that is wider than the column’s is withheld with <code>AllowWidening</code> until
 <code>.allow_widening()</code> is set. Then <code>.sync()</code> widens it with <code>ALTER COLUMN SET DATA TYPE</code>, and the
@@ -583,7 +583,7 @@ old rows and the old schema. Readers have to start a new session.</li>
 </ul>
 <p>So stop writers and readers before a recreate. A dangerous recreate is logged at <code>warn</code> with the row
 count it read.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/recreate-table.rs">here</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/recreate-table.rs">here</a>.</p>
 <h2 id="logs-and-spans"><a class="header" href="#logs-and-spans">Logs and spans</a></h2>
 <p>Every <code>.plan()</code> and <code>.sync()</code> runs in a <code>BigQuery schema</code> span with the table in the
 <code>/bigquery/table</code> field. A created table and every applied write are logged at <code>info</code>, and
