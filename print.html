@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-c34ccac0.js";
+            window.path_to_searchindex_js = "searchindex-2d6c67b0.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-afc68995.js"></script>
@@ -1435,7 +1435,8 @@ is billed as Storage Read, see <a href="#billing-hints">Billing hints</a>.</p>
 <h1 id="writing-data"><a class="header" href="#writing-data">Writing data</a></h1>
 <p>The library writes rows through the BigQuery Storage Write API. Rows are your structures,
 serialized with serde straight into protobuf against the table’s schema, so there is no JSON and
-no schema to declare on the client.</p>
+no schema to declare on the client. If your data is in Arrow already, the library writes raw
+record batches too, see <a href="#arrow-record-batches">Arrow record batches</a>.</p>
 <p>There are two ways to write:</p>
 <ul>
 <li><code>db.fluent().insert()</code> for rows you already have: it opens a writer, writes every row, finishes
@@ -1720,6 +1721,77 @@ connection. Flush to the last acknowledged row to make every acknowledged row re
 <p>Google itself calls the buffered type an advanced one, for the Apache Beam connector mostly. If
 you only need a few rows to appear together, the exactly once mode with all of them in one batch
 does that too.</p>
+<h2 id="arrow-record-batches"><a class="header" href="#arrow-record-batches">Arrow record batches</a></h2>
+<p>The library writes Arrow record batches as they are, the way reads return them with
+<code>.record_batches()</code>. Every write mode works the same as for structures:</p>
+<ul>
+<li><code>.record_batches(..)</code> on an insert, with <code>.exactly_once()</code>, <code>.atomic()</code>, <code>.buffered()</code> and
+<code>.options(..)</code>;</li>
+<li><code>db.create_record_batch_writer(..)</code> for a long-running producer, with <code>write_batch(..)</code> and the
+same <code>flush()</code>, <code>finish()</code>, <code>finalize()</code>, <code>flush_rows()</code> and <code>flush_rows_to(..)</code>.</li>
+</ul>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use bigquery::arrow_array::{Int64Array, RecordBatch, StringArray};
+</span><span class="boring">use bigquery::arrow_schema::{DataType, Field, Schema};
+</span><span class="boring">use std::sync::Arc;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+</span>let schema = Arc::new(Schema::new(vec![
+    Field::new("id", DataType::Int64, false),
+    Field::new("customer", DataType::Utf8, true),
+]));
+let batch = RecordBatch::try_new(
+    schema,
+    vec![
+        Arc::new(Int64Array::from(vec![1, 2])),
+        Arc::new(StringArray::from(vec!["customer-1", "customer-2"])),
+    ],
+)?;
+
+// An insert, here exactly once
+db.fluent()
+    .insert()
+    .into(SHOP.table(ORDERS))
+    .record_batches([batch.clone()])
+    .exactly_once()
+    .execute()
+    .await?;
+
+// A streaming writer, here buffered
+let (mut writer, _responses) = db
+    .create_record_batch_writer_with_options(
+        SHOP.table(ORDERS),
+        BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
+    )
+    .await?;
+writer.write_batch(&amp;batch).await?;
+writer.flush_rows().await?;
+let summary = writer.finish().await?;
+println!("{} rows written", summary.rows_written);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Each batch goes with its own schema, and the library does not check it against the table, since
+BigQuery does. A batch that does not fit the table fails as a batch, on the response stream and
+in the summary. Google lists how Arrow types map to BigQuery types in
+<a href="https://cloud.google.com/bigquery/docs/supported-data-types">supported data types</a>. For
+example, a TIMESTAMP column takes <code>Timestamp(Microsecond, "UTC")</code>, a DATETIME column the same
+without a time zone, and a NUMERIC column <code>Decimal128</code>.
+BigQuery refuses dictionary-encoded columns, so cast them to their value type first, with
+<code>arrow::compute::cast</code> for instance.</p>
+<p>The batching is a bit different from structures:</p>
+<ul>
+<li>a record batch is sent as it is written, it never shares a request with another one, so
+<code>max_batch_delay</code> does not apply. Many tiny batches are as many requests;</li>
+<li>a batch larger than <code>max_request_bytes</code> is sent as slices of it, one request each. The library
+serializes every slice to measure it, so no request goes over the limit. A single row too large
+for a request alone fails with <code>SerializeError</code> of kind <code>RowTooLarge</code>;</li>
+<li><code>max_batch_rows</code> caps the rows of every slice;</li>
+<li>a batch with another schema than the one before it opens a new connection, since BigQuery reads
+an Arrow schema from the first request of a connection only.</li>
+</ul>
+<p>CDC writes take structures only, since the change columns have to go as protobuf.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batch-writes.rs">here</a>.</p>
 <h2 id="errors-1"><a class="header" href="#errors-1">Errors</a></h2>
 <ul>
 <li>A row that does not fit the table’s schema fails a streaming writer’s <code>write()</code> with
