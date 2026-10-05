@@ -15,6 +15,29 @@ The default feature `tls-roots` uses the native TLS roots of your system. Use
 bigquery = { version = "0.5", default-features = false, features = ["tls-webpki-roots"] }
 ```
 
+## Crypto provider error
+
+Depends on your other dependencies you may see the error like:
+
+```text
+no process-level CryptoProvider available -- call CryptoProvider::install_default() before this point
+```
+
+The TLS crypto providers are not installed by default, so you can choose one. The easiest way to
+fix it is to include one, for example:
+
+```toml
+[dependencies]
+rustls = "0.23"
+```
+
+If you have several, you may need to call `CryptoProvider::install_default()` before creating the
+client:
+
+```rust,ignore
+rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+```
+
 ## Creating a client
 
 `BigQueryDb` is the client. It opens two authenticated gRPC channels, one to the BigQuery v2 API

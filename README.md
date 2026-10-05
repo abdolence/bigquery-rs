@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ```
 
 If you see `no process-level CryptoProvider available`, see
-[Crypto provider error](https://bigquery-rust.abdolence.dev/intro.html#crypto-provider-error).
+[Crypto provider error](https://bigquery-rust.abdolence.dev/getting-started.html#crypto-provider-error).
 
 ## Examples
 
