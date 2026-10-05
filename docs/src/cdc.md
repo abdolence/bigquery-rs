@@ -32,9 +32,10 @@ arrived, so an old change that arrives late or twice does not overwrite a newer 
 A sequence number is up to four sections of hexadecimal digits separated by `/`, each up to 16
 digits, from `0` to `FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF`.
 BigQuery compares the sections as numbers, from left to right. A PostgreSQL LSN such as
-`16/B374D848` is already in this form. If a key gets changes with sequence numbers, send one
-with every change to it: mixing changes with and without them on one key gives an unpredictable
-order.
+`16/B374D848` is already in this form. Between two changes with the same number, the one
+BigQuery ingested last wins. Sequence numbers are a choice for the whole table: once a table gets
+changes with sequence numbers, send one with every change to it, mixing changes with and without
+them gives an unpredictable order.
 
 BigQuery does not rewrite the table on every change. It keeps the recent changes beside the table
 and applies them in the background. The table's `max_staleness` option says how old the applied
@@ -135,7 +136,7 @@ db.fluent()
     .execute()
     .await?;
 
-// Or plain rows as upserts, with no sequence numbers
+// Or plain rows as upserts, for a table that does not use sequence numbers
 let customer = Customer {
     id: 3,
     name: "Grace".to_string(),

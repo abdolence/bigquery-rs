@@ -1,3 +1,4 @@
+use crate::fluent_api::row_changes::BigQueryRowChanges;
 use crate::{
     BigQueryChange, BigQueryChangeType, BigQueryInsertParams, BigQueryResult,
     BigQueryStreamingWriteOptions, BigQueryTableRef, BigQueryWriteMode, BigQueryWriteSummary,
@@ -136,6 +137,8 @@ where
     /// Writes the rows as CDC upserts by primary key. Only the default stream takes CDC, so
     /// together with [`exactly_once`](Self::exactly_once), [`atomic`](Self::atomic) or
     /// [`buffered`](Self::buffered) the insert fails.
+    /// [`BigQueryExprBuilder::update`](crate::BigQueryExprBuilder::update) does the same and can
+    /// add a sequence number.
     #[inline]
     pub fn upsert(mut self) -> Self {
         self.upsert = true;
@@ -167,12 +170,9 @@ where
         if !self.upsert {
             return self.db.insert_objects(self.params, self.rows).await;
         }
-        let changes = self.rows.into_iter().map(|row| BigQueryChange {
-            change_type: BigQueryChangeType::Upsert,
-            sequence_number: None,
-            row,
-        });
-        self.db.insert_changes(self.params, changes).await
+        BigQueryRowChanges::new(self.params, BigQueryChangeType::Upsert, self.rows)
+            .execute(self.db)
+            .await
     }
 }
 

@@ -9,8 +9,8 @@ use serde::Serialize;
 pub(crate) struct BigQueryRowChanges<I> {
     pub(crate) params: BigQueryInsertParams,
     pub(crate) change_type: BigQueryChangeType,
-    /// Given to every row; the builders set it only when there is a single row, since rows
-    /// with one key and one sequence number have no defined order.
+    /// Given to every row. Between rows with one key and one number, the one BigQuery
+    /// ingested last wins.
     pub(crate) sequence_number: Option<BigQueryChangeSequenceNumber>,
     pub(crate) rows: I,
 }

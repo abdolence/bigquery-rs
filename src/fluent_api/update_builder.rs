@@ -57,8 +57,8 @@ where
         self.objects(std::iter::once(row))
     }
 
-    /// Writes every row of `rows`, in order, each as [`object`](Self::object) does. Two rows
-    /// with one key apply in this order.
+    /// Writes every row of `rows`, in order, each as [`object`](Self::object) does. Without
+    /// sequence numbers, of two rows with one key the one BigQuery ingested last wins.
     #[inline]
     pub fn objects<I>(self, rows: I) -> BigQueryUpdateObjBuilder<'a, D, I>
     where
@@ -84,14 +84,19 @@ where
     changes: BigQueryRowChanges<I>,
 }
 
-impl<'a, 'o, D, T> BigQueryUpdateObjBuilder<'a, D, std::iter::Once<&'o T>>
+impl<'a, D, I> BigQueryUpdateObjBuilder<'a, D, I>
 where
     D: BigQueryWriteSupport,
+    I: IntoIterator + Send,
+    I::Item: Serialize + Send + Sync,
+    I::IntoIter: Send,
 {
-    /// Orders this update against other changes to the same key: the highest sequence number
-    /// wins, whenever it arrives. Once a key has changes with sequence numbers, every later
-    /// change to it needs one. For many rows, each with its own number, use
-    /// [`changes`](crate::BigQueryInsertTableBuilder::changes) on an insert.
+    /// Gives every row this sequence number, which orders the rows against other changes to
+    /// the same key: the highest number wins, whenever it arrives, and between equal numbers
+    /// the row BigQuery ingested last. One number for every row suits the changes of one
+    /// source transaction; for rows each with its own number, use
+    /// [`changes`](crate::BigQueryInsertTableBuilder::changes) on an insert. Once a table
+    /// takes changes with sequence numbers, every change to it needs one.
     #[inline]
     pub fn sequence_number(
         mut self,
@@ -100,15 +105,7 @@ where
         self.changes.sequence_number = Some(sequence_number.into());
         self
     }
-}
 
-impl<'a, D, I> BigQueryUpdateObjBuilder<'a, D, I>
-where
-    D: BigQueryWriteSupport,
-    I: IntoIterator + Send,
-    I::Item: Serialize + Send + Sync,
-    I::IntoIter: Send,
-{
     /// Replaces the writer options. The mode must stay
     /// [`Default`](crate::BigQueryWriteMode::Default).
     #[inline]

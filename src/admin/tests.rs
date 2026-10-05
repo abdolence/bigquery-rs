@@ -11,7 +11,7 @@ use crate::{
     BigQueryPartitioning, BigQueryStatementType, BigQueryTableId, BigQueryTableType,
 };
 use crate::{BigQueryJobId, BigQueryLabels, BigQueryLocation};
-use crate::{BigQueryResult, BigQueryTableSummary};
+use crate::{BigQueryResult, BigQueryTableSummary, BigQueryTableSupport};
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::v2;
 use gcloud_sdk::tonic::Code;
@@ -849,5 +849,45 @@ fn a_resource_without_its_reference_is_an_unexpected_response() {
     assert_unexpected(
         "listed job",
         BigQueryJob::try_from(v2::ListFormatJob::default()),
+    );
+}
+
+#[tokio::test]
+async fn primary_key_columns_are_read_in_key_order_and_empty_without_a_key() {
+    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
+        if call.method() != "GetTable" {
+            return unexpected(call).await;
+        }
+        let request = call.get_table_request().await;
+        let keyed = request.table_id == "order_lines";
+        call.reply(&v2::Table {
+            table_constraints: keyed.then(|| v2::TableConstraints {
+                primary_key: Some(v2::PrimaryKey {
+                    columns: vec!["order_id".into(), "line".into()],
+                }),
+                foreign_keys: Vec::new(),
+            }),
+            ..Default::default()
+        });
+    })
+    .await;
+    let order_lines = SHOP.table(BigQueryTableId::from_static("order_lines"));
+
+    let keyed = fake
+        .db
+        .primary_key_columns(&order_lines)
+        .await
+        .expect("the call succeeds");
+    let unkeyed = fake
+        .db
+        .primary_key_columns(&SHOP.table(ORDERS))
+        .await
+        .expect("the call succeeds");
+
+    assert_eq!(keyed, ["order_id", "line"]);
+    assert_eq!(unkeyed, Vec::<String>::new());
+    assert_eq!(
+        fake.calls(),
+        ["GetTable shop.order_lines", "GetTable shop.orders"]
     );
 }

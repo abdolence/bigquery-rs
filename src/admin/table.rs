@@ -9,7 +9,8 @@ use crate::{
     BigQueryDatasetRef, BigQueryDb, BigQueryPartitioning, BigQueryResult, BigQueryTableRef,
     BigQueryTableSchema,
 };
-use crate::{BigQueryLabels, BigQueryLocation};
+use crate::{BigQueryLabels, BigQueryLocation, BigQueryTableSupport};
+use async_trait::async_trait;
 use futures::stream::BoxStream;
 use gcloud_sdk::google::cloud::bigquery::v2;
 use std::fmt::{Display, Formatter};
@@ -192,6 +193,10 @@ impl BigQueryDb {
         &self,
         table: &BigQueryTableRef,
     ) -> BigQueryResult<BigQueryTable> {
+        self.get_table_body(table).await?.try_into()
+    }
+
+    async fn get_table_body(&self, table: &BigQueryTableRef) -> BigQueryResult<v2::Table> {
         let ids = table.ids(&self.options().google_project_id);
         let request = v2::GetTableRequest {
             project_id: ids.project,
@@ -203,8 +208,7 @@ impl BigQueryDb {
             let mut client = self.table_client();
             async move { client.get_table(r).await }
         })
-        .await?
-        .try_into()
+        .await
     }
 
     pub(crate) async fn delete_table(&self, table: &BigQueryTableRef) -> BigQueryResult<()> {
@@ -263,6 +267,19 @@ impl BigQueryTableRef {
     /// The span of one table admin call.
     fn admin_span(&self) -> Span {
         tracing::debug_span!("BigQuery table", "/bigquery/table" = %self)
+    }
+}
+
+#[async_trait]
+impl BigQueryTableSupport for BigQueryDb {
+    async fn primary_key_columns(&self, table: &BigQueryTableRef) -> BigQueryResult<Vec<String>> {
+        Ok(self
+            .get_table_body(table)
+            .await?
+            .table_constraints
+            .and_then(|constraints| constraints.primary_key)
+            .map(|key| key.columns)
+            .unwrap_or_default())
     }
 }
 

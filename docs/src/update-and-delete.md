@@ -77,7 +77,7 @@ db.fluent()
     .execute()
     .await?;
 
-// Many rows through one writer, applied in this order
+// Many rows through one writer
 db.fluent()
     .update()
     .in_table(SHOP.table(ORDERS))
@@ -93,9 +93,45 @@ An update replaces the whole row. There is no field mask, so a column you leave 
 that BigQuery does not support `UPDATE`, `DELETE` or `MERGE` statements on a table while CDC
 changes are streamed to it, so a DML query is not a way around this.
 
+Without sequence numbers, of two rows with one key the row BigQuery ingested last wins, see
+[ordering changes](#ordering-changes).
+
 ## Deletes
 
-A delete needs only the key columns, so a struct of just the key is enough:
+A delete needs only the primary key. `.key(..)` takes the key value itself: a plain value for a
+key of one column, a tuple in the key's column order for a key of several:
+
+```rust,no_run
+# use bigquery::*;
+# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+# const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+# const ORDER_LINES: BigQueryTableId = BigQueryTableId::from_static("order_lines");
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+db.fluent()
+    .delete()
+    .from(SHOP.table(ORDERS))
+    .key(42)
+    .execute()
+    .await?;
+
+// The primary key of order_lines is (order_id, line)
+db.fluent()
+    .delete()
+    .from(SHOP.table(ORDER_LINES))
+    .keys([(42, "line-1"), (42, "line-2")])
+    .execute()
+    .await?;
+# Ok(())
+# }
+```
+
+The library reads the key's columns from the table's metadata, one `GetTable` call per
+`execute()`, and writes rows with only those columns. A table without a primary key, or a key
+value with another number of values than the key has columns, fails with
+`InvalidParametersError` before anything is written.
+
+A row works as well, `.object(..)` and `.objects(..)` take a struct of just the key, or the whole
+row:
 
 ```rust,no_run
 # use bigquery::*;
@@ -125,14 +161,15 @@ db.fluent()
 # }
 ```
 
-The columns the key struct leaves out must be `NULLABLE`. A row without a `REQUIRED` column
-does not serialize, so for a table with other `REQUIRED` columns pass the whole row instead.
+The columns the key struct or `.key(..)` leaves out must be `NULLABLE`. A row without a
+`REQUIRED` column does not serialize, so for a table with other `REQUIRED` columns pass the whole
+row instead.
 
 ## Ordering changes
 
-Without sequence numbers BigQuery applies the changes to one key in the order it receives them.
-That is fine for one producer at a time. If a change can arrive late or twice, give it a
-sequence number, the highest one wins:
+Without sequence numbers, of the changes to one key the one BigQuery ingested last wins. That is
+fine for one producer at a time. If a change can arrive late or twice, give it a sequence
+number, the highest one wins:
 
 ```rust,no_run
 # use bigquery::*;
@@ -146,11 +183,7 @@ sequence number, the highest one wins:
 #     status: String,
 #     note: Option<String>,
 # }
-# #[derive(Serialize)]
-# struct OrderKey {
-#     id: i64,
-# }
-# async fn example(db: BigQueryDb, order: Order) -> BigQueryResult<()> {
+# async fn example(db: BigQueryDb, order: Order, orders: Vec<Order>) -> BigQueryResult<()> {
 db.fluent()
     .update()
     .in_table(SHOP.table(ORDERS))
@@ -159,22 +192,33 @@ db.fluent()
     .execute()
     .await?;
 
+// One number for the rows of one source transaction
+db.fluent()
+    .update()
+    .in_table(SHOP.table(ORDERS))
+    .objects(&orders)
+    .sequence_number(BigQueryChangeSequenceNumber::from(1042))
+    .execute()
+    .await?;
+
 db.fluent()
     .delete()
     .from(SHOP.table(ORDERS))
-    .object(&OrderKey { id: 42 })
-    .sequence_number(BigQueryChangeSequenceNumber::from(1042))
+    .key(42)
+    .sequence_number(BigQueryChangeSequenceNumber::from(1043))
     .execute()
     .await?;
 # Ok(())
 # }
 ```
 
-`.sequence_number(..)` is there only for a single `.object(..)`. Rows in one `.objects(..)` would
-all share it, and two changes to one key with the same number have no defined order. For many
-changes, each with its own number, use `.changes(..)` on an insert, see
-[change data capture](./cdc.md#writing-changes). Once a key has changes with sequence numbers,
-send one with every later change to it.
+`.sequence_number(..)` gives the same number to every row of the call. Between changes to one key
+with the same number, the one BigQuery ingested last wins. For changes each with its own number,
+use `.changes(..)` on an insert, see [change data capture](./cdc.md#writing-changes).
+
+Be aware that sequence numbers are a choice for the whole table: once a table takes changes with
+sequence numbers, send one with every change to it. Mixing changes with and without them gives
+an unpredictable order.
 
 ## When the changes show up
 

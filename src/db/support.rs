@@ -8,8 +8,10 @@
 
 mod query;
 mod read;
+mod table;
 mod write;
 
 pub use query::*;
 pub use read::*;
+pub use table::*;
 pub use write::*;

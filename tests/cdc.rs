@@ -97,6 +97,15 @@ struct Order {
     status: Option<String>,
 }
 
+impl Order {
+    fn new(id: i64, status: Option<&str>) -> Self {
+        Self {
+            id,
+            status: status.map(str::to_string),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct OrderKey {
     id: i64,
@@ -131,16 +140,16 @@ async fn fluent_update_replaces_whole_rows_and_delete_needs_only_the_key() -> Te
                 Some("id"),
             )
             .await?;
-            let placed = |id| Order {
-                id,
-                status: Some("placed".into()),
-            };
             scratch
                 .db
                 .fluent()
                 .update()
                 .in_table(table.clone())
-                .objects(&[placed(1), placed(2)])
+                .objects(&[
+                    Order::new(1, Some("placed")),
+                    Order::new(2, Some("placed")),
+                    Order::new(3, Some("placed")),
+                ])
                 .execute()
                 .await?;
             scratch
@@ -148,21 +157,27 @@ async fn fluent_update_replaces_whole_rows_and_delete_needs_only_the_key() -> Te
                 .fluent()
                 .update()
                 .in_table(table.clone())
-                .object(&Order {
-                    id: 1,
-                    status: None,
-                })
+                .object(&Order::new(1, None))
                 .execute()
                 .await?;
-            let summary = scratch
+            let by_object = scratch
+                .db
+                .fluent()
+                .delete()
+                .from(table.clone())
+                .object(&OrderKey { id: 2 })
+                .execute()
+                .await?;
+            let by_key = scratch
                 .db
                 .fluent()
                 .delete()
                 .from(table)
-                .object(&OrderKey { id: 2 })
+                .key(3)
                 .execute()
                 .await?;
-            assert_eq!((summary.rows_written, summary.rows_failed), (1, 0));
+            assert_eq!((by_object.rows_written, by_object.rows_failed), (1, 0));
+            assert_eq!((by_key.rows_written, by_key.rows_failed), (1, 0));
 
             let (rows, billed) = query_rows(
                 scratch,
@@ -173,7 +188,7 @@ async fn fluent_update_replaces_whole_rows_and_delete_needs_only_the_key() -> Te
             )
             .await?;
             assert_eq!(rows, [vec![Some("1".to_string()), None]]);
-            eprintln!("fluent update and delete: 4 changes written, {billed} bytes billed");
+            eprintln!("fluent update and delete: 6 changes written, {billed} bytes billed");
             Ok(())
         },
     )

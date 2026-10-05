@@ -32,12 +32,6 @@ impl Order {
     }
 }
 
-/// The primary key alone, which is all a delete needs.
-#[derive(Serialize)]
-struct OrderKey {
-    id: i64,
-}
-
 /// A dataset name unique to this run, so that concurrent runs never share one.
 fn scratch_dataset_id() -> Result<BigQueryDatasetId, Box<dyn std::error::Error + Send + Sync>> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
@@ -125,10 +119,12 @@ async fn update_and_delete(
         .execute()
         .await?;
 
+    // A delete needs only the primary key value; the library reads the key's columns from the
+    // table.
     db.fluent()
         .delete()
         .from(dataset.table(ORDERS))
-        .object(&OrderKey { id: 2 })
+        .key(2)
         .execute()
         .await?;
     print_orders(db, dataset, "After shipping #1 and deleting #2").await?;

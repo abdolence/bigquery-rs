@@ -1,5 +1,5 @@
 //! Keeps a table in step with a source of changes through BigQuery CDC: upserts and deletes by
-//! primary key, ordered by sequence numbers, through a CDC writer and through the fluent insert.
+//! primary key, ordered by sequence numbers, through a CDC writer and through the fluent API.
 //!
 //! Run with `PROJECT_ID=<your-project> cargo run --example cdc-upsert`.
 
@@ -98,23 +98,29 @@ async fn apply_changes(
             BigQueryStreamingWriteOptions::new(),
         )
         .await?;
-    // Rows for distinct keys need no ordering, so a plain upsert is enough for a first load.
-    for customer in [
-        Customer::new(1, "Ada", "bronze"),
-        Customer::new(2, "Grace", "bronze"),
-        Customer::new(3, "Linus", "bronze"),
-        Customer::new(4, "Barbara", "bronze"),
+    // Changes to one key need an order. Without sequence numbers the change BigQuery ingested
+    // last wins. With sequence numbers, such as a source database's log position, the highest
+    // one wins whatever order the changes arrive in, so a change delivered twice or late cannot
+    // overwrite a newer one. This table uses them, and a table that does needs one on every
+    // change, the first load included: mixing changes with and without them gives an
+    // unpredictable order.
+    for (sequence_number, customer) in [
+        (1, Customer::new(1, "Ada", "bronze")),
+        (2, Customer::new(2, "Grace", "bronze")),
+        (3, Customer::new(3, "Linus", "bronze")),
+        (4, Customer::new(4, "Barbara", "bronze")),
     ] {
-        writer.upsert(&customer).await?;
+        writer
+            .write_change(&BigQueryChange {
+                change_type: BigQueryChangeType::Upsert,
+                sequence_number: Some(BigQueryChangeSequenceNumber::from(sequence_number)),
+                row: customer,
+            })
+            .await?;
     }
     writer.flush().await?;
 
-    // Changes to one key need an order. Without sequence numbers it is the order BigQuery
-    // receives them in, and changes that travel in the same request have none. With sequence
-    // numbers, such as a source database's log position, the highest one wins whatever order
-    // the changes arrive in, so a change delivered twice or late cannot overwrite a newer one.
     // Barbara's newer change is sent first here and still wins; a delete needs only the key.
-    // Once a key has changes with sequence numbers, send one with every later change to it.
     for change in [
         BigQueryChange {
             change_type: BigQueryChangeType::Upsert,
@@ -149,17 +155,17 @@ async fn apply_changes(
         &current_customers(db, dataset).await?,
     );
 
-    // The fluent insert does the same in one call: `upsert()` for rows, `changes` for a mix.
-    // Ada's row was loaded without a sequence number, so a plain upsert replaces it.
+    // The fluent API does the same in one call: `update()` for rows that share one sequence
+    // number, `changes` on an insert for a mix with a number each.
     let upserted = [
         Customer::new(1, "Ada", "gold"),
         Customer::new(5, "Ken", "bronze"),
     ];
     db.fluent()
-        .insert()
-        .into(dataset.table(CUSTOMERS))
+        .update()
+        .in_table(dataset.table(CUSTOMERS))
         .objects(&upserted)
-        .upsert()
+        .sequence_number(105)
         .execute()
         .await?;
     db.fluent()
@@ -168,19 +174,19 @@ async fn apply_changes(
         .changes([
             BigQueryChange {
                 change_type: BigQueryChangeType::Delete,
-                sequence_number: Some(BigQueryChangeSequenceNumber::from(105)),
+                sequence_number: Some(BigQueryChangeSequenceNumber::from(106)),
                 row: Customer::new(2, "", ""),
             },
             BigQueryChange {
                 change_type: BigQueryChangeType::Upsert,
-                sequence_number: Some(BigQueryChangeSequenceNumber::from(106)),
+                sequence_number: Some(BigQueryChangeSequenceNumber::from(107)),
                 row: Customer::new(6, "Margaret", "silver"),
             },
         ])
         .execute()
         .await?;
     print_customers(
-        "After the fluent upserts and changes",
+        "After the fluent update and changes",
         &current_customers(db, dataset).await?,
     );
     Ok(())

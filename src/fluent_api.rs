@@ -8,6 +8,7 @@ use crate::{BigQueryQuerySupport, BigQueryReadSupport, BigQueryWriteSupport};
 mod dataset_builder;
 mod delete_builder;
 mod insert_builder;
+mod key_row;
 mod query_builder;
 mod row_changes;
 mod schema_builder;
