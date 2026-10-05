@@ -3,7 +3,7 @@
 The library writes rows through the BigQuery Storage Write API. Rows are your structures,
 serialized with serde straight into protobuf against the table's schema, so there is no JSON and
 no schema to declare on the client. If your data is in Arrow already, the library writes raw
-record batches too, see [Arrow record batches](#arrow-record-batches).
+record batches too, see [Arrow record batches](./arrow-writes.md).
 
 There are two ways to write:
 
@@ -191,7 +191,7 @@ The mode decides which write stream the rows go through, and with it the deliver
 | Default | `.objects(..)` | `BigQueryWriteMode::Default` | as soon as each batch is acknowledged | at least once: a batch resent after a reconnect can be stored twice |
 | Exactly once | `.exactly_once()` | `BigQueryWriteMode::Committed` | as soon as each batch is acknowledged | exactly once: every request has an offset, and BigQuery recognises a resent one |
 | Atomic | `.atomic()` | `BigQueryWriteMode::Pending` | all together, at the commit | all rows or none |
-| Buffered | `.buffered()` | `BigQueryWriteMode::Buffered` | up to the offset you flush | exactly once, as committed |
+| Buffered | `.buffered()` | `BigQueryWriteMode::Buffered` | up to the offset you flush | exactly once, as committed, see [buffered streams](./buffered-streams.md) |
 | CDC | `.changes(..)` or `.upsert()` | default stream | after BigQuery applies the changes | upserts and deletes by primary key, see [change data capture](./cdc.md) |
 
 ```rust,no_run
@@ -264,145 +264,6 @@ println!("committed at {commit_time}");
 # Ok(())
 # }
 ```
-
-## Buffered streams
-
-A buffered stream keeps the rows it acknowledged invisible until you flush them. A flush makes
-every row up to an offset readable, and a later flush moves that offset further. It suits a
-producer that has to decide when its rows count, for example only after it saved its own
-checkpoint:
-
-- `flush_rows()` sends the open batch, waits for every acknowledgement and flushes the stream up
-  to its last row. It returns the flushed offset, or `None` while the stream has no rows;
-- `flush_rows_to(offset)` flushes up to and including `offset`, the stream offset of a row. The
-  last row of an acknowledged batch is at `offset + row_count - 1` of its
-  `BigQueryWriteResponse`. It does not wait for the batches in flight, and BigQuery checks the
-  offset.
-
-```rust,no_run
-# use bigquery::*;
-# use serde::Serialize;
-# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-# const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
-# #[derive(Serialize)]
-# struct Order {
-#     id: i64,
-# }
-# async fn save_checkpoint(offset: i64) {}
-# async fn example(db: BigQueryDb, orders: Vec<Order>) -> BigQueryResult<()> {
-let (mut writer, _responses) = db
-    .create_streaming_writer_with_options::<Order>(
-        SHOP.table(ORDERS),
-        BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
-    )
-    .await?;
-
-for chunk in orders.chunks(1_000) {
-    writer.write_all(chunk).await?;
-    // The rows of this chunk become readable here, not before
-    if let Some(offset) = writer.flush_rows().await? {
-        save_checkpoint(offset).await;
-    }
-}
-
-let summary = writer.finish().await?;
-println!("{} rows written", summary.rows_written);
-# Ok(())
-# }
-```
-
-`finish()` flushes the rest before it finalizes the stream, so every row you wrote becomes
-readable. Finalizing alone does not flush, and only flushed rows are readable. If you need the
-unflushed rows to stay unread, drop the writer instead of finishing it; it logs a warning and the
-stream is never finalized.
-
-After the writer failed for good, `flush_rows_to(..)` still works, since it does not need the
-connection. Flush to the last acknowledged row to make every acknowledged row readable.
-
-`.buffered()` on an insert writes through a buffered stream and flushes once at the end. Unlike
-`.atomic()`, a failed batch does not hold back the others.
-
-Google itself calls the buffered type an advanced one, for the Apache Beam connector mostly. If
-you only need a few rows to appear together, the exactly once mode with all of them in one batch
-does that too.
-
-## Arrow record batches
-
-The library writes Arrow record batches as they are, the way reads return them with
-`.record_batches()`. Every write mode works the same as for structures:
-
-- `.record_batches(..)` on an insert, with `.exactly_once()`, `.atomic()`, `.buffered()` and
-  `.options(..)`;
-- `db.create_record_batch_writer(..)` for a long-running producer, with `write_batch(..)` and the
-  same `flush()`, `finish()`, `finalize()`, `flush_rows()` and `flush_rows_to(..)`.
-
-```rust,no_run
-# use bigquery::*;
-# use bigquery::arrow_array::{Int64Array, RecordBatch, StringArray};
-# use bigquery::arrow_schema::{DataType, Field, Schema};
-# use std::sync::Arc;
-# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-# const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
-# async fn example(db: BigQueryDb) -> Result<(), Box<dyn std::error::Error>> {
-let schema = Arc::new(Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("customer", DataType::Utf8, true),
-]));
-let batch = RecordBatch::try_new(
-    schema,
-    vec![
-        Arc::new(Int64Array::from(vec![1, 2])),
-        Arc::new(StringArray::from(vec!["customer-1", "customer-2"])),
-    ],
-)?;
-
-// An insert, here exactly once
-db.fluent()
-    .insert()
-    .into(SHOP.table(ORDERS))
-    .record_batches([batch.clone()])
-    .exactly_once()
-    .execute()
-    .await?;
-
-// A streaming writer, here buffered
-let (mut writer, _responses) = db
-    .create_record_batch_writer_with_options(
-        SHOP.table(ORDERS),
-        BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
-    )
-    .await?;
-writer.write_batch(&batch).await?;
-writer.flush_rows().await?;
-let summary = writer.finish().await?;
-println!("{} rows written", summary.rows_written);
-# Ok(())
-# }
-```
-
-Each batch goes with its own schema, and the library does not check it against the table, since
-BigQuery does. A batch that does not fit the table fails as a batch, on the response stream and
-in the summary. Google lists how Arrow types map to BigQuery types in
-[supported data types](https://cloud.google.com/bigquery/docs/supported-data-types). For
-example, a TIMESTAMP column takes `Timestamp(Microsecond, "UTC")`, a DATETIME column the same
-without a time zone, and a NUMERIC column `Decimal128`.
-BigQuery refuses dictionary-encoded columns, so cast them to their value type first, with
-`arrow::compute::cast` for instance.
-
-The batching is a bit different from structures:
-
-- a record batch is sent as it is written, it never shares a request with another one, so
-  `max_batch_delay` does not apply. Many tiny batches are as many requests;
-- a batch larger than `max_request_bytes` is sent as slices of it, one request each. The library
-  serializes every slice to measure it, so no request goes over the limit. A single row too large
-  for a request alone fails with `SerializeError` of kind `RowTooLarge`;
-- `max_batch_rows` caps the rows of every slice;
-- a batch with another schema than the one before it opens a new connection, since BigQuery reads
-  an Arrow schema from the first request of a connection only.
-
-CDC writes take structures only, since the change columns have to go as protobuf.
-
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batch-writes.rs).
 
 ## Errors
 

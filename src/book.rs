@@ -20,6 +20,12 @@ mod table_reads_or_queries {}
 #[doc = include_str!("../docs/src/writing-data.md")]
 mod writing_data {}
 
+#[doc = include_str!("../docs/src/buffered-streams.md")]
+mod buffered_streams {}
+
+#[doc = include_str!("../docs/src/arrow-writes.md")]
+mod arrow_writes {}
+
 #[doc = include_str!("../docs/src/update-and-delete.md")]
 mod update_and_delete {}
 

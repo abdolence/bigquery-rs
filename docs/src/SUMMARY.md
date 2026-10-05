@@ -13,6 +13,8 @@
 # Write
 
 - [Writing data](./writing-data.md)
+  - [Buffered streams](./buffered-streams.md)
+  - [Arrow record batches](./arrow-writes.md)
 
 # Update and delete
 
