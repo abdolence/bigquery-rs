@@ -386,6 +386,8 @@ in the summary. Google lists how Arrow types map to BigQuery types in
 [supported data types](https://cloud.google.com/bigquery/docs/supported-data-types). For
 example, a TIMESTAMP column takes `Timestamp(Microsecond, "UTC")`, a DATETIME column the same
 without a time zone, and a NUMERIC column `Decimal128`.
+BigQuery refuses dictionary-encoded columns, so cast them to their value type first, with
+`arrow::compute::cast` for instance.
 
 The batching is a bit different from structures:
 
