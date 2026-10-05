@@ -126,9 +126,11 @@ db.fluent()
 ```
 
 The library reads the key's columns from the table's metadata, one `GetTable` call per
-`execute()`, and writes rows with only those columns. A table without a primary key, or a key
-value with another number of values than the key has columns, fails with
-`InvalidParametersError` before anything is written.
+`execute()`, and writes rows with only those columns. A table without a primary key, or a tuple
+with another number of values than the key has columns, fails with `InvalidParametersError`
+before anything is written. A value for a key of one column is written as it is, so a `Vec<u8>`
+works for a `BYTES` key, and a value of the wrong type fails at the write with
+`SerializeError`.
 
 A row works as well, `.object(..)` and `.objects(..)` take a struct of just the key, or the whole
 row:

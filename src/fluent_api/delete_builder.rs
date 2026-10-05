@@ -79,7 +79,9 @@ where
     /// Deletes the row with the primary key `key`: a plain value such as `42` for a key of one
     /// column, or a tuple such as `(42, "line-1")` with one value per key column, in the
     /// key's column order. The key's columns come from the table's metadata, read once at
-    /// [`execute`](BigQueryDeleteKeysBuilder::execute).
+    /// [`execute`](BigQueryDeleteKeysBuilder::execute). The delete row holds only the key
+    /// columns, so every other column must be `NULLABLE`: a row without a `REQUIRED` column
+    /// does not serialize.
     #[inline]
     pub fn key<K: Serialize + Send + Sync>(
         self,
@@ -88,7 +90,8 @@ where
         self.keys(std::iter::once(key))
     }
 
-    /// Deletes the row of every primary key in `keys`, each as [`key`](Self::key) does.
+    /// Deletes the row of every primary key in `keys`, each as [`key`](Self::key) does, with
+    /// the same need for every column outside the key to be `NULLABLE`.
     #[inline]
     pub fn keys<I>(self, keys: I) -> BigQueryDeleteKeysBuilder<'a, D, I>
     where
@@ -197,7 +200,10 @@ where
     /// [`BigQueryError::InvalidParametersError`] before any write, for the field `table` when
     /// the table has no primary key, and for the field `key` when a key does not have one
     /// value per key column. Otherwise the failure to read the table, or as
-    /// [`BigQueryDeleteObjBuilder::execute`].
+    /// [`BigQueryDeleteObjBuilder::execute`]: a key that does not serialize, such as one for a
+    /// table with a `REQUIRED` column outside the key or a value of the wrong type for a key of
+    /// one column, fails at the write with
+    /// [`BigQueryError::SerializeError`].
     pub async fn execute(self) -> BigQueryResult<BigQueryWriteSummary> {
         let BigQueryRowChanges {
             params,

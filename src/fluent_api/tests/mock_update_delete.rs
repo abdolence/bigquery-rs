@@ -237,10 +237,10 @@ async fn delete_by_key_refuses_a_table_without_key_and_a_key_of_another_arity_be
         .key(1)
         .execute()
         .await;
-    let tuple_for_single_column_key = BigQueryExprBuilder::new(&db)
+    let longer_tuple_for_composite_key = BigQueryExprBuilder::new(&db)
         .delete()
-        .from(SHOP.table(ORDERS))
-        .key((1, "line-1"))
+        .from(SHOP.table(ORDER_LINES))
+        .key((7, "line-1", 3))
         .execute()
         .await;
     let value_for_composite_key = BigQueryExprBuilder::new(&db)
@@ -251,7 +251,7 @@ async fn delete_by_key_refuses_a_table_without_key_and_a_key_of_another_arity_be
         .await;
 
     assert_eq!(refused_field(without_primary_key), "table");
-    assert_eq!(refused_field(tuple_for_single_column_key), "key");
+    assert_eq!(refused_field(longer_tuple_for_composite_key), "key");
     assert_eq!(refused_field(value_for_composite_key), "key");
     assert_eq!(take_inserts(), []);
 }

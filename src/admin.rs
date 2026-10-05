@@ -13,6 +13,8 @@ pub use table::*;
 mod job;
 pub use job::*;
 
+mod support;
+
 use crate::BigQueryResult;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
