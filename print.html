@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-32fb944c.js";
+            window.path_to_searchindex_js = "searchindex-a2b52020.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-3c2ed37c.js"></script>
+        <script src="toc-38498192.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -460,6 +460,264 @@ Each one creates its own scratch dataset and deletes it at the end.</p>
 <p>To run an example:</p>
 <pre><code class="language-bash">PROJECT_ID=&lt;your-google-project-id&gt; cargo run --example query
 </code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="reading-data"><a class="header" href="#reading-data">Reading data</a></h1>
+<p>The library reads rows in two ways, and decodes both with the same Arrow decoder, into your
+structures with serde or as raw Arrow record batches:</p>
+<ul>
+<li><a href="#reading-tables">Reading tables</a>: a table read through the Storage Read API, with column
+projection, typed filters and parallel streams. It runs no query and no job;</li>
+<li><a href="#queries">Queries</a>: GoogleSQL with parameters, through the v2 <code>Query</code> call. A large result
+is read through the Storage Read API as well.</li>
+</ul>
+<p><a href="#table-reads-or-queries">Table reads or queries</a> compares the two, with billing hints and
+which one to use when.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="reading-tables"><a class="header" href="#reading-tables">Reading tables</a></h1>
+<p>The library reads tables through the BigQuery Storage Read API. A read runs no query and no job:
+BigQuery streams the table’s columns as Arrow, and the library decodes them into your structures
+with serde. When to read a table and when to query it, see
+<a href="#table-reads-or-queries">Table reads or queries</a>.</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use futures::TryStreamExt;
+</span><span class="boring">use futures::stream::BoxStream;
+</span><span class="boring">use serde::Deserialize;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
+</span>#[derive(Debug, Deserialize)]
+struct Person {
+    name: String,
+    city: String,
+    year: i64,
+}
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let people: BoxStream&lt;BigQueryResult&lt;Person&gt;&gt; = db
+    .fluent()
+    .select()
+    .fields(paths!(Person::{name, city, year})) // Optionally select the columns needed
+    .from(SHOP.table(PEOPLE))
+    .filter(|filter| {
+        filter.for_all([
+            filter.field(path!(Person::city)).eq("Stockholm"),
+            filter.field(path!(Person::year)).ge(2010),
+        ])
+    })
+    .obj() // Reading rows as structures using serde
+    .stream_query_with_errors()
+    .await?;
+
+let as_vec: Vec&lt;Person&gt; = people.try_collect().await?;
+println!("{as_vec:?}");
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>A read needs the <code>bigquery.readsessions.create</code> permission on the project and read access to the
+table, the same as any Storage Read client.</p>
+<h2 id="selecting-columns"><a class="header" href="#selecting-columns">Selecting columns</a></h2>
+<p><code>.fields(..)</code> takes the column names to read. <code>path!</code> and <code>paths!</code> build them from the fields of
+your structure, so a renamed field is a compile error instead of a read that fails on a column the
+table does not have:</p>
+<ul>
+<li><code>path!(Person::city)</code> is <code>"city"</code>;</li>
+<li><code>paths!(Person::{name, city})</code> is <code>vec!["name", "city"]</code>;</li>
+<li><code>path!(Person::home.county)</code> is <code>"home.county"</code>, a subfield of a STRUCT column.</li>
+</ul>
+<p>Without <code>.fields(..)</code>, a typed read selects by itself the columns that the top-level fields of
+your structure name, so it does not read columns it would throw away. It costs one <code>GetTable</code> call
+to learn the table’s columns. A structure with <code>#[serde(flatten)]</code>, a map, <code>serde_json::Value</code> or
+a tuple has no complete list of fields, so it reads every column. <code>record_batches()</code> without
+<code>.fields(..)</code> reads every column too.</p>
+<p>The paths are Rust field names. A field under <code>#[serde(rename = "...")]</code> needs
+<code>path_camel_case!</code> for camelCase columns, or the column name as a plain string.</p>
+<p>Be aware that BigQuery checks <code>selected_fields</code> against a schema that lags behind: a column
+added or renamed in the last 30 seconds or so is refused, and the read fails with
+<code>SchemaMismatchError</code>. The automatic projection falls back to reading every column in that case
+and logs a warning.</p>
+<h2 id="filtering"><a class="header" href="#filtering">Filtering</a></h2>
+<p><code>.filter(..)</code> takes a closure that receives a <code>BigQueryFilterBuilder</code> and returns an
+<code>Option&lt;BigQueryFilter&gt;</code>, the same shape as in firestore-rs:</p>
+<ul>
+<li><code>f.field(..)</code> with <code>eq</code>, <code>neq</code>, <code>lt</code>, <code>le</code>, <code>gt</code>, <code>ge</code>, <code>is_null</code>, <code>is_not_null</code>, <code>is_in</code> and
+<code>is_not_in</code>;</li>
+<li><code>f.for_all</code> for AND conditions;</li>
+<li><code>f.for_any</code> for OR conditions;</li>
+<li><code>f.not</code> for NOT.</li>
+</ul>
+<p>You can nest them, and a <code>None</code> entry is dropped, so optional conditions can be written inline:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::Deserialize;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
+</span><span class="boring">#[derive(Deserialize)]
+</span><span class="boring">struct Person {
+</span><span class="boring">    name: String,
+</span><span class="boring">    city: String,
+</span><span class="boring">    year: i64,
+</span><span class="boring">}
+</span><span class="boring">async fn example(db: BigQueryDb, min_year: Option&lt;i64&gt;) -&gt; BigQueryResult&lt;()&gt; {
+</span>let people: Vec&lt;Person&gt; = db
+    .fluent()
+    .select()
+    .from(SHOP.table(PEOPLE))
+    .filter(|filter| {
+        filter.for_all([
+            filter.for_any([
+                filter.field(path!(Person::city)).is_in(["Malmö", "Lund"]),
+                filter.field(path!(Person::city)).is_null(),
+            ]),
+            min_year.and_then(|year| filter.field(path!(Person::year)).ge(year)),
+        ])
+    })
+    .obj()
+    .query()
+    .await?;
+<span class="boring">let _ = people;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Storage Read has no query parameters: the filter is SQL text in the session’s <code>row_restriction</code>.
+The builder writes values into it as escaped GoogleSQL literals and column names as quoted
+identifiers, so a value cannot change the condition it is in, whatever it holds. Values are any
+<code>Serialize</code>, with the same mapping as query parameters: a string is a STRING, an integer an
+INT64, <code>BigQueryTimestamp</code> a TIMESTAMP, etc. A condition can name any column, selected or not.</p>
+<p>A few things to know:</p>
+<ul>
+<li>a NULL value is refused, since <code>n = NULL</code> matches no row; use <code>is_null()</code> instead;</li>
+<li>GoogleSQL’s three-valued logic applies: a row where the column is NULL matches neither
+<code>neq(..)</code> nor <code>not(eq(..))</code>;</li>
+<li>a closure that returns <code>None</code> reads every row;</li>
+<li>a value without a literal form fails the read before any request, with <code>SerializeError</code>;</li>
+<li>the whole restriction is at most 1 MB, a limit BigQuery checks.</li>
+</ul>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/select-table.rs">here</a>.</p>
+<h3 id="raw-sql-filters"><a class="header" href="#raw-sql-filters">Raw SQL filters</a></h3>
+<p><code>.filter_sql(..)</code> sends condition text as it is, for example <code>"year &gt; 2010 AND city != ''"</code>.</p>
+<p>Be aware not to build this text from user input. It is SQL, and a value spliced into it can
+rewrite the condition. Use <code>.filter(..)</code> for every condition that carries a value, and keep
+<code>.filter_sql(..)</code> for fixed text from your own code. <code>.filter(..)</code> and <code>.filter_sql(..)</code> set the
+same restriction, so the last call wins.</p>
+<h2 id="snapshots-and-sampling"><a class="header" href="#snapshots-and-sampling">Snapshots and sampling</a></h2>
+<p><code>.snapshot_time(..)</code> reads the table as it was at that time instead of now, using BigQuery’s time
+travel. It works only within the time travel window of the dataset, 7 days by default:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::Deserialize;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
+</span><span class="boring">#[derive(Deserialize)]
+</span><span class="boring">struct Person {
+</span><span class="boring">    name: String,
+</span><span class="boring">}
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let an_hour_ago = BigQueryInstant::now() - jiff::SignedDuration::from_hours(1);
+
+let people: Vec&lt;Person&gt; = db
+    .fluent()
+    .select()
+    .from(SHOP.table(PEOPLE))
+    .snapshot_time(an_hour_ago)
+    .obj()
+    .query()
+    .await?;
+<span class="boring">let _ = people;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p><code>.sample_percentage(..)</code> reads a random sample of about that percentage of the table, above 0 and
+up to 100. BigQuery samples by storage blocks, so treat the percentage as approximate, especially
+on small tables.</p>
+<h2 id="reading-rows"><a class="header" href="#reading-rows">Reading rows</a></h2>
+<p><code>.obj::&lt;T&gt;()</code> decodes the rows into <code>T</code> with the library’s own Arrow decoder, which covers every
+BigQuery type. Then pick one of:</p>
+<ul>
+<li><code>query()</code> to collect every row into a <code>Vec&lt;T&gt;</code>, failing on the first error;</li>
+<li><code>stream_query_with_errors()</code> to stream the rows, with every failure as an <code>Err</code> item. A row that
+fails to decode is one <code>Err(DeserializeError)</code> and the stream goes on;</li>
+<li><code>stream_query()</code> to stream only the rows that decode. Failures are logged at <code>error!</code> and
+skipped.</li>
+</ul>
+<p>Be aware that a stream from <code>stream_query()</code> that ends does not mean every row was read: a read
+stream that failed for good ends it too, only with a log line. Use <code>stream_query_with_errors()</code>
+when you need to know.</p>
+<p>Rows are decoded on the task that reads their stream, so <code>T</code> is <code>Send + 'static</code> and cannot borrow
+from the batch.</p>
+<h2 id="record-batches"><a class="header" href="#record-batches">Record batches</a></h2>
+<p><code>.record_batches()</code> streams the Arrow <code>RecordBatch</code>es as BigQuery sent them, after the IPC decode
+and decompression. It is a bit faster than typed rows and the way to hand the data to other Arrow
+tools. <code>arrow_array</code> and <code>arrow_schema</code> are re-exported, so you use the same Arrow version as the
+library.</p>
+<p><code>BigQueryBatchRows</code> decodes a batch into typed rows later, with the same mapping as <code>.obj()</code>.
+A row that fails is one <code>Err</code> item, and the rows after it still decode:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use futures::TryStreamExt;
+</span><span class="boring">use serde::Deserialize;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
+</span><span class="boring">#[derive(Deserialize)]
+</span><span class="boring">struct Person {
+</span><span class="boring">    name: String,
+</span><span class="boring">    year: i64,
+</span><span class="boring">}
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let mut batches = db
+    .fluent()
+    .select()
+    .fields(paths!(Person::{name, year}))
+    .from(SHOP.table(PEOPLE))
+    .record_batches()
+    .await?;
+
+while let Some(batch) = batches.try_next().await? {
+    println!("{} rows, {} columns", batch.num_rows(), batch.num_columns());
+    for person in BigQueryBatchRows::&lt;Person&gt;::new(&amp;batch) {
+        let person = person?;
+        println!("{} {}", person.name, person.year);
+    }
+}
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p><code>BigQueryBatchRows</code> is not <code>Send</code>, so decode a batch where you hold it and do not keep the iterator
+across an <code>.await</code>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batches.rs">here</a>.</p>
+<h2 id="parallel-streams-and-resume"><a class="header" href="#parallel-streams-and-resume">Parallel streams and resume</a></h2>
+<p>One read opens one read session, and BigQuery splits the table into several read streams. Each
+stream runs on its own task: <code>ReadRows</code>, the Arrow decode and, for typed reads, the row decode.
+The streams meet in one bounded channel, so a slow consumer slows the read down instead of
+buffering the table in memory, and rows from different streams arrive in no particular order.</p>
+<p><code>BigQueryReadOptions</code> sets how the session opens:</p>
+<ul>
+<li><code>max_stream_count</code>: the most streams to ask for, the machine’s available parallelism by
+default;</li>
+<li><code>preferred_min_stream_count</code>: the fewest streams BigQuery should aim for;</li>
+<li><code>compression</code>: <code>Lz4</code> by default, <code>Zstd</code> or <code>None</code>.</li>
+</ul>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let batches = db
+    .fluent()
+    .select()
+    .from(SHOP.table(PEOPLE))
+    .options(
+        BigQueryReadOptions::new()
+            .with_max_stream_count(8)
+            .with_compression(BigQueryReadCompression::Zstd),
+    )
+    .record_batches()
+    .await?;
+<span class="boring">let _ = batches;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>BigQuery decides the real count and often gives fewer streams than asked for. In the
+<a href="#benchmarks">benchmarks</a> it gave 4 streams of the 16 asked for on a 1M-row table, and 1 for a
+200,000-row query result.</p>
+<p>A stream that fails with a retryable error is resumed at its row offset after a backoff, so the
+rows it already sent are not read again. Consecutive failures are capped by the client’s <code>max_retries</code>. A
+stream that fails for good is one <code>Err</code> item on the read, and then the whole read ends, since a
+scan that lost a stream is incomplete.</p>
+<p>One case is never retried: an INTERVAL whose time part does not fit Arrow’s nanoseconds fails the
+stream on BigQuery’s side, and every resume would fail the same way. Read such a column through a
+query with <code>CAST(.. AS STRING)</code> instead.</p>
+<p>The read session, its stream count, BigQuery’s estimate of the bytes scanned and the rows and bytes
+read are recorded on the <code>BigQuery Read</code> tracing span.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="queries"><a class="header" href="#queries">Queries</a></h1>
 <p>The library runs GoogleSQL queries through the v2 <code>Query</code> call over gRPC and reads the results as
@@ -936,252 +1194,6 @@ Storage Read. <code>.read_options(..)</code> sets how that read opens its sessio
 </span><span class="boring">}</span></code></pre>
 <p>By default the read asks for as many streams as the machine has parallelism, with LZ4 compression,
 and BigQuery decides how many it actually gives.</p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="reading-tables"><a class="header" href="#reading-tables">Reading tables</a></h1>
-<p>The library reads tables through the BigQuery Storage Read API. A read runs no query and no job:
-BigQuery streams the table’s columns as Arrow, and the library decodes them into your structures
-with serde. When to read a table and when to query it, see
-<a href="#table-reads-or-queries">Table reads or queries</a>.</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">use futures::TryStreamExt;
-</span><span class="boring">use futures::stream::BoxStream;
-</span><span class="boring">use serde::Deserialize;
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
-</span>#[derive(Debug, Deserialize)]
-struct Person {
-    name: String,
-    city: String,
-    year: i64,
-}
-
-<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let people: BoxStream&lt;BigQueryResult&lt;Person&gt;&gt; = db
-    .fluent()
-    .select()
-    .fields(paths!(Person::{name, city, year})) // Optionally select the columns needed
-    .from(SHOP.table(PEOPLE))
-    .filter(|filter| {
-        filter.for_all([
-            filter.field(path!(Person::city)).eq("Stockholm"),
-            filter.field(path!(Person::year)).ge(2010),
-        ])
-    })
-    .obj() // Reading rows as structures using serde
-    .stream_query_with_errors()
-    .await?;
-
-let as_vec: Vec&lt;Person&gt; = people.try_collect().await?;
-println!("{as_vec:?}");
-<span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p>A read needs the <code>bigquery.readsessions.create</code> permission on the project and read access to the
-table, the same as any Storage Read client.</p>
-<h2 id="selecting-columns"><a class="header" href="#selecting-columns">Selecting columns</a></h2>
-<p><code>.fields(..)</code> takes the column names to read. <code>path!</code> and <code>paths!</code> build them from the fields of
-your structure, so a renamed field is a compile error instead of a read that fails on a column the
-table does not have:</p>
-<ul>
-<li><code>path!(Person::city)</code> is <code>"city"</code>;</li>
-<li><code>paths!(Person::{name, city})</code> is <code>vec!["name", "city"]</code>;</li>
-<li><code>path!(Person::home.county)</code> is <code>"home.county"</code>, a subfield of a STRUCT column.</li>
-</ul>
-<p>Without <code>.fields(..)</code>, a typed read selects by itself the columns that the top-level fields of
-your structure name, so it does not read columns it would throw away. It costs one <code>GetTable</code> call
-to learn the table’s columns. A structure with <code>#[serde(flatten)]</code>, a map, <code>serde_json::Value</code> or
-a tuple has no complete list of fields, so it reads every column. <code>record_batches()</code> without
-<code>.fields(..)</code> reads every column too.</p>
-<p>The paths are Rust field names. A field under <code>#[serde(rename = "...")]</code> needs
-<code>path_camel_case!</code> for camelCase columns, or the column name as a plain string.</p>
-<p>Be aware that BigQuery checks <code>selected_fields</code> against a schema that lags behind: a column
-added or renamed in the last 30 seconds or so is refused, and the read fails with
-<code>SchemaMismatchError</code>. The automatic projection falls back to reading every column in that case
-and logs a warning.</p>
-<h2 id="filtering"><a class="header" href="#filtering">Filtering</a></h2>
-<p><code>.filter(..)</code> takes a closure that receives a <code>BigQueryFilterBuilder</code> and returns an
-<code>Option&lt;BigQueryFilter&gt;</code>, the same shape as in firestore-rs:</p>
-<ul>
-<li><code>f.field(..)</code> with <code>eq</code>, <code>neq</code>, <code>lt</code>, <code>le</code>, <code>gt</code>, <code>ge</code>, <code>is_null</code>, <code>is_not_null</code>, <code>is_in</code> and
-<code>is_not_in</code>;</li>
-<li><code>f.for_all</code> for AND conditions;</li>
-<li><code>f.for_any</code> for OR conditions;</li>
-<li><code>f.not</code> for NOT.</li>
-</ul>
-<p>You can nest them, and a <code>None</code> entry is dropped, so optional conditions can be written inline:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">use serde::Deserialize;
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
-</span><span class="boring">#[derive(Deserialize)]
-</span><span class="boring">struct Person {
-</span><span class="boring">    name: String,
-</span><span class="boring">    city: String,
-</span><span class="boring">    year: i64,
-</span><span class="boring">}
-</span><span class="boring">async fn example(db: BigQueryDb, min_year: Option&lt;i64&gt;) -&gt; BigQueryResult&lt;()&gt; {
-</span>let people: Vec&lt;Person&gt; = db
-    .fluent()
-    .select()
-    .from(SHOP.table(PEOPLE))
-    .filter(|filter| {
-        filter.for_all([
-            filter.for_any([
-                filter.field(path!(Person::city)).is_in(["Malmö", "Lund"]),
-                filter.field(path!(Person::city)).is_null(),
-            ]),
-            min_year.and_then(|year| filter.field(path!(Person::year)).ge(year)),
-        ])
-    })
-    .obj()
-    .query()
-    .await?;
-<span class="boring">let _ = people;
-</span><span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p>Storage Read has no query parameters: the filter is SQL text in the session’s <code>row_restriction</code>.
-The builder writes values into it as escaped GoogleSQL literals and column names as quoted
-identifiers, so a value cannot change the condition it is in, whatever it holds. Values are any
-<code>Serialize</code>, with the same mapping as query parameters: a string is a STRING, an integer an
-INT64, <code>BigQueryTimestamp</code> a TIMESTAMP, etc. A condition can name any column, selected or not.</p>
-<p>A few things to know:</p>
-<ul>
-<li>a NULL value is refused, since <code>n = NULL</code> matches no row; use <code>is_null()</code> instead;</li>
-<li>GoogleSQL’s three-valued logic applies: a row where the column is NULL matches neither
-<code>neq(..)</code> nor <code>not(eq(..))</code>;</li>
-<li>a closure that returns <code>None</code> reads every row;</li>
-<li>a value without a literal form fails the read before any request, with <code>SerializeError</code>;</li>
-<li>the whole restriction is at most 1 MB, a limit BigQuery checks.</li>
-</ul>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/select-table.rs">here</a>.</p>
-<h3 id="raw-sql-filters"><a class="header" href="#raw-sql-filters">Raw SQL filters</a></h3>
-<p><code>.filter_sql(..)</code> sends condition text as it is, for example <code>"year &gt; 2010 AND city != ''"</code>.</p>
-<p>Be aware not to build this text from user input. It is SQL, and a value spliced into it can
-rewrite the condition. Use <code>.filter(..)</code> for every condition that carries a value, and keep
-<code>.filter_sql(..)</code> for fixed text from your own code. <code>.filter(..)</code> and <code>.filter_sql(..)</code> set the
-same restriction, so the last call wins.</p>
-<h2 id="snapshots-and-sampling"><a class="header" href="#snapshots-and-sampling">Snapshots and sampling</a></h2>
-<p><code>.snapshot_time(..)</code> reads the table as it was at that time instead of now, using BigQuery’s time
-travel. It works only within the time travel window of the dataset, 7 days by default:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">use serde::Deserialize;
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
-</span><span class="boring">#[derive(Deserialize)]
-</span><span class="boring">struct Person {
-</span><span class="boring">    name: String,
-</span><span class="boring">}
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let an_hour_ago = BigQueryInstant::now() - jiff::SignedDuration::from_hours(1);
-
-let people: Vec&lt;Person&gt; = db
-    .fluent()
-    .select()
-    .from(SHOP.table(PEOPLE))
-    .snapshot_time(an_hour_ago)
-    .obj()
-    .query()
-    .await?;
-<span class="boring">let _ = people;
-</span><span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p><code>.sample_percentage(..)</code> reads a random sample of about that percentage of the table, above 0 and
-up to 100. BigQuery samples by storage blocks, so treat the percentage as approximate, especially
-on small tables.</p>
-<h2 id="reading-rows"><a class="header" href="#reading-rows">Reading rows</a></h2>
-<p><code>.obj::&lt;T&gt;()</code> decodes the rows into <code>T</code> with the library’s own Arrow decoder, which covers every
-BigQuery type. Then pick one of:</p>
-<ul>
-<li><code>query()</code> to collect every row into a <code>Vec&lt;T&gt;</code>, failing on the first error;</li>
-<li><code>stream_query_with_errors()</code> to stream the rows, with every failure as an <code>Err</code> item. A row that
-fails to decode is one <code>Err(DeserializeError)</code> and the stream goes on;</li>
-<li><code>stream_query()</code> to stream only the rows that decode. Failures are logged at <code>error!</code> and
-skipped.</li>
-</ul>
-<p>Be aware that a stream from <code>stream_query()</code> that ends does not mean every row was read: a read
-stream that failed for good ends it too, only with a log line. Use <code>stream_query_with_errors()</code>
-when you need to know.</p>
-<p>Rows are decoded on the task that reads their stream, so <code>T</code> is <code>Send + 'static</code> and cannot borrow
-from the batch.</p>
-<h2 id="record-batches"><a class="header" href="#record-batches">Record batches</a></h2>
-<p><code>.record_batches()</code> streams the Arrow <code>RecordBatch</code>es as BigQuery sent them, after the IPC decode
-and decompression. It is a bit faster than typed rows and the way to hand the data to other Arrow
-tools. <code>arrow_array</code> and <code>arrow_schema</code> are re-exported, so you use the same Arrow version as the
-library.</p>
-<p><code>BigQueryBatchRows</code> decodes a batch into typed rows later, with the same mapping as <code>.obj()</code>.
-A row that fails is one <code>Err</code> item, and the rows after it still decode:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">use futures::TryStreamExt;
-</span><span class="boring">use serde::Deserialize;
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
-</span><span class="boring">#[derive(Deserialize)]
-</span><span class="boring">struct Person {
-</span><span class="boring">    name: String,
-</span><span class="boring">    year: i64,
-</span><span class="boring">}
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let mut batches = db
-    .fluent()
-    .select()
-    .fields(paths!(Person::{name, year}))
-    .from(SHOP.table(PEOPLE))
-    .record_batches()
-    .await?;
-
-while let Some(batch) = batches.try_next().await? {
-    println!("{} rows, {} columns", batch.num_rows(), batch.num_columns());
-    for person in BigQueryBatchRows::&lt;Person&gt;::new(&amp;batch) {
-        let person = person?;
-        println!("{} {}", person.name, person.year);
-    }
-}
-<span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p><code>BigQueryBatchRows</code> is not <code>Send</code>, so decode a batch where you hold it and do not keep the iterator
-across an <code>.await</code>.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batches.rs">here</a>.</p>
-<h2 id="parallel-streams-and-resume"><a class="header" href="#parallel-streams-and-resume">Parallel streams and resume</a></h2>
-<p>One read opens one read session, and BigQuery splits the table into several read streams. Each
-stream runs on its own task: <code>ReadRows</code>, the Arrow decode and, for typed reads, the row decode.
-The streams meet in one bounded channel, so a slow consumer slows the read down instead of
-buffering the table in memory, and rows from different streams arrive in no particular order.</p>
-<p><code>BigQueryReadOptions</code> sets how the session opens:</p>
-<ul>
-<li><code>max_stream_count</code>: the most streams to ask for, the machine’s available parallelism by
-default;</li>
-<li><code>preferred_min_stream_count</code>: the fewest streams BigQuery should aim for;</li>
-<li><code>compression</code>: <code>Lz4</code> by default, <code>Zstd</code> or <code>None</code>.</li>
-</ul>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const PEOPLE: BigQueryTableId = BigQueryTableId::from_static("people");
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let batches = db
-    .fluent()
-    .select()
-    .from(SHOP.table(PEOPLE))
-    .options(
-        BigQueryReadOptions::new()
-            .with_max_stream_count(8)
-            .with_compression(BigQueryReadCompression::Zstd),
-    )
-    .record_batches()
-    .await?;
-<span class="boring">let _ = batches;
-</span><span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p>BigQuery decides the real count and often gives fewer streams than asked for. In the
-<a href="#benchmarks">benchmarks</a> it gave 4 streams of the 16 asked for on a 1M-row table, and 1 for a
-200,000-row query result.</p>
-<p>A stream that fails with a retryable error is resumed at its row offset after a backoff, so the
-rows it already sent are not read again. Consecutive failures are capped by the client’s <code>max_retries</code>. A
-stream that fails for good is one <code>Err</code> item on the read, and then the whole read ends, since a
-scan that lost a stream is incomplete.</p>
-<p>One case is never retried: an INTERVAL whose time part does not fit Arrow’s nanoseconds fails the
-stream on BigQuery’s side, and every resume would fail the same way. Read such a column through a
-query with <code>CAST(.. AS STRING)</code> instead.</p>
-<p>The read session, its stream count, BigQuery’s estimate of the bytes scanned and the rows and bytes
-read are recorded on the <code>BigQuery Read</code> tracing span.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="table-reads-or-queries"><a class="header" href="#table-reads-or-queries">Table reads or queries</a></h1>
 <p>The library reads data in two ways:</p>

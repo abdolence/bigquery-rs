@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Datasets, tables and jobs - BigQuery for Rust</title>
+        <title>Reading data - BigQuery for Rust</title>
 
 
         <!-- Custom HTML head -->
@@ -177,267 +177,27 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="datasets-tables-and-jobs"><a class="header" href="#datasets-tables-and-jobs">Datasets, tables and jobs</a></h1>
-<p>Besides the declarative table schemas, the library provides the plain admin calls over the v2 API:</p>
+                        <h1 id="reading-data"><a class="header" href="#reading-data">Reading data</a></h1>
+<p>The library reads rows in two ways, and decodes both with the same Arrow decoder, into your
+structures with serde or as raw Arrow record batches:</p>
 <ul>
-<li>create, read, update, delete and list datasets;</li>
-<li>read, delete and list tables;</li>
-<li>read, delete, cancel and list jobs.</li>
+<li><a href="./reading-tables.html">Reading tables</a>: a table read through the Storage Read API, with column
+projection, typed filters and parallel streams. It runs no query and no job;</li>
+<li><a href="./queries.html">Queries</a>: GoogleSQL with parameters, through the v2 <code>Query</code> call. A large result
+is read through the Storage Read API as well.</li>
 </ul>
-<p>Every call returns the library’s own types, such as <code>BigQueryDataset</code>, <code>BigQueryTable</code> and
-<code>BigQueryJob</code>, and a value BigQuery leaves out is <code>None</code>.</p>
-<h2 id="dataset-and-table-ids"><a class="header" href="#dataset-and-table-ids">Dataset and table IDs</a></h2>
-<p>Every call that names a dataset or a table takes the validated ID types, <code>BigQueryDatasetId</code> and
-<code>BigQueryTableId</code>. Declare the ones your application knows up front as constants, and build
-references from them:</p>
-<pre><code class="language-rust">use bigquery::*;
-
-const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
-
-// The table in the client's project
-let orders = SHOP.table(ORDERS);
-assert_eq!(orders.to_string(), "shop.orders");
-
-// The same table in another project
-let other = BigQueryDatasetRef::new("acme-prod", SHOP)?.table(ORDERS);
-assert_eq!(other.to_string(), "acme-prod.shop.orders");
-<span class="boring">Ok::&lt;(), bigquery::errors::BigQueryError&gt;(())</span></code></pre>
-<p><code>from_static</code> checks the literal at compile time, so an invalid one in a <code>const</code> fails the build.
-An ID that arrives at run time goes through <code>new</code>, <code>parse()</code> or <code>try_into()</code>, and deserializing an
-ID checks it the same way:</p>
-<pre><code class="language-rust"><span class="boring">use bigquery::*;
-</span>let dataset = BigQueryDatasetId::new("shop_eu")?;
-let table: BigQueryTableId = "orders_2026".parse()?;
-let orders = dataset.table(table);
-<span class="boring">let _ = orders;
-</span>
-assert!(BigQueryDatasetId::new("shop.eu").is_err());
-<span class="boring">Ok::&lt;(), bigquery::errors::BigQueryError&gt;(())</span></code></pre>
-<p>The check is deliberately narrow. An ID is rejected when it is empty, longer than 1,024 bytes, or
-holds a control character or any of <code>`</code>, <code>'</code>, <code>"</code>, <code>\</code>, <code>.</code>, <code>/</code>, <code>$</code> and <code>@</code>, since those
-would change a resource path, a dotted reference or SQL text built from the ID. BigQuery’s full
-naming rules are left to BigQuery, so an ID that passes here can still be refused by the call that
-sends it.</p>
-<p><code>BigQueryTableRef</code> and <code>BigQueryDatasetRef</code> also parse from text, <code>dataset.table</code> or
-<code>project.dataset.table</code>. Be aware not to parse text you do not trust this way, since the text picks
-the project. Build the reference from the IDs instead, or check that <code>project()</code> is <code>None</code> after
-parsing.</p>
-<p>The project ID stays a plain <code>String</code>, because it is shared by every Google Cloud product. It is
-checked only for being non-empty and free of <code>/</code> and control characters. A location is a
-<code>BigQueryLocation</code>, such as <code>BigQueryLocation::from_static("EU")</code>, checked only for being
-non-empty.</p>
-<h2 id="datasets"><a class="header" href="#datasets">Datasets</a></h2>
-<p>Datasets are reached through <code>db.fluent().schema().dataset(..)</code>, which takes a <code>BigQueryDatasetId</code>
-for the client’s project or a <code>BigQueryDatasetRef</code> for another one:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">use std::time::Duration;
-</span>const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-const EU: BigQueryLocation = BigQueryLocation::from_static("EU");
-
-<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let shop = db
-    .fluent()
-    .schema()
-    .dataset(SHOP)
-    .create()
-    .location(EU)
-    .description("Shop data")
-    .default_table_expiration(Duration::from_secs(90 * 24 * 60 * 60))
-    .labels([("team", "shop")])
-    .execute()
-    .await?;
-println!("created {} in {:?}", shop.reference, shop.location);
-
-let shop = db.fluent().schema().dataset(SHOP).get().await?;
-println!("{:?}", shop.labels.get("team"));
-<span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p>The location cannot change after the dataset is created. Unset, BigQuery picks <code>US</code>. Creating a
-dataset that already exists fails with <code>DataConflictError</code>.</p>
-<p><code>update()</code> changes the description and the labels, and keeps everything else as the dataset has
-it:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let shop = db
-    .fluent()
-    .schema()
-    .dataset(SHOP)
-    .update()
-    .label("stage", "prod")
-    .remove_label("tmp")
-    .clear_description()
-    .execute()
-    .await?;
-<span class="boring">let _ = shop;
-</span><span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<ul>
-<li><code>description(..)</code> sets the description, <code>clear_description()</code> removes it;</li>
-<li><code>label(key, value)</code> adds or changes one label, <code>remove_label(key)</code> removes one, and <code>labels(..)</code>
-replaces all of them. Label changes apply in the order they are made.</li>
-</ul>
-<p>The update reads the dataset and writes it back with the etag it read as an <code>if-match</code>
-precondition, so a dataset that changed in between fails with <code>DataConflictError</code> and nothing is
-written. Run it again. Only the metadata is written, the access list stays as it is.</p>
-<p>There are two ways to delete a dataset:</p>
-<ul>
-<li><code>delete()</code> deletes an empty dataset. BigQuery refuses one that holds any table, view, model or
-routine, and nothing is deleted;</li>
-<li><code>dangerously_delete_with_contents()</code> deletes every table in the dataset with every row in it,
-and its views, models and routines, then the dataset. Nothing is kept for an undo.</li>
-</ul>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">const SCRATCH: BigQueryDatasetId = BigQueryDatasetId::from_static("scratch");
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>db.fluent()
-    .schema()
-    .dataset(SCRATCH)
-    .dangerously_delete_with_contents()
-    .await?;
-<span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<h2 id="listing-datasets-and-tables"><a class="header" href="#listing-datasets-and-tables">Listing datasets and tables</a></h2>
-<p>Listings are streams that fetch the next page when the stream reaches it:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span>use futures::StreamExt;
-
-<span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let mut datasets = db.fluent().schema().datasets().stream_all().await?;
-while let Some(dataset) = datasets.next().await {
-    println!("{} in {:?}", dataset.reference, dataset.location);
-}
-
-let tables: Vec&lt;BigQueryTableSummary&gt; = db
-    .fluent()
-    .schema()
-    .dataset(SHOP)
-    .tables()
-    .page_size(100)
-    .stream_all()
-    .await?
-    .collect()
-    .await;
-<span class="boring">let _ = tables;
-</span><span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p><code>stream_all()</code> logs a failed page at <code>error</code> and ends there, since the listing cannot go on without
-the token that page would have returned. <code>stream_all_with_errors()</code> yields the failure as the
-stream’s last item instead. <code>page_size(..)</code> sets how many items one call returns, and
-<code>datasets().project(..)</code> lists another project’s datasets.</p>
-<p>The listings return summaries, <code>BigQueryDatasetSummary</code> and <code>BigQueryTableSummary</code>, with what
-BigQuery’s list calls return: the reference, the location or table type, the labels, etc. Read the
-full value with <code>get()</code>.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/datasets-admin.rs">here</a>.</p>
-<h2 id="tables"><a class="header" href="#tables">Tables</a></h2>
-<p>Tables are created and changed through the declarative schemas, see
-<a href="./schema-management.html">Schema management</a>. The same builder has two plain calls, which act on the
-table and ignore anything declared before them:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let orders = db.fluent().schema().table(SHOP.table(ORDERS)).get().await?;
-for field in &amp;orders.schema.fields {
-    println!("{} {} {}", field.name, field.field_type, field.mode);
-}
-println!("{:?} rows, partitioning {:?}", orders.num_rows, orders.partitioning);
-
-db.fluent().schema().table(SHOP.table(ORDERS)).delete().await?;
-<span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p><code>get()</code> returns a <code>BigQueryTable</code>: the reference, the <code>table_type</code>, the schema as
-<code>BigQueryTableSchema</code>, the description, labels, partitioning, clustering, <code>num_rows</code>, <code>num_bytes</code>,
-the location, and the creation, last modified and expiration times. It reads views, materialized
-views, external tables and snapshots as well. The schema uses the same types as the
-<a href="./types.html">type mapping</a>, so <code>INTEGER</code> from the v2 API reads as <code>BigQueryFieldType::Int64</code>.</p>
-<p>Be aware <code>num_rows</code> and <code>num_bytes</code> lag Storage Write: rows written through committed or pending
-streams show after about a minute, and rows on the default stream can take more than 5 minutes. A
-<code>SELECT COUNT(*)</code> gives the current count.</p>
-<p><code>delete()</code> deletes the table with every row in it. Nothing is kept for an undo, and open writers to
-it fail.</p>
-<h2 id="jobs"><a class="header" href="#jobs">Jobs</a></h2>
-<p>Every query that runs as a job names it in its outcome, as a <code>BigQueryJobRef</code> with the project,
-the job ID and the location. The job calls are methods on <code>BigQueryDb</code>:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let outcome = db
-    .fluent()
-    .query("SELECT 1")
-    .job_creation_required()
-    .execute()
-    .await?;
-
-if let Some(job_ref) = &amp;outcome.job {
-    let job = db.get_job(job_ref).await?;
-    println!(
-        "{:?} {:?}, billed {:?} bytes",
-        job.statement_type, job.state, job.total_bytes_billed
-    );
-    db.delete_job(job_ref).await?;
-}
-<span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<ul>
-<li><code>get_job(&amp;job_ref)</code> reads a job: its type, state, error, user, labels, statement type, the
-creation, start and end times, and the bytes processed and billed;</li>
-<li><code>cancel_job(&amp;job_ref)</code> asks BigQuery to cancel a running job and returns once the request is
-accepted, before the job stops. Dropping a query’s stream or future does not cancel its job;</li>
-<li><code>delete_job(&amp;job_ref)</code> deletes the metadata of a finished job, for example a failed query’s SQL
-that should not stay in the job history. It does not cancel a running job.</li>
-</ul>
-<p>A short query that BigQuery answered without a job names none. <code>.job_creation_required()</code> makes
-the query always run as a job.</p>
-<p><code>stream_jobs(..)</code> lists jobs, newest first, with the filters of <code>BigQueryListJobsParams</code>:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
-</span>use futures::StreamExt;
-
-<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let since: BigQueryInstant = "2026-10-01T00:00:00Z".parse().expect("valid instant");
-let mut jobs = db
-    .stream_jobs(
-        BigQueryListJobsParams::new()
-            .with_min_creation_time(since)
-            .with_states(vec![BigQueryJobState::Done]),
-    )
-    .await?;
-while let Some(job) = jobs.next().await {
-    println!("{} {:?}", job.reference.job_id, job.total_bytes_billed);
-}
-<span class="boring">Ok(())
-</span><span class="boring">}</span></code></pre>
-<p>The filters are the project, <code>all_users</code> (which needs the Owner role on the project), the minimum
-and maximum creation time, the states, the parent job of a script and the page size.
-<code>stream_jobs_with_errors(..)</code> yields a failed page as the last item, the same as for the other
-listings.</p>
-<p>The job state, the job type, the statement type and the table type are enums with an
-<code>Other(String)</code> case for names the library does not know yet, and <code>as_str()</code> gives back the name
-BigQuery sent for every value.</p>
-<h2 id="write-streams"><a class="header" href="#write-streams">Write streams</a></h2>
-<p>There is no listing of write streams. The Storage Write API has no list call, so a stream is
-reachable only by the name its creator got back.</p>
-<h2 id="errors-and-retries"><a class="header" href="#errors-and-retries">Errors and retries</a></h2>
-<ul>
-<li>A missing dataset, table or job is <code>DataNotFoundError</code>;</li>
-<li>creating a dataset that exists, and an update that lost the <code>if-match</code> precondition, are
-<code>DataConflictError</code>;</li>
-<li>every call goes through the client’s retries.</li>
-</ul>
-<p>A retry after a lost response repeats a call that may already have succeeded. So a create can
-report <code>DataConflictError</code> for the dataset it created, and a delete <code>DataNotFoundError</code> for the
-dataset, table or job it deleted.</p>
+<p><a href="./table-reads-or-queries.html">Table reads or queries</a> compares the two, with billing hints and
+which one to use when.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="schema-management.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="getting-started.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="types.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="reading-tables.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -447,11 +207,11 @@ dataset, table or job it deleted.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="schema-management.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="getting-started.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="types.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="reading-tables.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
