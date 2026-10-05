@@ -1,0 +1,649 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Schema management - BigQuery for Rust</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Library provides a simple API for Google BigQuery based on the gRPC Storage Read/Write and v2 APIs">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-0efc7e6f.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-3c2ed37c.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">BigQuery for Rust</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/abdolence/bigquery-rs" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="schema-management"><a class="header" href="#schema-management">Schema management</a></h1>
+<p>Tables are usually created with DDL in the console or a migration script, and changed by hand
+when the code needs a new column. The library supports declaring a table’s schema and settings
+in Rust instead, next to the structs that read and write it, and making the table match with one
+explicit call.</p>
+<p>It works the same way as the index management in
+<a href="https://github.com/abdolence/firestore-rs">firestore-rs</a>: a declaration, a read-only <code>.plan()</code>
+and a <code>.sync()</code> that applies it.</p>
+<h2 id="declaring-a-table"><a class="header" href="#declaring-a-table">Declaring a table</a></h2>
+<p>Everything starts from <code>db.fluent().schema().table(..)</code>, then a chain of declarations ending in
+<code>.plan()</code> or <code>.sync()</code>:</p>
+<pre><code class="language-rust no_run">use bigquery::*;
+
+struct Address {
+    city: String,
+}
+
+struct Order {
+    id: i64,
+    customer: String,
+    total: String,
+    shipping: Address,
+    tags: Vec&lt;String&gt;,
+    placed_at: jiff::Timestamp,
+}
+
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let report = db
+    .fluent()
+    .schema()
+    .table(SHOP.table(ORDERS))
+    .columns(|columns| {
+        columns.fields([
+            columns.field(path!(Order::id)).int64().required(),
+            columns.field(path!(Order::customer)).string_with_max_length(64),
+            columns.field(path!(Order::total)).numeric_with(10, 2).default_value("0"),
+            columns.field(path!(Order::shipping)).record(|address| {
+                address.fields([address.field(path!(Address::city)).string()])
+            }),
+            columns.field(path!(Order::tags)).string().repeated(),
+            columns.field(path!(Order::placed_at))
+                .timestamp()
+                .description("When the customer placed the order"),
+        ])
+    })
+    .primary_key([path!(Order::id)])
+    .partition_by_day(path!(Order::placed_at))
+    .cluster_by([path!(Order::customer)])
+    .description("Orders")
+    .labels([("team", "shop")])
+    .sync()
+    .await?;
+println!("{report}");
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>A missing table is created with one <code>InsertTable</code>. An existing one is changed in place where
+BigQuery allows it.</p>
+<p><code>.columns()</code> declares the columns in table order. Each column needs one type:</p>
+<ul>
+<li><code>int64()</code>, <code>float64()</code>, <code>bool()</code>;</li>
+<li><code>numeric()</code>, <code>numeric_with(precision, scale)</code>, <code>bignumeric()</code>, <code>bignumeric_with(..)</code>;</li>
+<li><code>string()</code>, <code>string_with_max_length(n)</code>, <code>bytes()</code>, <code>bytes_with_max_length(n)</code>;</li>
+<li><code>date()</code>, <code>time()</code>, <code>datetime()</code>, <code>timestamp()</code>, <code>interval()</code>, <code>range(element)</code>;</li>
+<li><code>geography()</code>, <code>json()</code>;</li>
+<li><code>record(|address| ..)</code> for a STRUCT, with its fields declared the same way;</li>
+<li><code>of_type(BigQueryFieldType)</code> for any of the above as a value.</li>
+</ul>
+<p>A column is NULLABLE until <code>required()</code> or <code>repeated()</code> says otherwise. <code>description(..)</code> and
+<code>default_value(..)</code> are optional, and <code>renamed_from(..)</code> is described <a href="#renaming-a-column">below</a>.</p>
+<p>The table settings are <code>primary_key(..)</code> (always <code>NOT ENFORCED</code>, as every BigQuery key),
+<code>partition_by_hour/day/month/year(column)</code> or <code>partition_by(BigQueryPartitioning)</code>,
+<code>partition_expiration(Duration)</code>, <code>cluster_by(..)</code>, <code>description(..)</code>, <code>labels(..)</code> and
+<code>expiration(BigQueryInstant)</code>.</p>
+<p>Be aware a default value is trusted SQL. It is sent to BigQuery as it is, and written into
+generated DDL as one parenthesized expression, so it must never carry text from your users. A
+string default is written as its own quoted literal, <code>default_value("'none'")</code>. Descriptions,
+labels and option values are always sent as values or escaped literals.</p>
+<p>The library checks only what it needs itself to build the requests: a column without a type, an
+empty column name or one with <code>.</code> or a control character, two columns that differ only in case,
+<code>renamed_from</code> on a nested field, a partitioning column that is not declared, <code>cluster_by</code> or
+<code>primary_key</code> with no columns, <code>partition_expiration</code> without partitioning and <code>snapshot_first()</code>
+without a recreate opt-in. These fail <code>.plan()</code> and <code>.sync()</code> with <code>InvalidParametersError</code>
+before any request. Lengths, naming rules and label rules are left to BigQuery.</p>
+<h2 id="plan-versus-sync"><a class="header" href="#plan-versus-sync">plan() versus sync()</a></h2>
+<p><code>.plan()</code> is read-only. It sends one <code>GetTable</code> (and <code>ListRowAccessPolicies</code> when a recreate is
+planned) and reports what <code>.sync()</code> would do, writing nothing.</p>
+<p><code>.sync()</code> plans the same way and then applies the plan.</p>
+<p>Both return a value with a <code>Display</code> impl, so it can be printed or logged directly:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let plan = db
+    .fluent()
+    .schema()
+    .table(SHOP.table(ORDERS))
+    .columns(|columns| {
+        columns.fields([
+            columns.field("id").int64().required(),
+            columns.field("customer").string(),
+            columns.field("note").string(),
+        ])
+    })
+    .plan()
+    .await?;
+
+if !plan.is_empty() {
+    println!("{plan}");
+}
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p><code>BigQueryTablePlan</code> has:</p>
+<ul>
+<li><code>create</code>: the table to create, when it does not exist;</li>
+<li><code>changes</code>: the in-place changes, in the order <code>.sync()</code> sends them;</li>
+<li><code>withheld</code>: changes left out until the declaration opts in to them, each with its
+<code>BigQueryWithheldReason</code> (<code>PruneUndeclared</code> or <code>AllowWidening</code>);</li>
+<li><code>recreate</code>: the recreate <code>.sync()</code> runs instead of <code>changes</code>, when a change is impossible in
+place and a recreate opt-in applies;</li>
+<li><code>impossible</code> and <code>refusal</code>: the changes that are impossible in place, and why <code>.sync()</code> refuses
+them.</li>
+</ul>
+<p><code>BigQueryTableSyncReport</code> from <code>.sync()</code> has the same shape for what was done: <code>created</code>,
+<code>applied</code>, <code>withheld</code>, <code>recreated</code>, <code>snapshot</code> and <code>dropped_data</code>, the last one listing every
+column or row a sync deleted.</p>
+<h2 id="one-statement-owns-one-table"><a class="header" href="#one-statement-owns-one-table">One statement owns one table</a></h2>
+<p>A chain names exactly one table, and that table is the unit of ownership: <code>.prune_undeclared()</code>
+never reaches anything outside it. Several tables need several statements, for example one per
+table in a startup function.</p>
+<h2 id="what-a-declaration-leaves-out"><a class="header" href="#what-a-declaration-leaves-out">What a declaration leaves out</a></h2>
+<p>What the chain declares is what <code>.sync()</code> makes the table hold. What it leaves undeclared is kept
+as the table has it:</p>
+<ul>
+<li>an undeclared column, label, clustering, primary key or partitioning is kept and listed under
+<code>withheld</code> with <code>PruneUndeclared</code>;</li>
+<li>an undeclared description, default value or expiration is kept and not reported.</li>
+</ul>
+<p>So a declaration can start small, with only the columns your code needs, and the rest of the table
+stays untouched.</p>
+<p>Before comparing, both sides are normalised the way BigQuery itself compares them. <code>GetTable</code>
+returns the legacy type names, so <code>INTEGER</code> equals INT64, <code>FLOAT</code> equals FLOAT64, <code>RECORD</code> equals
+STRUCT, etc. A column created by DDL comes back with an empty mode, which equals NULLABLE. Type
+parameters are part of the type, so <code>STRING(10)</code> and <code>STRING(20)</code> differ, and <code>NUMERIC(10)</code> equals
+<code>NUMERIC(10, 0)</code>. Column names compare ignoring case.</p>
+<h2 id="change-classes"><a class="header" href="#change-classes">Change classes</a></h2>
+<p>Every difference between the declaration and the table is one <code>BigQuerySchemaChange</code>, and BigQuery
+applies each kind in its own way:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Change</th><th>Applied by</th><th>Needs</th></tr>
+</thead>
+<tbody>
+<tr><td>add a NULLABLE or REPEATED column, a field inside an existing RECORD, a RECORD column</td><td><code>PatchTable</code></td><td></td></tr>
+<tr><td>add a column with a default value</td><td><code>PatchTable</code>, then a second <code>PatchTable</code> for the default</td><td></td></tr>
+<tr><td>relax REQUIRED to NULLABLE</td><td><code>PatchTable</code></td><td></td></tr>
+<tr><td>set a column default, a column or table description</td><td><code>PatchTable</code></td><td></td></tr>
+<tr><td>add or change a label, the expiration, the partition expiration</td><td><code>PatchTable</code></td><td></td></tr>
+<tr><td>add or change clustering, add or change the primary key</td><td><code>PatchTable</code></td><td></td></tr>
+<tr><td>remove the primary key</td><td><code>PatchTable</code></td><td><code>prune_undeclared()</code></td></tr>
+<tr><td>remove a label or the clustering</td><td><code>UpdateTable</code></td><td><code>prune_undeclared()</code></td></tr>
+<tr><td>rename a column</td><td>DDL <code>RENAME COLUMN</code></td><td><code>renamed_from(..)</code></td></tr>
+<tr><td>widen a column type</td><td>DDL <code>ALTER COLUMN SET DATA TYPE</code></td><td><code>allow_widening()</code></td></tr>
+<tr><td>drop a column, with every value in it</td><td>DDL <code>DROP COLUMN</code></td><td><code>prune_undeclared()</code></td></tr>
+<tr><td>anything else</td><td>impossible in place</td><td>a recreate opt-in</td></tr>
+</tbody>
+</table>
+</div>
+<p>BigQuery cannot add a column with a default in one step, so the column is added first and the
+default set right after. Rows already in the table stay NULL in that column; only new rows get the
+default. The same holds for a default set on an existing column.</p>
+<p>Impossible in place means BigQuery has no call or statement that does it without recreating the
+table:</p>
+<ul>
+<li>a type change that is not a widening, INT64 to FLOAT64 and every narrowing included;</li>
+<li>a change between a RECORD and another type, or a widening of a nested field;</li>
+<li>NULLABLE to REQUIRED, and any change to or from REPEATED;</li>
+<li>a new REQUIRED column or nested field;</li>
+<li>dropping a nested field;</li>
+<li>adding or changing the partitioning, or removing it with <code>prune_undeclared()</code>.</li>
+</ul>
+<p>Without a recreate opt-in <code>.sync()</code> refuses such a plan and writes nothing, not even the changes
+that are possible in place. The error is <code>SchemaChangeRefused</code>, carrying the plan:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use bigquery::errors::BigQueryError;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let synced = db
+    .fluent()
+    .schema()
+    .table(SHOP.table(ORDERS))
+    .columns(|columns| columns.fields([columns.field("id").string().required()]))
+    .sync()
+    .await;
+
+match synced {
+    Ok(report) =&gt; println!("{report}"),
+    Err(BigQueryError::SchemaChangeRefused(refused)) =&gt; {
+        for change in &amp;refused.plan.impossible {
+            eprintln!("impossible in place: {change}");
+        }
+    }
+    Err(err) =&gt; return Err(err),
+}
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<h2 id="the-order-sync-writes-changes-in"><a class="header" href="#the-order-sync-writes-changes-in">The order sync() writes changes in</a></h2>
+<p><code>.sync()</code> reads the table once and writes in a fixed order:</p>
+<ol>
+<li>one <code>PatchTable</code> with every change that can go into a patch;</li>
+<li>a second <code>PatchTable</code> with the default values of the columns the first one added;</li>
+<li>one <code>UpdateTable</code> for removed labels and clustering, since a patch cannot remove them;</li>
+<li>DDL through a query, one statement at a time: renames, then widenings, then drops.</li>
+</ol>
+<p>Patch and Update carry the etag of the table the sync read, as an <code>if-match</code> precondition. When the
+table changed in between, the write fails with <code>DataConflictError</code> and nothing after it is sent.
+Run the sync again: it reads the table as it is now. Changes sent before a failure stay applied, and
+the sync logs at <code>warn</code> what it applied so far.</p>
+<p>BigQuery limits how often one table can be updated: about 5 DDL statements or 7 to 8 patches in a
+quick burst, then it starts rejecting them. So a sync sends its first five writes back to back and
+spaces the rest about 2 seconds apart, and the rate-limit errors are retried.</p>
+<h2 id="rolling-out-a-change"><a class="header" href="#rolling-out-a-change">Rolling out a change</a></h2>
+<p>BigQuery applies a schema change at once, but running writers and readers see it later. During a
+rolling update old and new replicas run side by side, so a sync that removes a column before the
+old replicas stop is the same as removing it under them.</p>
+<p>So run <code>.sync()</code> once per release, in two steps, the same as firestore-rs’s index management:</p>
+<ul>
+<li><strong>before the deploy</strong>, the sync without <code>.prune_undeclared()</code>: it adds columns, relaxes REQUIRED,
+sets descriptions, labels, clustering, etc., all of which keep running writers working;</li>
+<li><strong>after the rollout has finished</strong>, the same sync with <code>.prune_undeclared()</code>, which drops what
+the release no longer declares.</li>
+</ul>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span>fn orders(db: &amp;BigQueryDb) -&gt; BigQueryTableSchemaBuilder&lt;'_&gt; {
+    db.fluent()
+        .schema()
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("customer").string(),
+                columns.field("channel").string(),
+            ])
+        })
+}
+
+<span class="boring">async fn example(db: BigQueryDb, rollout_finished: bool) -&gt; BigQueryResult&lt;()&gt; {
+</span>let report = if rollout_finished {
+    orders(&amp;db).prune_undeclared().sync().await?
+} else {
+    orders(&amp;db).sync().await?
+};
+println!("{report}");
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>From a Kubernetes <code>Job</code> or a CI/CD step, run the first one before the deploy step and the second one
+once the new version is serving.</p>
+<p>What writers and readers see after a sync:</p>
+<ul>
+<li><strong>New columns.</strong> New writer connections accept rows with the new column about a second after the
+sync. Open connections get BigQuery’s <code>updated_schema</code> after about 7 seconds, and the library’s
+streaming writer encodes the next batches against it. Nothing is lost on the way.</li>
+<li><strong>Relaxed columns.</strong> An open connection can keep rejecting NULL for a relaxed column after the
+sync: for 2.1 s in one test and still after 5 minutes in another. A fresh connection accepted
+NULL after 0.4 s and 11.5 s. The library’s streaming writer reconnects by itself once it sees
+the relaxed column, so you only need to reconnect other writers before they send NULL.</li>
+<li><strong>Dropped columns.</strong> For about 9 seconds after a drop, an open writer’s values for the column are
+accepted and lost silently. Then the connection fails with <code>Input schema has more fields than BigQuery schema</code>. That is why a drop waits for the second step.</li>
+<li><strong>Readers.</strong> A read with selected fields that names a new or renamed column fails with <code>The following selected fields do not exist in the table schema</code> for about 30 seconds after the sync.
+A read without selected fields sees the change at once.</li>
+</ul>
+<h2 id="renaming-a-column"><a class="header" href="#renaming-a-column">Renaming a column</a></h2>
+<p><code>renamed_from(old_name)</code> declares that a column used to be called <code>old_name</code>:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>db.fluent()
+    .schema()
+    .table(SHOP.table(ORDERS))
+    .columns(|columns| {
+        columns.fields([
+            columns.field("id").int64().required(),
+            columns.field("customer_name").string().renamed_from("customer"),
+        ])
+    })
+    .sync()
+    .await?;
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>When the table has <code>customer</code> and no <code>customer_name</code>, <code>.sync()</code> renames it with <code>RENAME COLUMN</code> and
+the values are kept. Once the table has <code>customer_name</code>, the declaration is a no-op, so it can stay
+in the code for a while.</p>
+<p>For writers a rename is a drop of the old name: a writer still sending <code>customer</code> loses that value
+silently for a few seconds and then fails. <code>renamed_from(..)</code> is not held back by
+<code>.prune_undeclared()</code>, so the rename runs in whichever sync carries it. Be aware not to add
+<code>renamed_from(..)</code> to the declaration the first step runs: add it only to the one used after the
+rollout, once the writers have moved to the new name. Only top-level columns can be renamed.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/schema-sync.rs">here</a>.</p>
+<h2 id="widening-a-column"><a class="header" href="#widening-a-column">Widening a column</a></h2>
+<p>A declared type that is wider than the column’s is withheld with <code>AllowWidening</code> until
+<code>.allow_widening()</code> is set. Then <code>.sync()</code> widens it with <code>ALTER COLUMN SET DATA TYPE</code>, and the
+values are kept. The library takes these pairs as widenings:</p>
+<ul>
+<li>INT64 to NUMERIC or BIGNUMERIC, and NUMERIC to BIGNUMERIC, without parameters;</li>
+<li><code>NUMERIC(p, s)</code> or <code>BIGNUMERIC(p, s)</code> to parameters that fit every value of the old ones, or to
+no parameters;</li>
+<li><code>STRING(n)</code> and <code>BYTES(n)</code> to a longer maximum length, or to no maximum.</li>
+</ul>
+<p>INT64 to NUMERIC and a longer <code>STRING(n)</code> were checked against BigQuery; the other pairs follow
+GoogleSQL’s assignability rules. INT64 to FLOAT64 is not a widening for BigQuery, and every other
+type change is impossible in place. Only top-level columns can be widened.</p>
+<h2 id="removing-what-you-no-longer-declare"><a class="header" href="#removing-what-you-no-longer-declare">Removing what you no longer declare</a></h2>
+<p><code>.prune_undeclared()</code> makes <code>.sync()</code> also remove what the table has and the statement does not
+declare:</p>
+<ul>
+<li>undeclared columns are dropped, with every value in them;</li>
+<li>undeclared labels, clustering and the primary key are removed.</li>
+</ul>
+<p>Be aware this is the one in-place change that loses data. Every dropped column is logged at <code>warn</code>
+and listed in the report’s <code>dropped_data</code>. An undeclared nested field or partitioning cannot be
+removed in place, so with <code>.prune_undeclared()</code> set they make the plan need a recreate.</p>
+<h2 id="recreating-a-table"><a class="header" href="#recreating-a-table">Recreating a table</a></h2>
+<p>When a change is impossible in place, the only way is to drop the table and create it again, losing
+its rows. No data is migrated. A declaration opts in to that with one of:</p>
+<ul>
+<li><code>recreate_if_empty()</code>: recreate only when <code>GetTable</code> reports <code>num_rows == 0</code>, otherwise refuse
+with <code>BigQueryRefusal::NotEmpty</code>;</li>
+<li><code>dangerously_recreate_with_data_loss()</code>: recreate whatever the table holds.</li>
+</ul>
+<p>The last of the two in a chain wins. <code>snapshot_first()</code> adds a <code>CREATE SNAPSHOT TABLE</code> before the
+recreate, as a cheap undo:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const EVENTS: BigQueryTableId = BigQueryTableId::from_static("events");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let report = db
+    .fluent()
+    .schema()
+    .table(SHOP.table(EVENTS))
+    .columns(|columns| {
+        columns.fields([
+            columns.field("id").string().required(),
+            columns.field("happened_at").timestamp(),
+        ])
+    })
+    .partition_by_month("happened_at")
+    .dangerously_recreate_with_data_loss()
+    .snapshot_first()
+    .sync()
+    .await?;
+
+if let Some(snapshot) = &amp;report.snapshot {
+    println!("snapshot taken: {snapshot}");
+}
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>The table is recreated as declared, plus whatever it has undeclared and not pruned. There are two
+ways, and the library picks one by what changes:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th><code>CREATE OR REPLACE TABLE</code></th><th><code>DROP TABLE</code> and <code>CREATE TABLE</code> in one script</th></tr>
+</thead>
+<tbody>
+<tr><td>used when</td><td>the partitioning and clustering stay the same</td><td>the partitioning or clustering changes, which <code>CREATE OR REPLACE</code> cannot do</td></tr>
+<tr><td>rows</td><td>lost</td><td>lost</td></tr>
+<tr><td>columns, key, partitioning, clustering, description, labels, expirations</td><td>as declared or kept</td><td>as declared or kept</td></tr>
+<tr><td>table IAM bindings</td><td>kept</td><td>lost</td></tr>
+<tr><td>row access policies</td><td>lost</td><td>lost</td></tr>
+</tbody>
+</table>
+</div>
+<p>The plan lists the row access policies that will be lost, and <code>BigQueryRecreate</code> names the method.
+The snapshot is named <code>&lt;table&gt;_snapshot_&lt;unix seconds&gt;</code> in the same dataset, and the library never
+deletes it.</p>
+<p>These are the limits of a recreate, as measured against BigQuery, and the library does not hide
+any of them:</p>
+<ul>
+<li><strong><code>num_rows</code> lags Storage Write.</strong> Rows written through committed or pending streams show in
+<code>num_rows</code> after 60 to 70 seconds, and rows on the default stream can take more than 5 minutes.
+So with <code>recreate_if_empty()</code> a table written seconds ago can read as empty and be recreated,
+its rows lost. The row and byte counts in the plan and in <code>dropped_data</code> have the same lag and
+can be lower than what is lost. Use <code>recreate_if_empty()</code> for tables that are new or being
+experimented on, with no writer running.</li>
+<li><strong>The snapshot misses the streaming buffer.</strong> A <code>CREATE SNAPSHOT TABLE</code> does not hold rows still
+in the streaming buffer, which is every row written through Storage Write in roughly the last
+minute or more.</li>
+<li><strong>Nothing guards a recreate.</strong> BigQuery takes no precondition on <code>DROP TABLE</code> or
+<code>CREATE OR REPLACE</code>, so a change made to the table between the plan and the recreate is lost too.</li>
+<li><strong>Writers do not see it.</strong> A writer connection opened before the recreate keeps getting
+successful acks for about 4 to 7 seconds, for rows that are lost. Then the next append waits about
+120 seconds for <code>DeadlineExceeded</code>. New writers can get <code>NotFound</code> (<code>is truncated</code>, <code>is re-created</code>) for up to a few minutes, so the report does not promise that the table is writable
+yet. A writer still using the old column types gets <code>InvalidArgument</code> at once, and that one is not
+retryable.</li>
+<li><strong>Readers do not see it either.</strong> A read session opened before the recreate keeps returning the
+old rows and the old schema. Readers have to start a new session.</li>
+</ul>
+<p>So stop writers and readers before a recreate. A dangerous recreate is logged at <code>warn</code> with the row
+count it read.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/main/examples/recreate-table.rs">here</a>.</p>
+<h2 id="logs-and-spans"><a class="header" href="#logs-and-spans">Logs and spans</a></h2>
+<p>Every <code>.plan()</code> and <code>.sync()</code> runs in a <code>BigQuery schema</code> span with the table in the
+<code>/bigquery/table</code> field. A created table and every applied write are logged at <code>info</code>, and
+the data-losing steps at <code>warn</code>: a dropped column, a dangerous recreate and a sync that failed part
+way, with the report of what it had applied.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="cdc.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="admin.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="cdc.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="admin.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-609e4cb8.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
