@@ -71,7 +71,7 @@ and logs a warning.
 ## Filtering
 
 `.filter(..)` takes a closure that receives a `BigQueryFilterBuilder` and returns an
-`Option<BigQueryFilter>`, the same shape as in firestore-rs:
+`Option<BigQueryFilter>`:
 
 - `f.field(..)` with `eq`, `neq`, `lt`, `le`, `gt`, `ge`, `is_null`, `is_not_null`, `is_in` and
   `is_not_in`;

@@ -5,9 +5,7 @@ when the code needs a new column. The library supports declaring a table's schem
 in Rust instead, next to the structs that read and write it, and making the table match with one
 explicit call.
 
-It works the same way as the index management in
-[firestore-rs](https://github.com/abdolence/firestore-rs): a declaration, a read-only `.plan()`
-and a `.sync()` that applies it.
+It has three parts: a declaration, a read-only `.plan()` and a `.sync()` that applies it.
 
 ## Declaring a table
 
@@ -259,7 +257,7 @@ BigQuery applies a schema change at once, but running writers and readers see it
 rolling update old and new replicas run side by side, so a sync that removes a column before the
 old replicas stop is the same as removing it under them.
 
-So run `.sync()` once per release, in two steps, the same as firestore-rs's index management:
+So run `.sync()` once per release, in two steps:
 
 - **before the deploy**, the sync without `.prune_undeclared()`: it adds columns, relaxes REQUIRED,
   sets descriptions, labels, clustering, etc., all of which keep running writers working;
