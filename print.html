@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-4976102e.js";
+            window.path_to_searchindex_js = "searchindex-c34ccac0.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-afc68995.js"></script>
@@ -955,6 +955,8 @@ still running then is polled until it completes;</li>
 <li><code>.request_id(..)</code>: the idempotency key of the <code>Query</code> call, see <a href="#dml-and-ddl">DML</a>;</li>
 <li><code>.inline_rows_limit(..)</code> and <code>.read_options(..)</code>: how the rows come back, see
 <a href="#where-the-rows-come-from">Where the rows come from</a>.</li>
+<li><code>.destination_table(..)</code>: a table of your own for the result, see
+<a href="#destination-tables">Destination tables</a>.</li>
 </ul>
 <pre><code class="language-rust no_run">use bigquery::*;
 use serde::Deserialize;
@@ -1068,6 +1070,8 @@ is a <code>JobError</code> with BigQuery’s reason and messages.</p>
 <h2 id="dry-run"><a class="header" href="#dry-run">Dry run</a></h2>
 <p><code>dry_run()</code> validates the statement and returns the bytes it would process and the schema of its
 result, without running it. It never creates a job and bills nothing.</p>
+<p>With a <a href="#destination-tables">destination table</a> the dry run is sent as a dry-run job with the
+same destination, so BigQuery checks that part too. It still creates no job and writes nothing.</p>
 <pre><code class="language-rust no_run">use bigquery::*;
 
 <span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
@@ -1164,6 +1168,8 @@ a query that outlives the first <code>Query</code> call.</p>
 in that response;</li>
 <li>a larger result, or one whose job outlived the first call, is read from the job’s destination
 table through the Storage Read API, with several streams in parallel;</li>
+<li>a query with a <a href="#destination-tables">destination table</a> is always read from that table
+through the Storage Read API;</li>
 <li>a statement without rows, such as DML or DDL, reads nothing.</li>
 </ul>
 <p>Both paths use the same Arrow decoder as table reads, so a type maps the same way in a query and
@@ -1194,6 +1200,62 @@ Storage Read. <code>.read_options(..)</code> sets how that read opens its sessio
 </span><span class="boring">}</span></code></pre>
 <p>By default the read asks for as many streams as the machine has parallelism, with LZ4 compression,
 and BigQuery decides how many it actually gives.</p>
+<h2 id="destination-tables"><a class="header" href="#destination-tables">Destination tables</a></h2>
+<p>BigQuery writes every query result into a temporary table, and you can name a table of your own
+instead. The table is a setting of the job, so the query stays a plain <code>SELECT</code>:</p>
+<ul>
+<li><code>.destination_table(table)</code>: the job writes the result into <code>table</code>, and fails if the table
+already holds rows. This is BigQuery’s own default, <code>WRITE_EMPTY</code>, so nothing is overwritten
+unless you ask for it;</li>
+<li><code>.append_to_destination_table(table)</code>: the result is added after the rows the table holds
+(<code>WRITE_APPEND</code>);</li>
+<li><code>.dangerously_overwrite_destination_table(table)</code>: the result replaces every row of the table
+and its schema (<code>WRITE_TRUNCATE</code>).</li>
+</ul>
+<p>BigQuery creates the table when it does not exist, with the schema of the result. Each write
+applies only when the job succeeds, as one update of the table.</p>
+<pre><code class="language-rust no_run">use bigquery::*;
+use serde::Deserialize;
+
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const CITY_TOTALS: BigQueryTableId = BigQueryTableId::from_static("city_totals");
+
+#[derive(Debug, Deserialize)]
+struct CityTotal {
+    city: String,
+    total: f64,
+}
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let totals: Vec&lt;CityTotal&gt; = db
+    .fluent()
+    .query(
+        "SELECT c.city, SUM(o.total) AS total FROM shop.orders o \
+         JOIN shop.customers c ON c.id = o.customer_id GROUP BY c.city",
+    )
+    .destination_table(SHOP.table(CITY_TOTALS))
+    .obj::&lt;CityTotal&gt;()
+    .query()
+    .await?;
+<span class="boring">let _ = totals;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Every terminal works with a destination. The rows are read back from the table through the
+Storage Read API, so after an append they are the whole table’s, the rows it held before
+included. <code>execute()</code> writes the table and reads nothing back.</p>
+<p>Be aware a table keeps no row order, so the rows come back in no particular order, even with
+<code>ORDER BY</code> in the query and even for a small result, which never comes inline here. Sort them on
+your side if the order matters.</p>
+<p>A write into a table that already holds rows, with <code>.destination_table(..)</code>, fails with a
+<code>DataConflictError</code>, BigQuery’s <code>AlreadyExists</code> for that table.</p>
+<p>The query always runs as a job, inserted with <code>InsertJob</code>, since the <code>Query</code> call has no
+destination field. So <code>.job_creation_required()</code>, <code>.inline_rows_limit(..)</code> and <code>.request_id(..)</code>
+do not apply: the job’s own ID, new for each terminal call, makes a retried <code>InsertJob</code> safe. The
+query cache does not answer a query with a destination table either.</p>
+<p>Be aware the table is not temporary: it stays until you delete it or it expires, and its storage
+and the Storage Read of it are billed, see
+<a href="#billing-hints">Billing hints</a>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/query-destination-table.rs">here</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="table-reads-or-queries"><a class="header" href="#table-reads-or-queries">Table reads or queries</a></h1>
 <p>The library reads data in two ways:</p>
@@ -1328,9 +1390,9 @@ while let Some(order) = orders.next().await {
 the number of read streams and the compression, as for a table read.</p>
 <p>BigQuery limits how large a query result can be in its temporary table, see the maximum response
 size in <a href="https://cloud.google.com/bigquery/quotas#query_jobs">Quotas and limits</a>. For a result
-above it, write the result into a table of your own with <code>CREATE TABLE ... AS SELECT</code>, read it
-with a table read, and delete it. Give the table an expiration, so it does not stay behind if
-your process stops before the delete:</p>
+above it, write the result into a table of your own with <code>.destination_table(..)</code>, see
+<a href="#destination-tables">Destination tables</a>. The query is the same, and the rows are
+read back from that table through the same Storage Read path:</p>
 <pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
 </span><span class="boring">use futures::StreamExt;
 </span><span class="boring">use serde::Deserialize;
@@ -1340,23 +1402,17 @@ your process stops before the delete:</p>
 </span><span class="boring">    total: f64,
 </span><span class="boring">    city: String,
 </span><span class="boring">}
-</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
-</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>db.fluent()
+</span>const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let mut orders = db
+    .fluent()
     .query(
-        "CREATE TABLE shop.orders_export \
-         OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)) AS \
-         SELECT o.id, o.total, c.city FROM shop.orders o \
+        "SELECT o.id, o.total, c.city FROM shop.orders o \
          JOIN shop.customers c ON c.id = o.customer_id",
     )
-    .execute()
-    .await?;
-
-let mut orders = db
-    .fluent()
-    .select()
-    .from(SHOP.table(ORDERS_EXPORT))
+    .destination_table(SHOP.table(ORDERS_EXPORT))
     .obj::&lt;OrderWithCity&gt;()
     .stream_query()
     .await?;
@@ -1367,8 +1423,12 @@ while let Some(order) = orders.next().await {
 db.fluent().schema().table(SHOP.table(ORDERS_EXPORT)).delete().await?;
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>That table is not temporary, so its storage is billed while it exists, and the table read is
-billed as Storage Read, see <a href="#billing-hints">Billing hints</a>.</p>
+<p>The default refuses to write into a table that already holds rows, so a second run fails until
+the table is deleted. Use <code>.dangerously_overwrite_destination_table(..)</code> to replace it instead.
+Give the dataset a default table expiration, so the table does not stay behind if your process
+stops before the delete.</p>
+<p>That table is a table of your own, so its storage is billed while it exists, and reading it back
+is billed as Storage Read, see <a href="#billing-hints">Billing hints</a>.</p>
 <p>Be aware not to splice values into SQL text in either path. Use <code>.filter(..)</code> instead of
 <code>.filter_sql(..)</code>, and <code>.param(..)</code> instead of <code>format!</code> in the query text.</p>
 <div style="break-before: page; page-break-before: always;"></div>
