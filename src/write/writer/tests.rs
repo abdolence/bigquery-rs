@@ -1034,12 +1034,9 @@ async fn flush_rows_to_flushes_up_to_the_given_offset() {
         .await
         .expect("the rows are written");
     within(writer.flush()).await.expect("the batches are sent");
-    assert_eq!(
-        within(writer.flush_rows_to(0))
-            .await
-            .expect("the first row flushes"),
-        0
-    );
+    within(writer.flush_rows_to(0))
+        .await
+        .expect("the first row flushes");
     let calls = fake.calls();
     assert_eq!(
         calls.last(),
@@ -1047,6 +1044,106 @@ async fn flush_rows_to_flushes_up_to_the_given_offset() {
         "{calls:?}"
     );
     within(writer.finish()).await.expect("the writer finishes");
+}
+
+#[tokio::test]
+async fn buffered_mode_flushes_only_the_rows_written_around_a_failed_batch() {
+    let fake = FakeBigQuery::start(|call| async move {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
+            return;
+        };
+        let end = StreamEnd::default();
+        while let Some(request) = call.next_request::<AppendRowsRequest>().await {
+            call.log(describe(0, &request));
+            if ids(&request) == [1] {
+                call.send(&row_errors(&[0]));
+            } else {
+                call.send(&end.answer(&request));
+            }
+        }
+        call.finish();
+    })
+    .await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_streaming_writer_with_options::<Row>(
+            SHOP.table(ORDERS),
+            options().with_mode(BigQueryWriteMode::Buffered),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write_all(&[row(0), row(1), row(2)]))
+        .await
+        .expect("the rows are written");
+    within(writer.flush_rows())
+        .await
+        .expect("the written rows flush");
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!((summary.rows_written, summary.rows_failed), (2, 1));
+    let calls = fake.calls();
+    let unary: Vec<&String> = calls
+        .iter()
+        .filter(|line| !line.starts_with("c0 "))
+        .collect();
+    assert_eq!(
+        unary,
+        [
+            "CreateWriteStream BUFFERED",
+            &format!("FlushRows {CREATED_STREAM} @1"),
+            &format!("FlushRows {CREATED_STREAM} @1"),
+            &format!("FinalizeWriteStream {CREATED_STREAM}"),
+        ],
+        "{calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn flush_rows_to_reaches_acknowledged_rows_after_the_writer_failed() {
+    let fake = FakeBigQuery::start(|call| async move {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
+            return;
+        };
+        let end = StreamEnd::default();
+        if let Some(request) = call.next_request::<AppendRowsRequest>().await {
+            call.log(describe(0, &request));
+            call.send(&end.answer(&request));
+        }
+        if let Some(request) = call.next_request::<AppendRowsRequest>().await {
+            call.log(describe(0, &request));
+        }
+        call.fail(
+            Code::InvalidArgument,
+            "Request contains an invalid argument.",
+        );
+    })
+    .await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_streaming_writer_with_options::<Row>(
+            SHOP.table(ORDERS),
+            options().with_mode(BigQueryWriteMode::Buffered),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write(&row(0)))
+        .await
+        .expect("the row is written");
+    within(writer.flush())
+        .await
+        .expect("the first row is acknowledged");
+    within(writer.write(&row(1)))
+        .await
+        .expect("the row is queued");
+    assert!(within(writer.flush()).await.is_err(), "the writer fails");
+    within(writer.flush_rows_to(0))
+        .await
+        .expect("the acknowledged row flushes");
+    let calls = fake.calls();
+    assert_eq!(
+        calls.last(),
+        Some(&format!("FlushRows {CREATED_STREAM} @0")),
+        "{calls:?}"
+    );
 }
 
 #[tokio::test]

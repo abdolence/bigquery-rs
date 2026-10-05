@@ -761,8 +761,8 @@ impl ConnectionTask {
                 finalized_rows: None,
             }),
             BigQueryWriteMode::Committed | BigQueryWriteMode::Buffered => {
-                // A buffered stream drops the rows past its last flush when finalized, so
-                // finishing makes every written row readable first.
+                // Finalizing does not flush, and only flushed rows of a buffered stream are
+                // readable, so finishing flushes every written row first.
                 if self.settings.mode == BigQueryWriteMode::Buffered && self.written_offset > 0 {
                     self.settings
                         .db

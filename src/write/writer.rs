@@ -499,10 +499,10 @@ impl WriterCore {
         self.flush_rows_to(written - 1).await.map(Some)
     }
 
-    /// Flushes a buffered stream up to and including `offset`.
+    /// Flushes a buffered stream up to and including `offset`, whether or not the writer
+    /// failed.
     pub(crate) async fn flush_rows_to(&mut self, offset: i64) -> BigQueryResult<i64> {
         self.check_mode(BigQueryWriteMode::Buffered, "flush_rows_to()")?;
-        self.check_failed()?;
         self.db.flush_rows(&self.span, &self.stream, offset).await
     }
 
@@ -601,7 +601,10 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
         }
         Ok(())
     }
+}
 
+/// The stream's side of the writer, which does not depend on how rows are encoded.
+impl<T> BigQueryStreamingWriter<T> {
     /// Sends the open batch and waits until every batch written so far has an outcome.
     ///
     /// # Errors
@@ -659,14 +662,17 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
         self.core.flush_rows().await
     }
 
-    /// Buffered mode only: flushes the stream up to and including `offset`, such as the
-    /// [`offset`](BigQueryWriteResponse::offset) of an acknowledged batch's last row, and
-    /// returns the offset BigQuery reports as flushed. It does not wait for the batches in
-    /// flight; BigQuery checks the offset.
+    /// Buffered mode only: flushes the stream up to and including `offset`, and returns the
+    /// offset BigQuery reports as flushed. The last row of an acknowledged batch is at
+    /// [`offset`](BigQueryWriteResponse::offset) `+ row_count - 1` of its response. It does
+    /// not wait for the batches in flight, and BigQuery checks the offset.
+    ///
+    /// It needs no `AppendRows` connection, so it works after the writer failed for good too:
+    /// flushing to the last acknowledged row then makes every acknowledged row readable.
     ///
     /// # Errors
-    /// [`BigQueryError::InvalidParametersError`] for the field `mode` in any other mode, the
-    /// writer's failure if it failed for good, and the `FlushRows` failure.
+    /// [`BigQueryError::InvalidParametersError`] for the field `mode` in any other mode, and
+    /// the `FlushRows` failure.
     pub async fn flush_rows_to(&mut self, offset: i64) -> BigQueryResult<i64> {
         self.core.flush_rows_to(offset).await
     }

@@ -273,9 +273,10 @@ checkpoint:
 
 - `flush_rows()` sends the open batch, waits for every acknowledgement and flushes the stream up
   to its last row. It returns the flushed offset, or `None` while the stream has no rows;
-- `flush_rows_to(offset)` flushes up to and including `offset`, the stream offset of a row. Every
-  `BigQueryWriteResponse` has the `offset` of its batch's first row and its `row_count`. It does
-  not wait for the batches in flight, and BigQuery checks the offset.
+- `flush_rows_to(offset)` flushes up to and including `offset`, the stream offset of a row. The
+  last row of an acknowledged batch is at `offset + row_count - 1` of its
+  `BigQueryWriteResponse`. It does not wait for the batches in flight, and BigQuery checks the
+  offset.
 
 ```rust,no_run
 # use bigquery::*;
@@ -310,9 +311,12 @@ println!("{} rows written", summary.rows_written);
 ```
 
 `finish()` flushes the rest before it finalizes the stream, so every row you wrote becomes
-readable. BigQuery drops the rows past the last flush when a buffered stream is finalized without
-one. If you need the unflushed rows dropped, drop the writer instead of finishing it; it logs a
-warning and the stream is never finalized.
+readable. Finalizing alone does not flush, and only flushed rows are readable. If you need the
+unflushed rows to stay unread, drop the writer instead of finishing it; it logs a warning and the
+stream is never finalized.
+
+After the writer failed for good, `flush_rows_to(..)` still works, since it does not need the
+connection. Flush to the last acknowledged row to make every acknowledged row readable.
 
 `.buffered()` on an insert writes through a buffered stream and flushes once at the end. Unlike
 `.atomic()`, a failed batch does not hold back the others.
