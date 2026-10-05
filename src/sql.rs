@@ -15,6 +15,3 @@ pub(crate) use literal::*;
 
 #[cfg(test)]
 pub(crate) mod tests;
-
-#[cfg(test)]
-mod live_tests;
