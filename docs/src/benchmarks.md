@@ -215,8 +215,17 @@ From Arrow record batches, from the rerun:
 
 Both clients get the same 40 batches of 25,000 rows, built before the timer starts, so the times
 are the IPC encoding and the appends. Both sent the same bytes, 40 requests each. The library was
-5% slower here, and 6% slower in the full run's contended scenario too (38.958 s against
-36.711 s), so it has no advantage for Arrow writes. I didn't find why.
+5% slower here and 6% slower in the full run (38.958 s against 36.711 s), but this is within the
+noise. Two later sessions on 0.6.0 gave 37.907 s against 35.840 s (10 runs each) and 37.446 s
+against 39.607 s (6 runs each), so the order flips. Over all 26 and 25 runs the medians are
+37.58 s and 36.36 s, and a rank test does not tell the two clients apart (z = 1.07).
+
+Both writes are limited by the same thing: how fast BigQuery takes in one `AppendRows` stream.
+From here it is about 6 MB/s, one 5.5 MB request acknowledged every 0.9 s or so, with the same
+cadence in both clients. The HTTP/2 window is 1 MiB and TCP had only about 64 KB in flight, so
+neither the client nor the upload of the connection is the limit. Two inserts in parallel, each
+with half of the batches, wrote the same 1M rows in 20.1-21.6 s over three runs. If you need more
+throughput, split the batches over several writers.
 
 ## Decode cost
 
