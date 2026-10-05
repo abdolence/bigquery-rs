@@ -81,11 +81,6 @@ Checked against `google-cloud-bigquery` 0.18.0 and `google-cloud-bigquery-v2` 1.
 - It uses the REST API for v2, which is GA. The v2 API over gRPC this crate uses works for every
   call the library makes, but Google does not document it and it is pre-GA, so be aware it can
   change without notice;
-- It has a documented client for every v2 service, including models, routines, row access
-  policies and projects, and every field of the query request (sessions, external tables,
-  encryption, slot limits, etc.). This crate has its own API for datasets, tables, jobs and the
-  common query settings, and for the rest only the raw gRPC clients from gcloud-sdk, such as
-  `model_client()` and `routine_client()`;
 - Its writer takes Arrow record batches and supports buffered streams. This crate writes your
   structures as protobuf, through the default, committed and pending streams;
 - It has stub traits to mock its clients in your tests. This crate has no public mocks.
