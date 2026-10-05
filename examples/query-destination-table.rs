@@ -138,9 +138,11 @@ async fn create_tables(
     Ok(())
 }
 
-fn print_city_totals(heading: &str, city_totals: &[CityTotal]) {
+/// Prints the rows sorted, since rows read back from a table come in no particular order.
+fn print_city_totals(heading: &str, mut city_totals: Vec<CityTotal>) {
+    city_totals.sort_by(|left, right| (&left.city, left.orders).cmp(&(&right.city, right.orders)));
     println!("{heading}:");
-    for city_total in city_totals {
+    for city_total in &city_totals {
         println!(
             "  {}: {} orders, {:.2} in total",
             city_total.city, city_total.orders, city_total.total
@@ -157,7 +159,7 @@ async fn run_queries(
     let city_totals_sql = format!(
         "SELECT c.city, COUNT(*) AS orders, SUM(o.total) AS total \
          FROM `{ORDERS}` AS o JOIN `{CUSTOMERS}` AS c ON c.id = o.customer_id \
-         WHERE o.total >= @minimum GROUP BY c.city ORDER BY c.city"
+         WHERE o.total >= @minimum GROUP BY c.city"
     );
 
     // The result goes into a table of our own, and the rows are read back from it
@@ -172,7 +174,7 @@ async fn run_queries(
         .await?;
     print_city_totals(
         "City totals written into the destination table",
-        &city_totals,
+        city_totals,
     );
 
     // The table holds rows now, so the default refuses to write into it again
@@ -201,7 +203,7 @@ async fn run_queries(
         .obj()
         .query()
         .await?;
-    print_city_totals("The table after appending the totals over 100", &appended);
+    print_city_totals("The table after appending the totals over 100", appended);
 
     // Overwriting replaces every row the table held
     let overwritten: Vec<CityTotal> = db
@@ -215,7 +217,7 @@ async fn run_queries(
         .await?;
     print_city_totals(
         "The table after overwriting it with the totals over 200",
-        &overwritten,
+        overwritten,
     );
 
     Ok(())

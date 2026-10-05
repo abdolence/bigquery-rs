@@ -624,6 +624,10 @@ Every terminal works with a destination. The rows are read back from the table t
 Storage Read API, so after an append they are the whole table's, the rows it held before
 included. `execute()` writes the table and reads nothing back.
 
+Be aware a table keeps no row order, so the rows come back in no particular order, even with
+`ORDER BY` in the query and even for a small result, which never comes inline here. Sort them on
+your side if the order matters.
+
 A write into a table that already holds rows, with `.destination_table(..)`, fails with a
 `DataConflictError`, BigQuery's `AlreadyExists` for that table.
 

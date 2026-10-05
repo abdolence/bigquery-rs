@@ -47,8 +47,11 @@ impl BigQueryDb {
         F: Fn(Request<R>) -> Fut,
         Fut: Future<Output = Result<Response<T>, Status>>,
     {
+        // Boxed so that each caller's future holds a pointer to the attempt rather than the
+        // attempt itself: a v2 request and response are kilobytes each, and inline they add up
+        // to more than a debug build's test thread has.
         retry(span, action, self.inner.options.max_retries, || {
-            send(new_request(message.clone(), metadata))
+            Box::pin(send(new_request(message.clone(), metadata)))
         })
         .await
         .map(Response::into_inner)

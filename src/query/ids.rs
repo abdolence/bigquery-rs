@@ -2,6 +2,7 @@
 
 use crate::errors::BigQueryError;
 use crate::BigQueryResult;
+use rand::RngExt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
@@ -52,6 +53,12 @@ impl BigQueryJobId {
     /// A job ID BigQuery returned. BigQuery made it, so it is not checked again.
     pub(crate) fn reported(id: String) -> Self {
         Self(id)
+    }
+
+    /// A fresh ID for a job the crate inserts: `bigquery_rs_` and 128 random bits in hex. The
+    /// ID is what makes a retried `InsertJob` safe, so every attempt repeats it.
+    pub(crate) fn random() -> Self {
+        Self(format!("bigquery_rs_{:032x}", rand::rng().random::<u128>()))
     }
 
     /// The ID.

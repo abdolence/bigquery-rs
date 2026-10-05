@@ -17,13 +17,12 @@ use crate::errors::BigQueryError;
 use crate::query::params::parameter_mode;
 use crate::read::ArrowIpcDecoder;
 use crate::{
-    BigQueryDb, BigQueryDryRunResult, BigQueryJobCreation, BigQueryJobRef, BigQueryJobStats,
-    BigQueryLocation, BigQueryQueryDestination, BigQueryQueryId, BigQueryQueryOutcome,
-    BigQueryQueryParams, BigQueryReadCompression, BigQueryResult, BigQueryStatementType,
-    BigQueryTableRef, BigQueryTableSchema,
+    BigQueryDb, BigQueryDryRunResult, BigQueryJobCreation, BigQueryJobId, BigQueryJobRef,
+    BigQueryJobStats, BigQueryLocation, BigQueryQueryDestination, BigQueryQueryId,
+    BigQueryQueryOutcome, BigQueryQueryParams, BigQueryReadCompression, BigQueryResult,
+    BigQueryStatementType, BigQueryTableRef, BigQueryTableSchema,
 };
 use arrow_array::RecordBatch;
-use futures::future::BoxFuture;
 use gcloud_sdk::google::cloud::bigquery::v2::arrow_serialization_options::CompressionCodec;
 use gcloud_sdk::google::cloud::bigquery::v2::query_request::{
     JobCreationMode, QueryResultsFormat, ResultsFormatSerializationOptions,
@@ -216,12 +215,6 @@ fn random_request_id() -> String {
     format!("{:032x}", rand::rng().random::<u128>())
 }
 
-/// A fresh ID for a job the crate inserts, which is also what makes its `InsertJob` safe to
-/// retry.
-fn random_job_id() -> String {
-    format!("bigquery_rs_{}", random_request_id())
-}
-
 impl BigQueryQueryParams {
     /// The dataset unqualified table names resolve in, with `project_id` for an unset project.
     fn default_dataset_reference(&self, project_id: &str) -> Option<DatasetReference> {
@@ -269,7 +262,7 @@ impl BigQueryDb {
             job: Some(Job {
                 job_reference: Some(JobReference {
                     project_id,
-                    job_id: random_job_id(),
+                    job_id: BigQueryJobId::random().to_string(),
                     location: self.query_location(params),
                 }),
                 configuration: Some(JobConfiguration {
@@ -306,17 +299,14 @@ impl BigQueryDb {
             let mut client = self.job_client();
             async move {
                 match client.insert_job(r).await {
-                    Err(status)
-                        if retry
-                            && status.code() == Code::AlreadyExists
-                            && sent
-                                .as_ref()
-                                .is_some_and(|job| status.message().contains(&job.job_id)) =>
-                    {
-                        Ok(Response::new(Job {
-                            job_reference: sent,
-                            ..Default::default()
-                        }))
+                    Err(status) if retry && status.code() == Code::AlreadyExists => {
+                        match sent.and_then(|job| earlier_attempt_job(job, status.message())) {
+                            Some(job) => Ok(Response::new(Job {
+                                job_reference: Some(job),
+                                ..Default::default()
+                            })),
+                            None => Err(status),
+                        }
                     }
                     other => other,
                 }
@@ -326,44 +316,22 @@ impl BigQueryDb {
     }
 
     /// Inserts the job of a query into `destination` and waits for it to finish.
-    ///
-    /// Boxed here rather than at the call: a debug build keeps a stack slot for the whole
-    /// future in every caller's frame, which overflows a test thread's stack on queries that
-    /// never set a destination.
-    fn run_query_job<'a>(
-        &'a self,
-        params: &'a BigQueryQueryParams,
-        destination: &'a BigQueryQueryDestination,
-        span: &'a Span,
-    ) -> BoxFuture<'a, BigQueryResult<(BigQueryJobStats, BigQueryJobRef, Job)>> {
-        Box::pin(async move {
-            let inserted = self
-                .insert_query_job(params, destination, false, span)
-                .await?;
-            let mut stats = BigQueryJobStats {
-                job: inserted.job_reference.map(BigQueryJobRef::from),
-                ..Default::default()
-            };
-            stats.record(span);
-            let (job, details) = self.finish_job(&mut stats, true, params, span).await?;
-            Ok((stats, job, details))
-        })
-    }
-
-    /// Sends the job of a query into `destination` as a dry run, boxed for the reason
-    /// [`run_query_job`](Self::run_query_job) is.
-    fn dry_run_query_job<'a>(
-        &'a self,
-        params: &'a BigQueryQueryParams,
-        destination: &'a BigQueryQueryDestination,
-        span: &'a Span,
-    ) -> BoxFuture<'a, BigQueryResult<BigQueryDryRunResult>> {
-        Box::pin(async move {
-            let job = self
-                .insert_query_job(params, destination, true, span)
-                .await?;
-            BigQueryDryRunResult::try_from(&job)
-        })
+    async fn run_query_job(
+        &self,
+        params: &BigQueryQueryParams,
+        destination: &BigQueryQueryDestination,
+        span: &Span,
+    ) -> BigQueryResult<(BigQueryJobStats, BigQueryJobRef, Job)> {
+        let inserted = self
+            .insert_query_job(params, destination, false, span)
+            .await?;
+        let mut stats = BigQueryJobStats {
+            job: inserted.job_reference.map(BigQueryJobRef::from),
+            ..Default::default()
+        };
+        stats.record(span);
+        let (job, details) = self.finish_job(&mut stats, true, params, span).await?;
+        Ok((stats, job, details))
     }
 
     fn query_request(
@@ -563,7 +531,10 @@ impl BigQueryDb {
         span: &Span,
     ) -> BigQueryResult<BigQueryDryRunResult> {
         if let Some(destination) = &params.destination {
-            return self.dry_run_query_job(params, destination, span).await;
+            let job = self
+                .insert_query_job(params, destination, true, span)
+                .await?;
+            return BigQueryDryRunResult::try_from(&job);
         }
         let response = self.post_query(params, Purpose::DryRun, span).await?;
         Ok(BigQueryDryRunResult {
@@ -575,6 +546,26 @@ impl BigQueryDb {
                 .transpose()?,
         })
     }
+}
+
+/// The job an earlier attempt of a retried `InsertJob` created, when `already_exists`, the
+/// message of an `AlreadyExists` status, names `sent`'s job ID as `project:LOCATION.job_id`.
+/// The location is taken from the message, since `sent` has none unless the caller set one,
+/// and the later job calls need it for a job outside the `US` and `EU` multi-regions.
+fn earlier_attempt_job(sent: JobReference, already_exists: &str) -> Option<JobReference> {
+    let qualified_id = format!(".{}", sent.job_id);
+    let named = already_exists
+        .split_whitespace()
+        .find(|word| word.ends_with(&qualified_id))?;
+    let location = named
+        .strip_suffix(&qualified_id)?
+        .rsplit_once(':')
+        .map(|(_, location)| location.to_string())
+        .filter(|location| !location.is_empty());
+    Some(JobReference {
+        location: location.or(sent.location),
+        ..sent
+    })
 }
 
 /// What a dry-run job reports: the bytes and the result schema of its query statistics, else

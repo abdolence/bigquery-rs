@@ -1464,11 +1464,10 @@ async fn destination_write_and_job_settings_reach_the_job_configuration() -> Big
             let mut labels: Vec<_> = configuration.labels.into_iter().collect();
             labels.sort();
             call.log(format!(
-                "project={} job_id_len={} location={:?} params={} mode={} dataset={:?} \
+                "project={} location={:?} params={} mode={} dataset={:?} \
                  labels={labels:?} max_bytes={:?} cache={:?} legacy={:?} job_timeout_ms={:?} \
                  dry_run={:?}",
                 request.project_id,
-                reference.job_id.len(),
                 reference.location,
                 query.query_parameters.len(),
                 query.parameter_mode,
@@ -1521,16 +1520,16 @@ async fn destination_write_and_job_settings_reach_the_job_configuration() -> Big
         configurations,
         [
             "InsertJob SELECT @a into fake-project.shop.orders_export WRITE_EMPTY CREATE_IF_NEEDED",
-            "project=fake-project job_id_len=44 location=Some(\"EU\") params=1 mode=NAMED \
+            "project=fake-project location=Some(\"EU\") params=1 mode=NAMED \
              dataset=Some(\"fake-project.shop\") labels=[(\"team\", \"data\")] \
              max_bytes=Some(10) cache=Some(false) legacy=Some(false) \
              job_timeout_ms=Some(60000) dry_run=Some(false)",
             "InsertJob SELECT more into fake-project.shop.orders_export WRITE_APPEND CREATE_IF_NEEDED",
-            "project=fake-project job_id_len=44 location=None params=0 mode= dataset=None \
+            "project=fake-project location=None params=0 mode= dataset=None \
              labels=[] max_bytes=None cache=None legacy=Some(false) job_timeout_ms=None \
              dry_run=Some(false)",
             "InsertJob SELECT fresh into other.shop.orders_export WRITE_TRUNCATE CREATE_IF_NEEDED",
-            "project=fake-project job_id_len=44 location=None params=0 mode= dataset=None \
+            "project=fake-project location=None params=0 mode= dataset=None \
              labels=[] max_bytes=None cache=None legacy=Some(false) job_timeout_ms=None \
              dry_run=Some(false)",
         ]
@@ -1559,7 +1558,7 @@ async fn retried_insert_job_keeps_its_job_id_and_takes_the_job_it_created() -> B
                 0 => call.fail(Code::Unavailable, "backend went away"),
                 _ => call.fail(
                     Code::AlreadyExists,
-                    &format!("Already Exists: Job fake-project:US.{job_id}"),
+                    &format!("Already Exists: Job fake-project:europe-north2.{job_id}"),
                 ),
             }
         }
@@ -1581,11 +1580,55 @@ async fn retried_insert_job_keeps_its_job_id_and_takes_the_job_it_created() -> B
     assert_eq!(job_ids[0], job_ids[1], "a retry repeats the job ID");
     let sent_job_id = job_ids[0].trim_start_matches("job_id=");
     assert_eq!(
-        outcome.job.map(|job| job.job_id),
-        Some(BigQueryJobId::new(sent_job_id)?),
-        "the job the first attempt created is the query's job"
+        outcome.job,
+        Some(BigQueryJobRef {
+            project_id: "fake-project".into(),
+            job_id: BigQueryJobId::new(sent_job_id)?,
+            location: Some(BigQueryLocation::from_static("europe-north2")),
+        }),
+        "the job the first attempt created is the query's job, in the location BigQuery named"
+    );
+    assert!(
+        calls.contains(&format!(
+            "GetQueryResults {sent_job_id} at europe-north2 max_results=Some(0)"
+        )),
+        "the job is waited for in its location: {calls:?}"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn already_existing_other_job_on_a_retry_stays_an_error() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let table = Arc::new(FakeReadTable::new(vec![vec![people(&[1])]]));
+    let fake = FakeBigQuery::start(move |mut call: FakeCall| {
+        let (attempts, table) = (attempts.clone(), table.clone());
+        async move {
+            if call.method() != "InsertJob" {
+                return destination_job(call, &table, 1).await;
+            }
+            call.insert_job_request().await;
+            match attempts.fetch_add(1, Ordering::SeqCst) {
+                0 => call.fail(Code::Unavailable, "backend went away"),
+                _ => call.fail(
+                    Code::AlreadyExists,
+                    "Already Exists: Job fake-project:US.bigquery_rs_someone_else",
+                ),
+            }
+        }
+    })
+    .await;
+    let result = fake
+        .db
+        .fluent()
+        .query("SELECT once")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .execute()
+        .await;
+    assert!(
+        matches!(result, Err(BigQueryError::DataConflictError(_))),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]
