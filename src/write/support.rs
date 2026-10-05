@@ -6,6 +6,7 @@ use crate::{
     BigQueryChange, BigQueryDb, BigQueryInsertParams, BigQueryResult, BigQueryWriteSummary,
     BigQueryWriteSupport,
 };
+use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use serde::Serialize;
 
@@ -38,6 +39,26 @@ impl BigQueryWriteSupport for BigQueryDb {
                 .write_with(|encoder, out| encoder.encode(&row, out))
                 .await
             {
+                core.abandon();
+                return Err(err);
+            }
+        }
+        (core.finish(FinishKind::Close).await?).into_result()
+    }
+
+    async fn insert_record_batches<I>(
+        &self,
+        params: BigQueryInsertParams,
+        batches: I,
+    ) -> BigQueryResult<BigQueryWriteSummary>
+    where
+        I: IntoIterator<Item = RecordBatch> + Send,
+        I::IntoIter: Send,
+    {
+        let (mut core, _responses) =
+            WriterCore::open(self, params.table, params.options, false).await?;
+        for batch in batches {
+            if let Err(err) = core.write_record_batch(&batch).await {
                 core.abandon();
                 return Err(err);
             }

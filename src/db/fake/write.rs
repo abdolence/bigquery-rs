@@ -2,6 +2,8 @@
 //! `CreateWriteStream`, `FlushRows`, `FinalizeWriteStream` and `BatchCommitWriteStreams`.
 
 use super::FakeCall;
+use crate::read::ArrowIpcDecoder;
+use arrow_array::{Array, Int64Array, RecordBatch};
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_request::Rows;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_response::{
     AppendResult, Response,
@@ -155,6 +157,86 @@ pub(crate) fn describe(connection: usize, request: &AppendRowsRequest) -> String
         .map(|f| format!(" schema={}", f.join(",")))
         .unwrap_or_default();
     format!("c{connection} append{offset} {:?}{schema}", ids(request))
+}
+
+/// Reads the Arrow rows of one connection's requests, decoded against the writer schema of its
+/// first request, as BigQuery does.
+#[derive(Default)]
+pub(crate) struct ArrowConnection {
+    decoder: Option<ArrowIpcDecoder>,
+}
+
+impl ArrowConnection {
+    /// The record batch `request` carries, and the field names of its writer schema if it
+    /// carries one.
+    pub(crate) fn record_batch(
+        &mut self,
+        request: &AppendRowsRequest,
+    ) -> (RecordBatch, Option<Vec<String>>) {
+        let Some(Rows::ArrowRows(data)) = &request.rows else {
+            panic!("the request carries Arrow rows");
+        };
+        if let Some(schema) = &data.writer_schema {
+            assert!(
+                self.decoder.is_none(),
+                "BigQuery ignores an Arrow schema after the first request of a connection"
+            );
+            self.decoder = Some(
+                ArrowIpcDecoder::new(&schema.serialized_schema).expect("an IPC schema message"),
+            );
+        }
+        let decoder = self
+            .decoder
+            .as_mut()
+            .expect("the first request of a connection carries the Arrow schema");
+        let batch = decoder
+            .decode(
+                &data
+                    .rows
+                    .as_ref()
+                    .expect("the request carries a record batch")
+                    .serialized_record_batch,
+            )
+            .expect("an IPC record batch message");
+        let fields = data.writer_schema.as_ref().map(|_| {
+            batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect()
+        });
+        (batch, fields)
+    }
+
+    /// The `id` column of each row in `batch`.
+    pub(crate) fn ids(batch: &RecordBatch) -> Vec<i64> {
+        batch
+            .column_by_name("id")
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .expect("the test batches have an INT64 `id`")
+            .values()
+            .to_vec()
+    }
+
+    /// One line per request as [`describe`] writes it, with `arrow=` before the writer
+    /// schema's columns, and the request's rows.
+    pub(crate) fn describe(
+        &mut self,
+        connection: usize,
+        request: &AppendRowsRequest,
+    ) -> (String, usize) {
+        let (batch, fields) = self.record_batch(request);
+        let offset = request.offset.map(|o| format!(" @{o}")).unwrap_or_default();
+        let schema = fields
+            .map(|f| format!(" arrow={}", f.join(",")))
+            .unwrap_or_default();
+        let line = format!(
+            "c{connection} append{offset} {:?}{schema}",
+            Self::ids(&batch)
+        );
+        (line, batch.num_rows())
+    }
 }
 
 pub(crate) fn ack(offset: Option<i64>) -> AppendRowsResponse {

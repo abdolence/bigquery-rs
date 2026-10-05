@@ -2,7 +2,8 @@
 
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::types::error::CodecError;
-use crate::write::batch::{Batcher, RequestTarget, MAX_REQUEST_BYTES};
+use crate::write::arrow::{ArrowWriterSchema, RecordBatchSlices};
+use crate::write::batch::{BatchRows, Batcher, RequestTarget, MAX_REQUEST_BYTES};
 use crate::write::connection::{
     Command, ConnectionTask, FinishKind, Finished, Shared, TaskSettings, TASK_ENDED,
 };
@@ -14,6 +15,7 @@ use crate::{
     BigQueryWriteSummary,
 };
 use crate::{BigQueryInstant, BigQueryWriteStreamName};
+use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::write_stream::Type as WriteStreamType;
@@ -234,6 +236,9 @@ pub(crate) struct WriterCore {
     last_refresh: Option<Instant>,
     encoder: Encoder,
     row_hint: usize,
+    /// The schema of the last Arrow record batch written, and the bytes a request has for a
+    /// record batch with it.
+    arrow_schema: Option<(Arc<ArrowWriterSchema>, usize)>,
     shared: Arc<Shared>,
     commands: mpsc::UnboundedSender<Command>,
     task: Option<JoinHandle<()>>,
@@ -327,6 +332,7 @@ impl WriterCore {
             last_refresh: None,
             encoder: Encoder::new(plan),
             row_hint: 0,
+            arrow_schema: None,
             shared,
             commands,
             task: Some(task),
@@ -403,6 +409,60 @@ impl WriterCore {
             self.seal_open().await?;
         }
         Ok(())
+    }
+
+    /// Writes `batch` as one batch per slice that fits a request under `max_request_bytes` and
+    /// `max_batch_rows`, each sealed at once, so a slice never shares a request with another.
+    /// The batch's own schema is the writer schema, and BigQuery checks it against the table.
+    pub(crate) async fn write_record_batch(&mut self, batch: &RecordBatch) -> BigQueryResult<()> {
+        self.check_failed()?;
+        let (schema, capacity) = match &self.arrow_schema {
+            Some((schema, capacity)) if schema.describes(batch) => (schema.clone(), *capacity),
+            _ => {
+                let schema = Arc::new(ArrowWriterSchema::new(batch.schema())?);
+                let capacity = self.shared.lock().batcher.arrow_capacity(&schema);
+                self.arrow_schema = Some((schema.clone(), capacity));
+                (schema, capacity)
+            }
+        };
+        let (first_row, max_rows) = {
+            let state = self.shared.lock();
+            (state.batcher.next_row(), state.batcher.max_rows())
+        };
+        let slices = RecordBatchSlices::new(batch, &schema, capacity, max_rows, first_row);
+        for slice in slices {
+            let slice = slice.map_err(CodecError::into_serialize)?;
+            let rows = BatchRows::Arrow {
+                schema: schema.clone(),
+                record_batch: slice.serialized,
+                row_count: slice.row_count as u64,
+            };
+            self.seal_rows(rows, slice.cost).await?;
+        }
+        Ok(())
+    }
+
+    /// Seals `rows` as a batch of their own once the in-flight limits allow it.
+    async fn seal_rows(&self, rows: BatchRows, bytes: usize) -> BigQueryResult<()> {
+        self.seal_open().await?;
+        loop {
+            let notified = self.shared.capacity.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut state = self.shared.lock();
+                if let Some(err) = &state.failed {
+                    return Err(err.clone());
+                }
+                if self.shared.has_room(&state, bytes) {
+                    let batch = state.batcher.seal_rows(rows, bytes);
+                    Shared::queue_locked(&mut state, batch);
+                    drop(state);
+                    return self.command(Command::Wake);
+                }
+            }
+            notified.await;
+        }
     }
 
     /// Reads the stream's schema again unless it was read within `schema_refresh_interval`.
@@ -552,6 +612,11 @@ impl Drop for WriterCore {
 
 /// A writer that streams rows of `T` into one table over one `AppendRows` connection.
 ///
+/// `T` is a [`Serialize`] row type, written with [`write`](Self::write) as protobuf against the
+/// table's schema, or Arrow's [`RecordBatch`], written with
+/// [`write_batch`](BigQueryStreamingWriter::write_batch) as Arrow IPC with the batch's own
+/// schema; [`BigQueryDb::create_record_batch_writer`] opens that one.
+///
 /// Rows are encoded as they are written and sent in batches under `max_request_bytes`, as
 /// configured in [`BigQueryStreamingWriteOptions`]. A background task owns the connection, so
 /// the writer is `Send` but not `Clone`; open more writers for more connections. It holds no
@@ -600,6 +665,26 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
             self.write(row).await?;
         }
         Ok(())
+    }
+}
+
+impl BigQueryStreamingWriter<RecordBatch> {
+    /// Writes the rows of one Arrow record batch, sent with the batch's own schema. A batch too
+    /// large for `max_request_bytes`, or longer than `max_batch_rows`, goes as slices of it,
+    /// one request each; a batch never shares a request with another. It waits while
+    /// `max_inflight_requests` or `max_inflight_bytes` are unacknowledged.
+    ///
+    /// The schema is not checked against the table: BigQuery rejects a batch that does not
+    /// fit, as a failed batch on the response stream and in the summary. How Arrow types map to
+    /// BigQuery types is in Google's
+    /// [supported data types](https://cloud.google.com/bigquery/docs/supported-data-types).
+    ///
+    /// # Errors
+    /// [`BigQueryError::SerializeError`] of kind `RowTooLarge` for a row that fits no request
+    /// alone, naming it by its index in write order; the slices before it are sent and the
+    /// writer goes on. Once the writer has failed for good, that error, on every call.
+    pub async fn write_batch(&mut self, batch: &RecordBatch) -> BigQueryResult<()> {
+        self.core.write_record_batch(batch).await
     }
 }
 
@@ -716,6 +801,46 @@ impl BigQueryDb {
         options: BigQueryStreamingWriteOptions,
     ) -> BigQueryResult<(
         BigQueryStreamingWriter<T>,
+        BoxStream<'b, BigQueryResult<BigQueryWriteResponse>>,
+    )> {
+        let (core, responses) = WriterCore::open(self, table.into(), options, false).await?;
+        Ok((
+            BigQueryStreamingWriter {
+                core,
+                _row: PhantomData,
+            },
+            responses,
+        ))
+    }
+
+    /// Opens a writer of Arrow record batches on `table` with default options: the default
+    /// stream, at least once. See [`write_batch`](BigQueryStreamingWriter::write_batch).
+    ///
+    /// # Errors
+    /// As [`create_streaming_writer`](Self::create_streaming_writer).
+    pub async fn create_record_batch_writer<'b>(
+        &self,
+        table: impl Into<BigQueryTableRef>,
+    ) -> BigQueryResult<(
+        BigQueryStreamingWriter<RecordBatch>,
+        BoxStream<'b, BigQueryResult<BigQueryWriteResponse>>,
+    )> {
+        self.create_record_batch_writer_with_options(table, BigQueryStreamingWriteOptions::new())
+            .await
+    }
+
+    /// Opens a writer of Arrow record batches on `table` with `options`. `max_batch_delay`
+    /// and `schema_refresh_interval` do not apply, since every record batch is sent as it is
+    /// written, with its own schema.
+    ///
+    /// # Errors
+    /// As [`create_streaming_writer_with_options`](Self::create_streaming_writer_with_options).
+    pub async fn create_record_batch_writer_with_options<'b>(
+        &self,
+        table: impl Into<BigQueryTableRef>,
+        options: BigQueryStreamingWriteOptions,
+    ) -> BigQueryResult<(
+        BigQueryStreamingWriter<RecordBatch>,
         BoxStream<'b, BigQueryResult<BigQueryWriteResponse>>,
     )> {
         let (core, responses) = WriterCore::open(self, table.into(), options, false).await?;

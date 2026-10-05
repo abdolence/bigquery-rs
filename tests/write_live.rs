@@ -196,3 +196,103 @@ async fn committed_resend_writes_no_duplicates() -> TestResult {
     )
     .await
 }
+
+/// Rows `ids` of [`columns`] as one Arrow record batch, with TIMESTAMP as microseconds in UTC.
+fn record_batch(ids: std::ops::Range<i64>) -> arrow_array::RecordBatch {
+    use arrow_array::{Int64Array, StringArray, TimestampMicrosecondArray};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use std::sync::Arc;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new(
+            "at",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            true,
+        ),
+    ]));
+    let names: StringArray = ids.clone().map(|id| Some(format!("row-{id}"))).collect();
+    let at = TimestampMicrosecondArray::from_iter_values(
+        ids.clone().map(|id| (1_791_000_000 + id) * 1_000_000),
+    )
+    .with_timezone("UTC");
+    arrow_array::RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from_iter_values(ids)),
+            Arc::new(names),
+            Arc::new(at),
+        ],
+    )
+    .expect("the columns fit the schema")
+}
+
+#[tokio::test]
+async fn record_batches_write_through_the_default_and_buffered_streams() -> TestResult {
+    with_scratch(
+        "record_batches_write_through_the_default_and_buffered_streams",
+        async |scratch: &Scratch| {
+            let mut billed = 0;
+            let table = create_table(scratch, "t_default", columns(), None).await?;
+            let summary = scratch
+                .db
+                .fluent()
+                .insert()
+                .into(table)
+                .record_batches([record_batch(0..3), record_batch(3..5)])
+                .execute()
+                .await?;
+            assert_eq!((summary.rows_written, summary.rows_failed), (5, 0));
+            let (rows, b) = query_rows(
+                scratch,
+                &format!(
+                    "SELECT id, name, UNIX_SECONDS(`at`) FROM {} ORDER BY id",
+                    scratch.table_sql("t_default")
+                ),
+            )
+            .await?;
+            billed += b;
+            let expected: Vec<Vec<Option<String>>> = (0..5)
+                .map(|id| {
+                    vec![
+                        Some(id.to_string()),
+                        Some(format!("row-{id}")),
+                        Some((1_791_000_000 + id).to_string()),
+                    ]
+                })
+                .collect();
+            assert_eq!(rows, expected);
+
+            let table = create_table(scratch, "t_buffered", columns(), None).await?;
+            let (mut writer, _) = scratch
+                .db
+                .create_record_batch_writer_with_options(
+                    table,
+                    BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
+                )
+                .await?;
+            let sql = format!("SELECT COUNT(*) FROM {}", scratch.table_sql("t_buffered"));
+            writer.write_batch(&record_batch(0..3)).await?;
+            writer.flush().await?;
+            let (before, b) = count(scratch, &sql).await?;
+            billed += b;
+            assert_eq!(before, 0, "acknowledged rows are invisible before a flush");
+            assert_eq!(writer.flush_rows().await?, Some(2));
+            let (flushed, b) = count(scratch, &sql).await?;
+            billed += b;
+            assert_eq!(flushed, 3, "flushed rows are visible");
+            writer.write_batch(&record_batch(3..5)).await?;
+            let summary = writer.finish().await?;
+            assert_eq!((summary.rows_written, summary.rows_failed), (5, 0));
+            let (finished, b) = count(scratch, &sql).await?;
+            billed += b;
+            assert_eq!(finished, 5, "finish flushes every written row");
+            eprintln!(
+                "record_batches_write_through_the_default_and_buffered_streams: 10 rows written, \
+                 {billed} bytes billed"
+            );
+            Ok(())
+        },
+    )
+    .await
+}

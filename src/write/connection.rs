@@ -14,8 +14,7 @@ use crate::errors::{
     code_name, BigQueryError, BigQueryErrorPublicGenericDetails, BigQueryRowError,
     BigQueryRowErrors,
 };
-use crate::write::batch::{append_request, Batch, Batcher, RequestTarget};
-use crate::write::descriptor::WritePlan;
+use crate::write::batch::{append_request, Batch, Batcher, RequestTarget, WriterSchema};
 use crate::{
     BigQueryDb, BigQueryResult, BigQueryTableRef, BigQueryTableSchema, BigQueryWriteMode,
     BigQueryWriteResponse, BigQueryWriteSummary,
@@ -117,9 +116,14 @@ impl Shared {
     }
 
     /// Whether sealing the open batch keeps the unacknowledged requests and bytes within the
-    /// limits. A batch larger than the byte limit alone still goes when nothing is in flight.
+    /// limits.
     pub(crate) fn can_seal(&self, state: &State) -> bool {
-        let bytes = state.batcher.open_bytes().unwrap_or(0);
+        self.has_room(state, state.batcher.open_bytes().unwrap_or(0))
+    }
+
+    /// Whether one more batch of `bytes` keeps the unacknowledged requests and bytes within the
+    /// limits. A batch larger than the byte limit alone still goes when nothing is in flight.
+    pub(crate) fn has_room(&self, state: &State, bytes: usize) -> bool {
         state.inflight_requests < self.max_requests
             && (state.inflight_requests == 0 || state.inflight_bytes + bytes <= self.max_bytes)
     }
@@ -127,10 +131,15 @@ impl Shared {
     /// Seals the open batch into the queue for the task.
     pub(crate) fn seal_locked(&self, state: &mut State) {
         if let Some(batch) = state.batcher.seal() {
-            state.inflight_requests += 1;
-            state.inflight_bytes += batch.bytes;
-            state.sealed.push_back(batch);
+            Self::queue_locked(state, batch);
         }
+    }
+
+    /// Queues a sealed batch for the task.
+    pub(crate) fn queue_locked(state: &mut State, batch: Batch) {
+        state.inflight_requests += 1;
+        state.inflight_bytes += batch.bytes;
+        state.sealed.push_back(batch);
     }
 
     fn release(&self, batch: &Batch) {
@@ -167,8 +176,8 @@ struct Connection {
     requests: stream_channel::UnboundedSender<AppendRowsRequest>,
     responses: mpsc::UnboundedReceiver<Result<AppendRowsResponse, Status>>,
     reader: JoinHandle<()>,
-    /// The plan whose descriptor this connection was last sent.
-    plan: Option<Arc<WritePlan>>,
+    /// The writer schema this connection was last sent.
+    schema: Option<WriterSchema>,
 }
 
 impl Drop for Connection {
@@ -379,18 +388,22 @@ impl ConnectionTask {
             let Some(mut batch) = self.queue.pop_front() else {
                 break;
             };
+            let schema = batch.rows.schema();
+            let sent_schema = self.conn.as_ref().and_then(|conn| conn.schema.as_ref());
+            let needs_schema = !sent_schema.is_some_and(|sent| sent.is(&schema));
+            // BigQuery reads an Arrow schema from the first request of a connection only, so
+            // a new one needs a new connection, once the requests in flight are answered.
+            if needs_schema && sent_schema.is_some() && matches!(schema, WriterSchema::Arrow(_)) {
+                if !self.inflight.is_empty() {
+                    self.queue.push_front(batch);
+                    self.draining = true;
+                    self.reconnect_after_drain = true;
+                    break;
+                }
+                self.conn = None;
+            }
             let offset = self.uses_offsets().then_some(self.next_offset);
-            let needs_schema = !self.conn.as_ref().is_some_and(|conn| {
-                conn.plan
-                    .as_ref()
-                    .is_some_and(|plan| Arc::ptr_eq(plan, &batch.plan))
-            });
-            let request = append_request(
-                &self.settings.target,
-                offset,
-                needs_schema.then_some(&*batch.plan),
-                batch.rows.clone(),
-            );
+            let request = append_request(&self.settings.target, offset, &batch.rows, needs_schema);
             batch.attempts += 1;
             let bytes = request.encoded_len() as u64;
             let sent = match self.conn.as_mut() {
@@ -412,7 +425,7 @@ impl ConnectionTask {
                 self.retries += 1;
             }
             if let Some(conn) = self.conn.as_mut() {
-                conn.plan = Some(batch.plan.clone());
+                conn.schema = Some(schema);
             }
             self.next_offset += batch.row_count() as i64;
             self.inflight.push_back(Sent { batch, offset });
@@ -456,7 +469,7 @@ impl ConnectionTask {
             requests,
             responses,
             reader,
-            plan: None,
+            schema: None,
         }
     }
 

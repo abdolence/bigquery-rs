@@ -4,6 +4,7 @@ use crate::{
     BigQueryStreamingWriteOptions, BigQueryTableRef, BigQueryWriteMode, BigQueryWriteSummary,
     BigQueryWriteSupport,
 };
+use arrow_array::RecordBatch;
 use serde::Serialize;
 
 /// The first stage of an insert, from
@@ -70,6 +71,21 @@ where
             params: self.params,
             rows,
             upsert: false,
+        }
+    }
+
+    /// Writes the rows of every Arrow record batch of `batches`, in order, each batch with its
+    /// own schema, as [`write_batch`](crate::BigQueryStreamingWriter::write_batch) does.
+    #[inline]
+    pub fn record_batches<I>(self, batches: I) -> BigQueryInsertRecordBatchesBuilder<'a, D, I>
+    where
+        I: IntoIterator<Item = RecordBatch> + Send,
+        I::IntoIter: Send,
+    {
+        BigQueryInsertRecordBatchesBuilder {
+            db: self.db,
+            params: self.params,
+            batches,
         }
     }
 
@@ -209,5 +225,65 @@ where
     /// [`BigQueryError::InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError) for a mode other than the default.
     pub async fn execute(self) -> BigQueryResult<BigQueryWriteSummary> {
         self.db.insert_changes(self.params, self.changes).await
+    }
+}
+
+/// An insert of Arrow record batches. The default writes through the table's default stream, at
+/// least once.
+#[derive(Clone, Debug)]
+pub struct BigQueryInsertRecordBatchesBuilder<'a, D, I>
+where
+    D: BigQueryWriteSupport,
+{
+    db: &'a D,
+    params: BigQueryInsertParams,
+    batches: I,
+}
+
+impl<'a, D, I> BigQueryInsertRecordBatchesBuilder<'a, D, I>
+where
+    D: BigQueryWriteSupport,
+    I: IntoIterator<Item = RecordBatch> + Send,
+    I::IntoIter: Send,
+{
+    /// As [`BigQueryInsertObjBuilder::exactly_once`].
+    #[inline]
+    pub fn exactly_once(mut self) -> Self {
+        self.params.options.mode = BigQueryWriteMode::Committed;
+        self
+    }
+
+    /// As [`BigQueryInsertObjBuilder::atomic`].
+    #[inline]
+    pub fn atomic(mut self) -> Self {
+        self.params.options.mode = BigQueryWriteMode::Pending;
+        self
+    }
+
+    /// As [`BigQueryInsertObjBuilder::buffered`].
+    #[inline]
+    pub fn buffered(mut self) -> Self {
+        self.params.options.mode = BigQueryWriteMode::Buffered;
+        self
+    }
+
+    /// As [`BigQueryInsertObjBuilder::options`].
+    #[inline]
+    pub fn options(mut self, options: BigQueryStreamingWriteOptions) -> Self {
+        self.params.options = options;
+        self
+    }
+
+    /// Opens a writer, writes every record batch and finishes it.
+    ///
+    /// # Errors
+    /// The first failed batch's error; in pending mode nothing is committed then.
+    /// [`BigQueryError::SerializeError`](crate::errors::BigQueryError::SerializeError) of kind
+    /// `RowTooLarge` stops the insert at a row that fits no request alone; on the default and
+    /// committed streams the requests before it may be written.
+    pub async fn execute(self) -> BigQueryResult<BigQueryWriteSummary> {
+        self.db
+            .insert_record_batches(self.params, self.batches)
+            .await
     }
 }

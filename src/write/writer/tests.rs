@@ -1,11 +1,14 @@
 use crate::db::fake::spans::CapturedSpans;
 use crate::db::fake::write::{
-    ack, column, describe, ids, in_band, row_errors, schema, CREATED_STREAM, DEFAULT_STREAM,
+    ack, column, describe, ids, in_band, row_errors, schema, ArrowConnection, CREATED_STREAM,
+    DEFAULT_STREAM,
 };
 use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::BigQueryWriteStreamName;
 use crate::{BigQueryStreamingWriteOptions, BigQueryWriteMode, BigQueryWriteResponse};
+use arrow_array::{Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::table_field_schema::{Mode, Type};
@@ -68,11 +71,16 @@ struct StreamEnd(Mutex<i64>);
 
 impl StreamEnd {
     fn answer(&self, request: &AppendRowsRequest) -> AppendRowsResponse {
+        self.answer_rows(request, ids(request).len())
+    }
+
+    /// Answers `request`, which holds `rows` rows.
+    fn answer_rows(&self, request: &AppendRowsRequest, rows: usize) -> AppendRowsResponse {
         let mut end = self.0.lock().expect("the lock is never poisoned");
         let offset = request
             .offset
             .expect("a committed stream request has an offset");
-        let rows = ids(request).len() as i64;
+        let rows = rows as i64;
         if offset == *end {
             *end += rows;
             ack(Some(offset))
@@ -1203,4 +1211,263 @@ async fn a_buffered_insert_flushes_every_row_before_finalizing() {
             format!("FinalizeWriteStream {CREATED_STREAM}"),
         ]
     );
+}
+
+/// `id INT64 NOT NULL, name STRING` with `ids`, as the Arrow side of [`Row`].
+fn record_batch(ids: std::ops::Range<i64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+    ]));
+    let names: StringArray = ids.clone().map(|id| Some(format!("n{id}"))).collect();
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(Int64Array::from_iter_values(ids)), Arc::new(names)],
+    )
+    .expect("the columns fit the schema")
+}
+
+/// A fake whose `AppendRows` reads Arrow rows, keeping a stream's offsets when requests have
+/// them, and logs each request on its connection.
+async fn arrow_stream() -> FakeBigQuery {
+    let connections = Arc::new(AtomicUsize::new(0));
+    FakeBigQuery::start(move |call| {
+        let connections = connections.clone();
+        async move {
+            let Some(mut call) = call.answer_unary(schema(&[])).await else {
+                return;
+            };
+            let connection = connections.fetch_add(1, Ordering::SeqCst);
+            let mut arrow = ArrowConnection::default();
+            let end = StreamEnd::default();
+            while let Some(request) = call.next_request::<AppendRowsRequest>().await {
+                let (line, rows) = arrow.describe(connection, &request);
+                call.log(line);
+                match request.offset {
+                    Some(_) => call.send(&end.answer_rows(&request, rows)),
+                    None => call.send(&ack(None)),
+                }
+            }
+            call.finish();
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn record_batches_carry_their_schema_on_the_first_request_only() {
+    let fake = arrow_stream().await;
+    let (mut writer, responses) = fake
+        .db
+        .create_record_batch_writer(SHOP.table(ORDERS))
+        .await
+        .expect("the writer opens");
+    within(writer.write_batch(&record_batch(0..2)))
+        .await
+        .expect("the batch is written");
+    within(writer.write_batch(&record_batch(2..3)))
+        .await
+        .expect("the batch is written");
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!((summary.rows_written, summary.batches), (3, 2));
+    let first_rows: Vec<u64> = collect(responses)
+        .await
+        .into_iter()
+        .map(|response| response.expect("every batch is written").first_row)
+        .collect();
+    assert_eq!(first_rows, [0, 2]);
+    assert_eq!(
+        fake.calls(),
+        [
+            format!("GetWriteStream {DEFAULT_STREAM}"),
+            "c0 append [0, 1] arrow=id,name".to_string(),
+            "c0 append [2]".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_record_batch_over_the_request_cap_goes_as_slices_at_their_offsets() {
+    let fake = arrow_stream().await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_record_batch_writer_with_options(
+            SHOP.table(ORDERS),
+            BigQueryStreamingWriteOptions::new()
+                .with_mode(BigQueryWriteMode::Committed)
+                .with_max_request_bytes(4_000),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write_batch(&record_batch(0..500)))
+        .await
+        .expect("the batch is written");
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!(summary.rows_written, 500);
+    assert!(summary.batches > 1, "{summary:?}");
+    let appends: Vec<String> = fake
+        .calls()
+        .into_iter()
+        .filter(|line| line.starts_with("c0 append"))
+        .collect();
+    let mut next_id = 0;
+    for append in &appends {
+        let offset: i64 = append["c0 append @".len()..]
+            .split(' ')
+            .next()
+            .and_then(|offset| offset.parse().ok())
+            .expect("every request has an offset");
+        assert_eq!(offset, next_id, "{appends:?}");
+        let ids = &append[append.find('[').expect("ids")..=append.find(']').expect("ids")];
+        let first: i64 = ids[1..]
+            .split([',', ']'])
+            .next()
+            .and_then(|id| id.parse().ok())
+            .expect("a slice has rows");
+        assert_eq!(first, next_id, "{appends:?}");
+        next_id += ids.split(',').count() as i64;
+    }
+    assert_eq!(next_id, 500);
+}
+
+#[tokio::test]
+async fn a_new_arrow_schema_is_sent_on_a_new_connection() {
+    let fake = arrow_stream().await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_record_batch_writer(SHOP.table(ORDERS))
+        .await
+        .expect("the writer opens");
+    within(writer.write_batch(&record_batch(0..1)))
+        .await
+        .expect("the batch is written");
+    let narrower = record_batch(1..2)
+        .project(&[0])
+        .expect("the batch has an `id` column");
+    within(writer.write_batch(&narrower))
+        .await
+        .expect("the batch is written");
+    within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!(
+        fake.calls()[1..],
+        [
+            "c0 append [0] arrow=id,name".to_string(),
+            "c1 append [1] arrow=id".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_buffered_record_batch_writer_flushes_what_is_written() {
+    let fake = arrow_stream().await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_record_batch_writer_with_options(
+            SHOP.table(ORDERS),
+            BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write_batch(&record_batch(0..3)))
+        .await
+        .expect("the batch is written");
+    assert_eq!(
+        within(writer.flush_rows()).await.expect("the rows flush"),
+        Some(2)
+    );
+    within(writer.write_batch(&record_batch(3..4)))
+        .await
+        .expect("the batch is written");
+    within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!(
+        fake.calls(),
+        [
+            "CreateWriteStream BUFFERED".to_string(),
+            "c0 append @0 [0, 1, 2] arrow=id,name".to_string(),
+            format!("FlushRows {CREATED_STREAM} @2"),
+            "c0 append @3 [3]".to_string(),
+            format!("FlushRows {CREATED_STREAM} @3"),
+            format!("FinalizeWriteStream {CREATED_STREAM}"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_record_batch_insert_closes_the_stream_of_every_mode() {
+    let modes = [
+        (BigQueryWriteMode::Default, vec![]),
+        (
+            BigQueryWriteMode::Committed,
+            vec![format!("FinalizeWriteStream {CREATED_STREAM}")],
+        ),
+        (
+            BigQueryWriteMode::Pending,
+            vec![
+                format!("FinalizeWriteStream {CREATED_STREAM}"),
+                format!("BatchCommitWriteStreams [\"{CREATED_STREAM}\"]"),
+            ],
+        ),
+        (
+            BigQueryWriteMode::Buffered,
+            vec![
+                format!("FlushRows {CREATED_STREAM} @3"),
+                format!("FinalizeWriteStream {CREATED_STREAM}"),
+            ],
+        ),
+    ];
+    for (mode, closing) in modes {
+        let fake = arrow_stream().await;
+        let insert = fake
+            .db
+            .fluent()
+            .insert()
+            .into(SHOP.table(ORDERS))
+            .record_batches([record_batch(0..2), record_batch(2..4)]);
+        let insert = match mode {
+            BigQueryWriteMode::Committed => insert.exactly_once(),
+            BigQueryWriteMode::Pending => insert.atomic(),
+            BigQueryWriteMode::Buffered => insert.buffered(),
+            _ => insert,
+        };
+        let summary = within(insert.execute()).await.expect("the insert runs");
+        assert_eq!(summary.rows_written, 4, "{mode:?}");
+        let calls = fake.calls();
+        let appends = count(&calls, "c0 append");
+        assert_eq!(appends, 2, "{mode:?}: {calls:?}");
+        assert_eq!(calls[1 + appends..], closing, "{mode:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_row_too_large_for_a_request_is_named_by_its_write_order_index() {
+    let fake = arrow_stream().await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_record_batch_writer_with_options(
+            SHOP.table(ORDERS),
+            BigQueryStreamingWriteOptions::new().with_max_request_bytes(2_000),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write_batch(&record_batch(0..2)))
+        .await
+        .expect("the batch is written");
+    let schema = record_batch(0..0).schema();
+    let large = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![2, 3])),
+            Arc::new(StringArray::from(vec!["n2".to_string(), "x".repeat(4_000)])),
+        ],
+    )
+    .expect("the columns fit the schema");
+    match within(writer.write_batch(&large)).await {
+        Err(BigQueryError::SerializeError(err)) => {
+            assert_eq!(err.kind, BigQueryCodecErrorKind::RowTooLarge);
+            assert_eq!(err.row, Some(3));
+        }
+        other => panic!("the large row must fail before it is sent: {other:?}"),
+    }
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!(summary.rows_written, 3);
 }

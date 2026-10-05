@@ -6,12 +6,15 @@
 
 use crate::errors::BigQueryCodecErrorKind;
 use crate::types::error::CodecError;
+use crate::write::arrow::ArrowWriterSchema;
 use crate::write::descriptor::WritePlan;
 use crate::BigQueryMissingValue;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_request::{
-    self, MissingValueInterpretation, ProtoData,
+    self, ArrowData, MissingValueInterpretation, ProtoData,
 };
-use gcloud_sdk::google::cloud::bigquery::storage::v1::{AppendRowsRequest, ProtoRows, ProtoSchema};
+use gcloud_sdk::google::cloud::bigquery::storage::v1::{
+    AppendRowsRequest, ArrowRecordBatch, ArrowSchema, ProtoRows, ProtoSchema,
+};
 use gcloud_sdk::prost::encoding::encoded_len_varint;
 use gcloud_sdk::prost::Message;
 use std::sync::Arc;
@@ -20,8 +23,9 @@ use tokio::time::Instant;
 /// The largest `max_request_bytes` a writer accepts.
 pub(crate) const MAX_REQUEST_BYTES: usize = 19_000_000;
 
-/// The two length prefixes around the rows, of `ProtoData` and of `ProtoRows`, take one byte
-/// each when empty and at most four below 2^28 bytes, which is far above the cap.
+/// The two length prefixes around the rows, of `ProtoData` and `ProtoRows` or of `ArrowData`
+/// and `ArrowRecordBatch`, take one byte each when empty and at most four below 2^28 bytes,
+/// which is far above the cap.
 const NESTED_LENGTH_SLACK: usize = 2 * 3;
 
 /// What every request of one writer carries besides its rows and offset.
@@ -32,14 +36,37 @@ pub(crate) struct RequestTarget {
     pub(crate) missing_value: Option<BigQueryMissingValue>,
 }
 
-/// Builds one append request. `plan` is the writer schema to send with it, `None` when the
-/// connection already has it.
+/// Builds one append request for `rows`, with their writer schema when `with_schema`; a
+/// connection needs it on its first request and after the schema changed.
 pub(crate) fn append_request(
     target: &RequestTarget,
     offset: Option<i64>,
-    plan: Option<&WritePlan>,
-    rows: Vec<Vec<u8>>,
+    rows: &BatchRows,
+    with_schema: bool,
 ) -> AppendRowsRequest {
+    let rows = match rows {
+        BatchRows::Proto { plan, rows } => append_rows_request::Rows::ProtoRows(ProtoData {
+            writer_schema: with_schema.then(|| ProtoSchema {
+                proto_descriptor: Some(plan.descriptor().clone()),
+            }),
+            rows: Some(ProtoRows {
+                serialized_rows: rows.clone(),
+            }),
+        }),
+        BatchRows::Arrow {
+            schema,
+            record_batch,
+            ..
+        } => append_rows_request::Rows::ArrowRows(ArrowData {
+            writer_schema: with_schema.then(|| ArrowSchema {
+                serialized_schema: schema.serialized().to_vec(),
+            }),
+            rows: Some(ArrowRecordBatch {
+                serialized_record_batch: record_batch.clone(),
+                ..Default::default()
+            }),
+        }),
+    };
     AppendRowsRequest {
         // Every request names the stream: after an in-band schema switch BigQuery treats the
         // connection as multiplexed and rejects requests without it.
@@ -52,44 +79,95 @@ pub(crate) fn append_request(
             Some(BigQueryMissingValue::DefaultValue) => MissingValueInterpretation::DefaultValue,
         }
         .into(),
-        rows: Some(append_rows_request::Rows::ProtoRows(ProtoData {
-            writer_schema: plan.map(|plan| ProtoSchema {
-                proto_descriptor: Some(plan.descriptor().clone()),
-            }),
-            rows: Some(ProtoRows {
-                serialized_rows: rows,
-            }),
-        })),
+        rows: Some(rows),
         ..Default::default()
     }
 }
 
-impl WritePlan {
+/// The writer schema rows were encoded against.
+#[derive(Debug, Clone)]
+pub(crate) enum WriterSchema {
+    Proto(Arc<WritePlan>),
+    Arrow(Arc<ArrowWriterSchema>),
+}
+
+impl WriterSchema {
+    /// Whether both are the same schema value, which is how a connection tells it already sent
+    /// the schema of a batch.
+    pub(crate) fn is(&self, other: &WriterSchema) -> bool {
+        match (self, other) {
+            (WriterSchema::Proto(one), WriterSchema::Proto(other)) => Arc::ptr_eq(one, other),
+            (WriterSchema::Arrow(one), WriterSchema::Arrow(other)) => Arc::ptr_eq(one, other),
+            _ => false,
+        }
+    }
+
     /// The bytes of a request that are not rows, with the writer schema always counted: a batch
     /// can become the first request of a new connection when it is resent after a reconnect.
     fn request_overhead(&self, target: &RequestTarget) -> usize {
-        append_request(target, Some(i64::MAX), Some(self), Vec::new()).encoded_len()
-            + NESTED_LENGTH_SLACK
+        let empty = match self {
+            WriterSchema::Proto(plan) => BatchRows::Proto {
+                plan: plan.clone(),
+                rows: Vec::new(),
+            },
+            WriterSchema::Arrow(schema) => BatchRows::Arrow {
+                schema: schema.clone(),
+                record_batch: Vec::new(),
+                row_count: 0,
+            },
+        };
+        append_request(target, Some(i64::MAX), &empty, true).encoded_len() + NESTED_LENGTH_SLACK
     }
 }
 
-/// A sealed batch: rows encoded against one plan, the unit of sending, acknowledging and
-/// resending.
+/// The rows of a batch, encoded against their writer schema.
+#[derive(Debug)]
+pub(crate) enum BatchRows {
+    /// Rows encoded one by one as protobuf messages.
+    Proto {
+        plan: Arc<WritePlan>,
+        rows: Vec<Vec<u8>>,
+    },
+    /// One IPC record batch message.
+    Arrow {
+        schema: Arc<ArrowWriterSchema>,
+        record_batch: Vec<u8>,
+        row_count: u64,
+    },
+}
+
+impl BatchRows {
+    pub(crate) fn row_count(&self) -> u64 {
+        match self {
+            BatchRows::Proto { rows, .. } => rows.len() as u64,
+            BatchRows::Arrow { row_count, .. } => *row_count,
+        }
+    }
+
+    pub(crate) fn schema(&self) -> WriterSchema {
+        match self {
+            BatchRows::Proto { plan, .. } => WriterSchema::Proto(plan.clone()),
+            BatchRows::Arrow { schema, .. } => WriterSchema::Arrow(schema.clone()),
+        }
+    }
+}
+
+/// A sealed batch: rows encoded against one writer schema, the unit of sending, acknowledging
+/// and resending.
 #[derive(Debug)]
 pub(crate) struct Batch {
     pub(crate) index: u64,
     pub(crate) first_row: u64,
-    pub(crate) rows: Vec<Vec<u8>>,
+    pub(crate) rows: BatchRows,
     /// The bytes the rows take in the request, framing included.
     pub(crate) bytes: usize,
-    pub(crate) plan: Arc<WritePlan>,
     /// How many times it was sent.
     pub(crate) attempts: usize,
 }
 
 impl Batch {
     pub(crate) fn row_count(&self) -> u64 {
-        self.rows.len() as u64
+        self.rows.row_count()
     }
 }
 
@@ -121,7 +199,7 @@ impl Batcher {
         max_request_bytes: usize,
         max_rows: Option<usize>,
     ) -> Self {
-        let overhead = plan.request_overhead(target);
+        let overhead = WriterSchema::Proto(plan.clone()).request_overhead(target);
         Batcher {
             plan,
             target: target.clone(),
@@ -143,6 +221,17 @@ impl Batcher {
     /// The bytes left for rows in one request.
     pub(crate) fn capacity(&self) -> usize {
         self.max_request_bytes.saturating_sub(self.overhead)
+    }
+
+    /// The bytes left for an Arrow record batch in one request with `schema`.
+    pub(crate) fn arrow_capacity(&self, schema: &Arc<ArrowWriterSchema>) -> usize {
+        let overhead = WriterSchema::Arrow(schema.clone()).request_overhead(&self.target);
+        self.max_request_bytes.saturating_sub(overhead)
+    }
+
+    /// The most rows of one batch, `max_batch_rows`.
+    pub(crate) fn max_rows(&self) -> Option<usize> {
+        self.max_rows
     }
 
     /// The write-order index the next row gets.
@@ -224,18 +313,37 @@ impl Batcher {
         Some(Batch {
             index,
             first_row: open.first_row,
-            rows: open.rows,
+            rows: BatchRows::Proto {
+                plan: self.plan.clone(),
+                rows: open.rows,
+            },
             bytes: open.bytes,
-            plan: self.plan.clone(),
             attempts: 0,
         })
+    }
+
+    /// Makes `rows` a batch of their own, taking `bytes` in the request. There must be no open
+    /// batch, so that batches stay in write order.
+    pub(crate) fn seal_rows(&mut self, rows: BatchRows, bytes: usize) -> Batch {
+        debug_assert!(self.open.is_none(), "batches stay in write order");
+        let index = self.next_index;
+        self.next_index += 1;
+        let first_row = self.next_row;
+        self.next_row += rows.row_count();
+        Batch {
+            index,
+            first_row,
+            rows,
+            bytes,
+            attempts: 0,
+        }
     }
 
     /// The plan for the rows from now on. The open batch must be sealed first, since a batch
     /// holds rows of one plan only.
     pub(crate) fn set_plan(&mut self, plan: Arc<WritePlan>) {
         debug_assert!(self.open.is_none(), "a batch holds rows of one plan only");
-        self.overhead = plan.request_overhead(&self.target);
+        self.overhead = WriterSchema::Proto(plan.clone()).request_overhead(&self.target);
         self.plan = plan;
     }
 }
@@ -310,24 +418,19 @@ mod tests {
                 prop_assert_eq!(batch.index, k as u64);
                 prop_assert_eq!(batch.first_row, written.len() as u64);
                 if let Some(max_rows) = max_rows {
-                    prop_assert!(batch.rows.len() <= max_rows);
+                    prop_assert!(batch.row_count() <= max_rows as u64);
                 }
-                let request = append_request(
-                    &target,
-                    Some(i64::MAX),
-                    Some(&plan),
-                    batch.rows.clone(),
-                );
+                let request = append_request(&target, Some(i64::MAX), &batch.rows, true);
                 let size = request.encoded_len();
                 prop_assert!(size <= max_request_bytes, "{} > {}", size, max_request_bytes);
                 prop_assert_eq!(size - batch.bytes <= batcher.overhead(), true);
-                written.extend(batch.rows.iter().map(Vec::len));
+                written.extend(proto_rows(batch).iter().map(Vec::len));
             }
             prop_assert_eq!(written, fitting.clone());
             // No batch was closed early: the next batch's first row did not fit it.
             for pair in batches.windows(2) {
-                let next = pair[1].rows[0].len();
-                let full_by_rows = max_rows.is_some_and(|m| pair[0].rows.len() >= m);
+                let next = proto_rows(&pair[1])[0].len();
+                let full_by_rows = max_rows.is_some_and(|m| pair[0].row_count() >= m as u64);
                 let cost = 1 + encoded_len_varint(next as u64) + next;
                 prop_assert!(full_by_rows || pair[0].bytes + cost > capacity);
             }
@@ -366,11 +469,18 @@ mod tests {
         // Any batch may be the first one on a new connection, so each must fit with the
         // descriptor even when it was first sent without one.
         for batch in &batches {
-            let with = append_request(&target, Some(1), Some(&wide), batch.rows.clone());
-            let without = append_request(&target, Some(1), None, batch.rows.clone());
+            let with = append_request(&target, Some(1), &batch.rows, true);
+            let without = append_request(&target, Some(1), &batch.rows, false);
             assert!(with.encoded_len() <= budget, "{}", with.encoded_len());
             assert!(without.encoded_len() + descriptor <= budget);
             assert!(writer_schema_is_absent(&without));
+        }
+    }
+
+    fn proto_rows(batch: &Batch) -> &[Vec<u8>] {
+        match &batch.rows {
+            BatchRows::Proto { rows, .. } => rows,
+            BatchRows::Arrow { .. } => panic!("the batcher seals protobuf rows"),
         }
     }
 

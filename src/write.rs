@@ -1,6 +1,7 @@
 mod types;
 pub use types::*;
 
+pub(crate) mod arrow;
 pub(crate) mod batch;
 mod cdc;
 pub(crate) mod connection;

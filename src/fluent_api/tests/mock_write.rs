@@ -7,9 +7,12 @@ use crate::{
     BigQueryInsertParams, BigQueryResult, BigQueryStreamingWriteOptions, BigQueryWriteMode,
     BigQueryWriteSummary, BigQueryWriteSupport,
 };
+use arrow_array::{Int64Array, RecordBatch};
+use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use serde::Serialize;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::db::fake::{ORDERS, SHOP};
 
@@ -21,13 +24,26 @@ pub(crate) struct RecordedInsert {
     pub(crate) changes: Option<Vec<(BigQueryChangeType, Option<String>)>>,
 }
 
+/// One insert of record batches as the mock saw it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecordedBatchInsert {
+    pub(crate) params: BigQueryInsertParams,
+    pub(crate) batches: Vec<RecordBatch>,
+}
+
 thread_local! {
     static INSERTS: RefCell<Vec<RecordedInsert>> = const { RefCell::new(Vec::new()) };
+    static BATCH_INSERTS: RefCell<Vec<RecordedBatchInsert>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Every insert recorded on this thread since the last call.
 pub(crate) fn take_inserts() -> Vec<RecordedInsert> {
     INSERTS.with(|inserts| inserts.take())
+}
+
+/// Every insert of record batches recorded on this thread since the last call.
+pub(crate) fn take_batch_inserts() -> Vec<RecordedBatchInsert> {
+    BATCH_INSERTS.with(|inserts| inserts.take())
 }
 
 fn json<T: Serialize>(row: &T) -> serde_json::Value {
@@ -67,6 +83,25 @@ impl BigQueryWriteSupport for MockDatabase {
             })
         });
         Ok(summary(count))
+    }
+
+    async fn insert_record_batches<I>(
+        &self,
+        params: BigQueryInsertParams,
+        batches: I,
+    ) -> BigQueryResult<BigQueryWriteSummary>
+    where
+        I: IntoIterator<Item = RecordBatch> + Send,
+        I::IntoIter: Send,
+    {
+        let batches: Vec<RecordBatch> = batches.into_iter().collect();
+        let rows = batches.iter().map(RecordBatch::num_rows).sum();
+        BATCH_INSERTS.with(|inserts| {
+            inserts
+                .borrow_mut()
+                .push(RecordedBatchInsert { params, batches })
+        });
+        Ok(summary(rows))
     }
 
     async fn insert_changes<T, I>(
@@ -207,4 +242,58 @@ async fn insert_chain_passes_mode_and_rows() {
         inserts[4].changes,
         Some(vec![(BigQueryChangeType::Delete, Some("A".to_string()))])
     );
+}
+
+#[tokio::test]
+async fn record_batch_insert_chain_passes_mode_options_and_batches() {
+    let db = MockDatabase;
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2]))])
+        .expect("the column fits the schema");
+    take_batch_inserts();
+
+    let summary = BigQueryExprBuilder::new(&db)
+        .insert()
+        .into(SHOP.table(ORDERS))
+        .record_batches([batch.clone()])
+        .execute()
+        .await
+        .expect("the insert runs");
+    assert_eq!(summary.rows_written, 2);
+    for insert in [
+        BigQueryExprBuilder::new(&db)
+            .insert()
+            .into(SHOP.table(ORDERS))
+            .record_batches([batch.clone()])
+            .exactly_once(),
+        BigQueryExprBuilder::new(&db)
+            .insert()
+            .into(SHOP.table(ORDERS))
+            .record_batches([batch.clone()])
+            .options(BigQueryStreamingWriteOptions::new().with_max_batch_rows(7))
+            .atomic(),
+        BigQueryExprBuilder::new(&db)
+            .insert()
+            .into(SHOP.table(ORDERS))
+            .record_batches([batch.clone()])
+            .buffered(),
+    ] {
+        insert.execute().await.expect("the insert runs");
+    }
+
+    let inserts = take_batch_inserts();
+    let modes: Vec<BigQueryWriteMode> = inserts.iter().map(|i| i.params.options.mode).collect();
+    assert_eq!(
+        modes,
+        [
+            BigQueryWriteMode::Default,
+            BigQueryWriteMode::Committed,
+            BigQueryWriteMode::Pending,
+            BigQueryWriteMode::Buffered,
+        ]
+    );
+    assert_eq!(inserts[2].params.options.max_batch_rows, Some(7));
+    assert!(inserts
+        .iter()
+        .all(|insert| insert.batches == [batch.clone()]));
 }
