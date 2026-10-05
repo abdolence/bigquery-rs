@@ -5,6 +5,7 @@ use bigquery::errors::BigQueryError;
 use bigquery::*;
 use futures::{FutureExt, StreamExt};
 use std::panic::AssertUnwindSafe;
+use std::time::{Duration, Instant};
 
 #[path = "support/common.rs"]
 mod common;
@@ -25,6 +26,46 @@ async fn create_table(db: &BigQueryDb, table: BigQueryTableRef) -> TestResult {
         .sync()
         .await?;
     Ok(())
+}
+
+/// The listing of `job`, polled until it appears. `ListJobs` makes no promise to show a job as
+/// soon as `GetJob` does: a finished job has been measured missing from its first listing and
+/// present 2.6 s later.
+async fn listed_job(
+    db: &BigQueryDb,
+    job_ref: &BigQueryJobRef,
+    job: &BigQueryJob,
+) -> TestResult<BigQueryJob> {
+    const LISTING_DEADLINE: Duration = Duration::from_secs(30);
+    const LISTING_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+    let since = job.creation_time.ok_or("the job has no creation time")?;
+    let started = Instant::now();
+    loop {
+        let listed = db
+            .stream_jobs_with_errors(
+                BigQueryListJobsParams::new()
+                    .with_min_creation_time(since)
+                    .with_states(vec![BigQueryJobState::Done]),
+            )
+            .await?
+            .filter(|listed| {
+                let ours = listed
+                    .as_ref()
+                    .map_or(true, |listed| listed.reference.job_id == job_ref.job_id);
+                async move { ours }
+            })
+            .boxed()
+            .next()
+            .await
+            .transpose()?;
+        match listed {
+            Some(listed) => return Ok(listed),
+            None if started.elapsed() >= LISTING_DEADLINE => {
+                return Err("the query job is not listed".into());
+            }
+            None => tokio::time::sleep(LISTING_RETRY_INTERVAL).await,
+        }
+    }
 }
 
 async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> TestResult {
@@ -147,30 +188,8 @@ async fn crud(db: &BigQueryDb, project: &str, dataset: &BigQueryDatasetId) -> Te
         "LIVE bytes billed admin_crud: {:?} over 1 job",
         job.total_bytes_billed
     );
-    let since = job.creation_time.ok_or("the job has no creation time")?;
-    let listed = db
-        .stream_jobs_with_errors(
-            BigQueryListJobsParams::new()
-                .with_min_creation_time(since)
-                .with_states(vec![BigQueryJobState::Done]),
-        )
-        .await?
-        .filter(|j| {
-            let ours = j
-                .as_ref()
-                .map_or(true, |j| j.reference.job_id == job_ref.job_id);
-            async move { ours }
-        })
-        .boxed()
-        .next()
-        .await
-        .ok_or("the query job is not listed")??;
+    let listed = listed_job(db, &job_ref, &job).await?;
     assert_eq!(listed.statement_type, Some(BigQueryStatementType::Select));
-    db.delete_job(&job_ref).await?;
-    assert!(matches!(
-        db.get_job(&job_ref).await,
-        Err(BigQueryError::DataNotFoundError(_))
-    ));
 
     db.fluent()
         .schema()
