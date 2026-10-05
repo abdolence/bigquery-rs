@@ -3,16 +3,16 @@
 //! It speaks raw HTTP/2, so a handler sees each request message as it arrives and answers in
 //! any shape gRPC allows: a unary reply, a server stream, a bidi exchange one request at a
 //! time, a status at any point, a dropped connection or a call that never answers. The
-//! per-API answers live in the sibling `read`, `write` and `query` modules.
+//! per-API answers live in the sibling `read`, `write`, `query` and `table` modules.
 
 pub(crate) mod events;
 pub(crate) mod query;
 pub(crate) mod read;
 pub(crate) mod spans;
-mod table;
+pub(crate) mod table;
 pub(crate) mod write;
 
-use crate::{BigQueryDb, BigQueryDbOptions};
+use crate::{BigQueryDatasetId, BigQueryDb, BigQueryDbOptions, BigQueryTableId};
 use futures::future::BoxFuture;
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Code;
@@ -24,6 +24,11 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Notify};
+
+/// The `shop` dataset the fake-server tests use, in the client's own project.
+pub(crate) const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+/// The `orders` table the fake-server tests use, in [`SHOP`].
+pub(crate) const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 
 type Handler = dyn Fn(FakeCall) -> BoxFuture<'static, ()> + Send + Sync;
 

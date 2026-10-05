@@ -4,15 +4,59 @@
 //! and large results, the Storage Write API for inserts, and the v2 API for queries, jobs,
 //! datasets and tables.
 //!
+//! Full documentation, with a chapter per topic: <https://bigquery-rust.abdolence.dev>
+//!
 //! ## Example
 //!
 //! ```rust,no_run
 //! use bigquery::*;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Debug, Clone, Deserialize, Serialize)]
+//! struct Order {
+//!     id: i64,
+//!     customer: String,
+//!     total: f64,
+//! }
+//!
+//! const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+//! const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 //!
 //! # async fn example() -> BigQueryResult<()> {
 //! let db = BigQueryDb::new("my-project-id").await?;
-//! let fluent = db.fluent();
-//! # let _ = fluent;
+//!
+//! // Insert through the Storage Write API
+//! let orders = vec![Order {
+//!     id: 1,
+//!     customer: "Alice".to_string(),
+//!     total: 120.0,
+//! }];
+//! db.fluent()
+//!     .insert()
+//!     .into(SHOP.table(ORDERS))
+//!     .objects(&orders)
+//!     .execute()
+//!     .await?;
+//!
+//! // Read the table back through the Storage Read API, with a typed filter
+//! let large_orders: Vec<Order> = db
+//!     .fluent()
+//!     .select()
+//!     .from(SHOP.table(ORDERS))
+//!     .filter(|filter| filter.field(path!(Order::total)).gt(100.0))
+//!     .obj()
+//!     .query()
+//!     .await?;
+//!
+//! // Query with parameters
+//! let alice_orders: Vec<Order> = db
+//!     .fluent()
+//!     .query("SELECT id, customer, total FROM shop.orders WHERE customer = @customer")
+//!     .param("customer", "Alice")
+//!     .obj()
+//!     .query()
+//!     .await?;
+//! # let _ = (large_orders, alice_orders);
 //! # Ok(())
 //! # }
 //! ```

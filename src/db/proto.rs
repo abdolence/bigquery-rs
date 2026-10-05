@@ -6,17 +6,17 @@ use crate::types::error::CodecError;
 use crate::{BigQueryInstant, BigQueryResult};
 use std::time::Duration;
 
-/// `d` in whole milliseconds as the integer type of the request field `field`.
+/// `duration` in whole milliseconds as the integer type of the request field `field`.
 ///
 /// # Errors
 /// [`BigQueryError::InvalidParametersError`] for `field` if the milliseconds do not fit `T`.
-pub(crate) fn millis<T: TryFrom<u128>>(field: &str, d: Duration) -> BigQueryResult<T> {
-    T::try_from(d.as_millis()).map_err(|_| {
+pub(crate) fn millis<T: TryFrom<u128>>(field: &str, duration: Duration) -> BigQueryResult<T> {
+    T::try_from(duration.as_millis()).map_err(|_| {
         BigQueryError::invalid_parameters(
             field,
             format!(
-                "{d:?} is {} ms, which does not fit in {}",
-                d.as_millis(),
+                "{duration:?} is {} ms, which does not fit in {}",
+                duration.as_millis(),
                 std::any::type_name::<T>()
             ),
         )

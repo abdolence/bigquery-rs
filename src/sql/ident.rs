@@ -87,15 +87,25 @@ impl ColumnPath {
     }
 }
 
-/// Why `segment` cannot name a column, if it cannot.
-fn column_name_violation(segment: &str) -> Option<String> {
+/// Why `segment` cannot be one segment of a column path, if it cannot: it is empty or holds a
+/// control character, which cannot be quoted into SQL unambiguously.
+pub(crate) fn column_segment_violation(segment: &str) -> Option<String> {
     if segment.is_empty() {
-        return Some("has an empty segment".into());
+        return Some("is empty".into());
     }
     segment
         .chars()
-        .find(|c| c.is_control())
-        .map(|c| format!("holds the control character {c:?}"))
+        .find(|character| character.is_control())
+        .map(|character| format!("holds the control character {character:?}"))
+}
+
+/// `name` under the dotted path `prefix`, or `name` alone when `prefix` is the top level.
+pub(crate) fn dotted_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
 }
 
 impl FromStr for ColumnPath {
@@ -103,11 +113,14 @@ impl FromStr for ColumnPath {
 
     fn from_str(path: &str) -> Result<Self, Self::Err> {
         let segments: Vec<String> = path.split('.').map(String::from).collect();
-        if let Some(violation) = segments.iter().find_map(|s| column_name_violation(s)) {
+        if let Some(violation) = segments
+            .iter()
+            .find_map(|segment| column_segment_violation(segment))
+        {
             return Err(BigQueryInvalidParametersError::new(
                 BigQueryInvalidParametersPublicDetails::new(
                     path.to_string(),
-                    format!("the column path {path:?} {violation}"),
+                    format!("the column path {path:?} has a segment that {violation}"),
                 ),
             ));
         }

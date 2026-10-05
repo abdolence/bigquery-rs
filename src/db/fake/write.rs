@@ -1,6 +1,5 @@
 //! Fake answers for the Storage Write RPCs: `AppendRows`, `GetWriteStream`,
-//! `CreateWriteStream`, `FinalizeWriteStream` and `BatchCommitWriteStreams`, and the streaming
-//! writer's tests against them.
+//! `CreateWriteStream`, `FinalizeWriteStream` and `BatchCommitWriteStreams`.
 
 use super::FakeCall;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_request::Rows;

@@ -298,8 +298,7 @@ mod tests {
     use super::*;
     use crate::errors::BigQueryInvalidParametersError;
 
-    const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-    const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+    use crate::db::fake::{ORDERS, SHOP};
 
     /// The field an invalid-parameters error names.
     fn invalid_field<T: std::fmt::Debug>(result: BigQueryResult<T>) -> String {

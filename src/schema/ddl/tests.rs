@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::sql::tests::{injection_corpus, pieces, Piece};
+use crate::types::testkit::field;
 use crate::BigQueryLabels;
 use crate::{
     BigQueryDatasetId, BigQueryDatasetRef, BigQueryDecimalParams, BigQueryFieldMode,
@@ -23,20 +24,6 @@ fn assert_same_statement(hostile: &str, plain: &str, hostile_value: &str, plain_
     assert_eq!(swapped, pieces(plain), "{hostile_value:.80?}");
 }
 
-fn column(
-    name: &str,
-    field_type: BigQueryFieldType,
-    mode: BigQueryFieldMode,
-) -> BigQueryFieldSchema {
-    BigQueryFieldSchema {
-        name: name.into(),
-        field_type,
-        mode,
-        description: None,
-        default_value_expression: None,
-    }
-}
-
 fn target(columns: Vec<BigQueryFieldSchema>) -> BigQueryTableTarget {
     BigQueryTableTarget {
         columns,
@@ -53,7 +40,7 @@ fn target(columns: Vec<BigQueryFieldSchema>) -> BigQueryTableTarget {
 const STRING: BigQueryFieldType = BigQueryFieldType::String { max_length: None };
 
 fn hostile_target(value: &str) -> BigQueryTableTarget {
-    let mut id = column("id", BigQueryFieldType::Int64, BigQueryFieldMode::Required);
+    let mut id = field("id", BigQueryFieldType::Int64, BigQueryFieldMode::Required);
     id.description = Some(value.to_string());
     let mut target = target(vec![id]);
     target.description = Some(value.to_string());
@@ -120,7 +107,7 @@ fn hostile_descriptions_and_labels_render_as_single_literals_that_parse_back() {
 fn hostile_column_names_render_as_single_identifiers() {
     let table = orders().ddl("acme-prod");
     let create = |name: &str| {
-        let target = target(vec![column(name, STRING, BigQueryFieldMode::Nullable)]);
+        let target = target(vec![field(name, STRING, BigQueryFieldMode::Nullable)]);
         table.create(&target, false).expect("DDL")
     };
     let widen = |name: &str| table.widen_column(name, &BigQueryFieldType::Numeric(None));
@@ -136,11 +123,11 @@ fn hostile_column_names_render_as_single_identifiers() {
 
 #[test]
 fn create_or_replace_restates_columns_key_partitioning_clustering_and_options() {
-    let mut id = column("id", BigQueryFieldType::Int64, BigQueryFieldMode::Required);
+    let mut id = field("id", BigQueryFieldType::Int64, BigQueryFieldMode::Required);
     id.description = Some("key".into());
-    let mut city = column("city", STRING, BigQueryFieldMode::Required);
+    let mut city = field("city", STRING, BigQueryFieldMode::Required);
     city.description = Some("c".into());
-    let mut total = column(
+    let mut total = field(
         "total",
         BigQueryFieldType::Numeric(Some(BigQueryDecimalParams {
             precision: 10,
@@ -151,13 +138,13 @@ fn create_or_replace_restates_columns_key_partitioning_clustering_and_options() 
     total.default_value_expression = Some("0".into());
     let mut target = target(vec![
         id,
-        column(
+        field(
             "ts",
             BigQueryFieldType::Timestamp,
             BigQueryFieldMode::Nullable,
         ),
-        column("tags", STRING, BigQueryFieldMode::Repeated),
-        column(
+        field("tags", STRING, BigQueryFieldMode::Repeated),
+        field(
             "addr",
             BigQueryFieldType::Struct(vec![city]),
             BigQueryFieldMode::Nullable,
@@ -197,7 +184,7 @@ fn create_or_replace_restates_columns_key_partitioning_clustering_and_options() 
 
 #[test]
 fn drop_and_create_is_one_script() {
-    let target = target(vec![column(
+    let target = target(vec![field(
         "id",
         BigQueryFieldType::Int64,
         BigQueryFieldMode::Nullable,
@@ -241,7 +228,7 @@ fn partition_expression_follows_the_column_type() {
     ];
     let table = orders().ddl("acme-prod");
     for (field_type, unit, expected) in cases {
-        let mut target = target(vec![column(
+        let mut target = target(vec![field(
             "c",
             field_type.clone(),
             BigQueryFieldMode::Nullable,
@@ -257,7 +244,7 @@ fn partition_expression_follows_the_column_type() {
         );
     }
 
-    let mut ingestion = target(vec![column("c", STRING, BigQueryFieldMode::Nullable)]);
+    let mut ingestion = target(vec![field("c", STRING, BigQueryFieldMode::Nullable)]);
     ingestion.partitioning = Some(BigQueryPartitioning::Time {
         unit: BigQueryPartitionUnit::Day,
         column: None,
@@ -265,7 +252,7 @@ fn partition_expression_follows_the_column_type() {
     let sql = table.create(&ingestion, false).expect("DDL");
     assert!(sql.contains("\nPARTITION BY _PARTITIONDATE"), "{sql}");
 
-    let mut range = target(vec![column(
+    let mut range = target(vec![field(
         "c",
         BigQueryFieldType::Int64,
         BigQueryFieldMode::Nullable,
@@ -282,7 +269,7 @@ fn partition_expression_follows_the_column_type() {
         "{sql}"
     );
 
-    let mut unknown = target(vec![column("c", STRING, BigQueryFieldMode::Nullable)]);
+    let mut unknown = target(vec![field("c", STRING, BigQueryFieldMode::Nullable)]);
     unknown.partitioning = Some(BigQueryPartitioning::Time {
         unit: BigQueryPartitionUnit::Day,
         column: Some("c".into()),
@@ -363,11 +350,19 @@ fn without_comments(sql: &str) -> String {
 fn a_default_is_one_parenthesized_operand() {
     let table = orders().ddl("acme-prod");
     let rendered = |expression: &str, code: &str| {
-        let mut c = column("c", BigQueryFieldType::Int64, BigQueryFieldMode::Nullable);
-        c.default_value_expression = Some(expression.into());
+        let mut quantity = field(
+            "quantity",
+            BigQueryFieldType::Int64,
+            BigQueryFieldMode::Nullable,
+        );
+        quantity.default_value_expression = Some(expression.into());
         let target = target(vec![
-            c,
-            column("n", BigQueryFieldType::Int64, BigQueryFieldMode::Nullable),
+            quantity,
+            field(
+                "amount",
+                BigQueryFieldType::Int64,
+                BigQueryFieldMode::Nullable,
+            ),
         ]);
         let sql = table.create(&target, false).expect("DDL");
         let parsed = without_comments(&sql).replacen(code, "E", 1);
@@ -392,8 +387,8 @@ fn a_default_is_one_parenthesized_operand() {
 fn a_nested_field_name_stays_one_identifier() {
     let table = orders().ddl("acme-prod");
     let nested = |name: &str| {
-        let inner = column(name, STRING, BigQueryFieldMode::Nullable);
-        let outer = column(
+        let inner = field(name, STRING, BigQueryFieldMode::Nullable);
+        let outer = field(
             name,
             BigQueryFieldType::Struct(vec![inner]),
             BigQueryFieldMode::Repeated,
@@ -401,7 +396,7 @@ fn a_nested_field_name_stays_one_identifier() {
         BigQueryFieldType::Struct(vec![outer])
     };
     let create = |name: &str| {
-        let target = target(vec![column("s", nested(name), BigQueryFieldMode::Nullable)]);
+        let target = target(vec![field("s", nested(name), BigQueryFieldMode::Nullable)]);
         table.create(&target, false).expect("DDL")
     };
     let widen = |name: &str| table.widen_column("s", &nested(name));
@@ -438,7 +433,7 @@ fn hostile_key_clustering_and_partitioning_columns_render_as_single_identifiers(
     ];
     for (field_type, unit) in partitionings {
         let create = |name: &str| {
-            let mut target = target(vec![column(
+            let mut target = target(vec![field(
                 name,
                 field_type.clone(),
                 BigQueryFieldMode::Required,

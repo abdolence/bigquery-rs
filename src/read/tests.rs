@@ -2,7 +2,7 @@ use crate::db::fake::read::{requested_compression, FakeReadTable};
 use crate::db::fake::spans::{bigquery_fields, CapturedSpans};
 use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-use crate::{BigQueryDatasetId, BigQueryResult, BigQueryTableId};
+use crate::BigQueryResult;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
@@ -18,8 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+use crate::db::fake::{ORDERS, SHOP};
 
 /// `id, name, extra`, with `ids` as the ids.
 fn people(ids: &[i64]) -> RecordBatch {

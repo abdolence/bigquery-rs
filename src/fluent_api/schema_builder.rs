@@ -109,15 +109,15 @@ impl<'a> BigQueryTableSchemaBuilder<'a> {
     ///
     /// ```rust
     /// # use bigquery::*;
-    /// # fn declare(c: BigQuerySchemaColumnsBuilder) -> Vec<BigQuerySchemaColumn> {
+    /// # fn declare(columns: BigQuerySchemaColumnsBuilder) -> Vec<BigQuerySchemaColumn> {
     /// struct Order {
     ///     id: i64,
     ///     note: Option<String>,
     /// }
     ///
-    /// c.fields([
-    ///     c.field(path!(Order::id)).int64().required(),
-    ///     c.field(path!(Order::note)).string().description("free text"),
+    /// columns.fields([
+    ///     columns.field(path!(Order::id)).int64().required(),
+    ///     columns.field(path!(Order::note)).string().description("free text"),
     /// ])
     /// # }
     /// ```

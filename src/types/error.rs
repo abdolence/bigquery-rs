@@ -76,8 +76,8 @@ impl CodecError {
     }
 
     /// Prefixes the path with a list position, as the error leaves that element.
-    pub(crate) fn at_index(mut self, i: usize) -> Self {
-        self.reversed_path.push(PathSegment::Index(i));
+    pub(crate) fn at_index(mut self, index: usize) -> Self {
+        self.reversed_path.push(PathSegment::Index(index));
         self
     }
 

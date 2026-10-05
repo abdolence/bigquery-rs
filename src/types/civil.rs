@@ -94,44 +94,44 @@ pub(crate) fn fmt_timestamp(micros: i64, out: &mut String) -> Result<(), CodecEr
     Ok(())
 }
 
-/// `s` as jiff parses it, `InvalidText` when it does not, or when it writes a leap second:
+/// `text` as jiff parses it, `InvalidText` when it does not, or when it writes a leap second:
 /// jiff reads `23:59:60` as `23:59:59`, a value one second off what the caller wrote.
 fn parsed<'s, T>(
-    s: &'s str,
+    text: &'s str,
     name: &str,
     parse: impl FnOnce(&'s str) -> Result<T, jiff::Error>,
 ) -> Result<T, CodecError> {
     let invalid = |reason: &dyn std::fmt::Display| {
-        CodecError::invalid_text(format!("invalid {name} `{s}`: {reason}"))
+        CodecError::invalid_text(format!("invalid {name} `{text}`: {reason}"))
     };
-    if s.contains(":60") {
+    if text.contains(":60") {
         return Err(invalid(&"BigQuery has no leap seconds"));
     }
-    parse(s).map_err(|err| invalid(&err))
+    parse(text).map_err(|err| invalid(&err))
 }
 
 /// DATE text as days. A year below 1 is `OutOfRange`, since BigQuery starts at year 1.
-pub(crate) fn parse_date(s: &str) -> Result<i32, CodecError> {
-    let date: jiff::civil::Date = parsed(s, "DATE", str::parse)?;
+pub(crate) fn parse_date(text: &str) -> Result<i32, CodecError> {
+    let date: jiff::civil::Date = parsed(text, "DATE", str::parse)?;
     if date.year() < 1 {
         return Err(CodecError::out_of_range(format!(
-            "DATE `{s}` is before BigQuery's 0001-01-01"
+            "DATE `{text}` is before BigQuery's 0001-01-01"
         )));
     }
     Ok(raw_date_days(date))
 }
 
 /// TIME text as microseconds since midnight, sub-microsecond digits dropped.
-pub(crate) fn parse_time(s: &str) -> Result<i64, CodecError> {
-    parsed(s, "TIME", str::parse).map(time_micros)
+pub(crate) fn parse_time(text: &str) -> Result<i64, CodecError> {
+    parsed(text, "TIME", str::parse).map(time_micros)
 }
 
 /// DATETIME text, `T` or a space between date and time and no zone, as civil microseconds.
-pub(crate) fn parse_datetime(s: &str) -> Result<i64, CodecError> {
-    let micros = raw_datetime_micros(parsed(s, "DATETIME", str::parse)?);
+pub(crate) fn parse_datetime(text: &str) -> Result<i64, CodecError> {
+    let micros = raw_datetime_micros(parsed(text, "DATETIME", str::parse)?);
     if micros < TIMESTAMP_MIN_MICROS {
         return Err(CodecError::out_of_range(format!(
-            "DATETIME `{s}` is before BigQuery's 0001-01-01T00:00:00"
+            "DATETIME `{text}` is before BigQuery's 0001-01-01T00:00:00"
         )));
     }
     Ok(micros)
@@ -140,11 +140,11 @@ pub(crate) fn parse_datetime(s: &str) -> Result<i64, CodecError> {
 /// TIMESTAMP text with an offset, `T` or a space between date and time, as UTC microseconds,
 /// sub-microsecond digits floored toward the past. It is parsed as its civil parts and offset
 /// rather than as a `jiff::Timestamp`, which ends 25 hours before BigQuery's range does.
-pub(crate) fn parse_timestamp(s: &str) -> Result<i64, CodecError> {
-    let pieces = parsed(s, "TIMESTAMP", jiff::fmt::temporal::Pieces::parse)?;
+pub(crate) fn parse_timestamp(text: &str) -> Result<i64, CodecError> {
+    let pieces = parsed(text, "TIMESTAMP", jiff::fmt::temporal::Pieces::parse)?;
     let (Some(time), Some(offset)) = (pieces.time(), pieces.to_numeric_offset()) else {
         return Err(CodecError::invalid_text(format!(
-            "invalid TIMESTAMP `{s}`: it needs a time and an offset"
+            "invalid TIMESTAMP `{text}`: it needs a time and an offset"
         )));
     };
     // A non-negative time of day floors when its nanoseconds are dropped, and the civil part
@@ -153,7 +153,7 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<i64, CodecError> {
     let utc = civil - i64::from(offset.seconds()) * MICROS_PER_SECOND;
     if !(TIMESTAMP_MIN_MICROS..=TIMESTAMP_MAX_MICROS).contains(&utc) {
         return Err(CodecError::out_of_range(format!(
-            "TIMESTAMP `{s}` is outside BigQuery's 0001-01-01 to 9999-12-31 UTC"
+            "TIMESTAMP `{text}` is outside BigQuery's 0001-01-01 to 9999-12-31 UTC"
         )));
     }
     Ok(utc)
@@ -161,37 +161,45 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<i64, CodecError> {
 
 /// TIME as Google's `CivilTimeEncoder.encodePacked64TimeMicros`, the form Storage Write takes.
 pub(crate) fn pack_time(micros: i64) -> i64 {
-    let secs = micros / MICROS_PER_SECOND;
-    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    (((h << 12) | (m << 6) | s) << 20) | (micros % MICROS_PER_SECOND)
+    let total_seconds = micros / MICROS_PER_SECOND;
+    let (hours, minutes, seconds) = (
+        total_seconds / 3600,
+        total_seconds / 60 % 60,
+        total_seconds % 60,
+    );
+    (((hours << 12) | (minutes << 6) | seconds) << 20) | (micros % MICROS_PER_SECOND)
 }
 
 /// DATETIME as Google's `CivilTimeEncoder.encodePacked64DatetimeMicros`. `micros` is inside
 /// BigQuery's DATETIME range.
 pub(crate) fn pack_datetime(micros: i64) -> i64 {
-    let tod = micros.rem_euclid(MICROS_PER_DAY);
+    let time_of_day_micros = micros.rem_euclid(MICROS_PER_DAY);
     let date = UNIX_EPOCH.saturating_add(SignedDuration::from_hours(
         micros.div_euclid(MICROS_PER_DAY) * 24,
     ));
-    let (y, mo, d) = (date.year(), date.month(), date.day());
-    let secs = tod / MICROS_PER_SECOND;
-    let (h, mi, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    let packed = (i64::from(y) << 26)
-        | (i64::from(mo) << 22)
-        | (i64::from(d) << 17)
-        | (h << 12)
-        | (mi << 6)
-        | s;
-    (packed << 20) | (tod % MICROS_PER_SECOND)
+    let (year, month, day) = (date.year(), date.month(), date.day());
+    let total_seconds = time_of_day_micros / MICROS_PER_SECOND;
+    let (hours, minutes, seconds) = (
+        total_seconds / 3600,
+        total_seconds / 60 % 60,
+        total_seconds % 60,
+    );
+    let packed = (i64::from(year) << 26)
+        | (i64::from(month) << 22)
+        | (i64::from(day) << 17)
+        | (hours << 12)
+        | (minutes << 6)
+        | seconds;
+    (packed << 20) | (time_of_day_micros % MICROS_PER_SECOND)
 }
 
 /// The inverse of [`pack_time`].
 #[cfg(test)]
 pub(crate) fn unpack_time(packed: i64) -> i64 {
     let micros = packed & 0xF_FFFF;
-    let secs = packed >> 20;
-    let (h, m, s) = ((secs >> 12) & 0x1F, (secs >> 6) & 0x3F, secs & 0x3F);
-    (h * 3600 + m * 60 + s) * MICROS_PER_SECOND + micros
+    let fields = packed >> 20;
+    let (hours, minutes, seconds) = ((fields >> 12) & 0x1F, (fields >> 6) & 0x3F, fields & 0x3F);
+    (hours * 3600 + minutes * 60 + seconds) * MICROS_PER_SECOND + micros
 }
 
 /// The inverse of [`pack_datetime`].
@@ -199,14 +207,14 @@ pub(crate) fn unpack_time(packed: i64) -> i64 {
 pub(crate) fn unpack_datetime(packed: i64) -> i64 {
     let micros = packed & 0xF_FFFF;
     let fields = packed >> 20;
-    let (h, mi, s) = ((fields >> 12) & 0x1F, (fields >> 6) & 0x3F, fields & 0x3F);
+    let (hours, minutes, seconds) = ((fields >> 12) & 0x1F, (fields >> 6) & 0x3F, fields & 0x3F);
     let date = jiff::civil::date(
         (fields >> 26) as i16,
         ((fields >> 22) & 0xF) as i8,
         ((fields >> 17) & 0x1F) as i8,
     );
     i64::from(raw_date_days(date)) * MICROS_PER_DAY
-        + (h * 3600 + mi * 60 + s) * MICROS_PER_SECOND
+        + (hours * 3600 + minutes * 60 + seconds) * MICROS_PER_SECOND
         + micros
 }
 
@@ -227,12 +235,12 @@ pub(crate) fn jiff_time(micros: i64) -> Result<jiff::civil::Time, CodecError> {
             "TIME of {micros} microseconds is outside 0 to 86400000000"
         )));
     }
-    let secs = micros / MICROS_PER_SECOND;
+    let seconds = micros / MICROS_PER_SECOND;
     // Each part is bounded by the range check above.
     jiff::civil::Time::new(
-        (secs / 3600) as i8,
-        (secs / 60 % 60) as i8,
-        (secs % 60) as i8,
+        (seconds / 3600) as i8,
+        (seconds / 60 % 60) as i8,
+        (seconds % 60) as i8,
         ((micros % MICROS_PER_SECOND) * 1000) as i32,
     )
     .map_err(|err| CodecError::out_of_range(format!("TIME of {micros} microseconds: {err}")))
@@ -267,42 +275,43 @@ pub(crate) fn jiff_timestamp(micros: i64) -> Result<jiff::Timestamp, CodecError>
 }
 
 /// The civil microseconds of a jiff datetime, without BigQuery's range check.
-pub(crate) fn raw_datetime_micros(dt: jiff::civil::DateTime) -> i64 {
-    i64::from(raw_date_days(dt.date())) * MICROS_PER_DAY + time_micros(dt.time())
+pub(crate) fn raw_datetime_micros(datetime: jiff::civil::DateTime) -> i64 {
+    i64::from(raw_date_days(datetime.date())) * MICROS_PER_DAY + time_micros(datetime.time())
 }
 
 /// The microseconds of a jiff timestamp, floored, without BigQuery's range check.
-pub(crate) fn raw_timestamp_micros(ts: jiff::Timestamp) -> i64 {
-    ts.as_second() * MICROS_PER_SECOND + i64::from(ts.subsec_nanosecond()).div_euclid(1000)
+pub(crate) fn raw_timestamp_micros(timestamp: jiff::Timestamp) -> i64 {
+    timestamp.as_second() * MICROS_PER_SECOND
+        + i64::from(timestamp.subsec_nanosecond()).div_euclid(1000)
 }
 
 /// BigQuery days for a jiff date; `OutOfRange` for a year below 1.
 #[cfg(test)]
-pub(crate) fn date_days(d: jiff::civil::Date) -> Result<i32, CodecError> {
-    let days = raw_date_days(d);
+pub(crate) fn date_days(date: jiff::civil::Date) -> Result<i32, CodecError> {
+    let days = raw_date_days(date);
     if days < DATE_MIN_DAYS {
         return Err(CodecError::out_of_range(format!(
-            "DATE {d} is before BigQuery's 0001-01-01"
+            "DATE {date} is before BigQuery's 0001-01-01"
         )));
     }
     Ok(days)
 }
 
 /// Microseconds since midnight for a jiff time, sub-microsecond digits dropped.
-pub(crate) fn time_micros(t: jiff::civil::Time) -> i64 {
-    i64::from(t.hour()) * 3_600_000_000
-        + i64::from(t.minute()) * 60_000_000
-        + i64::from(t.second()) * MICROS_PER_SECOND
-        + i64::from(t.subsec_nanosecond() / 1000)
+pub(crate) fn time_micros(time: jiff::civil::Time) -> i64 {
+    i64::from(time.hour()) * 3_600_000_000
+        + i64::from(time.minute()) * 60_000_000
+        + i64::from(time.second()) * MICROS_PER_SECOND
+        + i64::from(time.subsec_nanosecond() / 1000)
 }
 
 /// Civil microseconds for a jiff datetime; `OutOfRange` for a year below 1.
 #[cfg(test)]
-pub(crate) fn datetime_micros(dt: jiff::civil::DateTime) -> Result<i64, CodecError> {
-    let micros = raw_datetime_micros(dt);
+pub(crate) fn datetime_micros(datetime: jiff::civil::DateTime) -> Result<i64, CodecError> {
+    let micros = raw_datetime_micros(datetime);
     if micros < TIMESTAMP_MIN_MICROS {
         return Err(CodecError::out_of_range(format!(
-            "DATETIME {dt} is before BigQuery's 0001-01-01T00:00:00"
+            "DATETIME {datetime} is before BigQuery's 0001-01-01T00:00:00"
         )));
     }
     Ok(micros)
@@ -311,11 +320,11 @@ pub(crate) fn datetime_micros(dt: jiff::civil::DateTime) -> Result<i64, CodecErr
 /// Microseconds since the epoch for a jiff timestamp, floored to the microsecond;
 /// `OutOfRange` before BigQuery's 0001-01-01T00:00:00Z.
 #[cfg(test)]
-pub(crate) fn timestamp_micros(ts: jiff::Timestamp) -> Result<i64, CodecError> {
-    let micros = raw_timestamp_micros(ts);
+pub(crate) fn timestamp_micros(timestamp: jiff::Timestamp) -> Result<i64, CodecError> {
+    let micros = raw_timestamp_micros(timestamp);
     if micros < TIMESTAMP_MIN_MICROS {
         return Err(CodecError::out_of_range(format!(
-            "TIMESTAMP {ts} is before BigQuery's 0001-01-01T00:00:00Z"
+            "TIMESTAMP {timestamp} is before BigQuery's 0001-01-01T00:00:00Z"
         )));
     }
     Ok(micros)
@@ -324,19 +333,7 @@ pub(crate) fn timestamp_micros(ts: jiff::Timestamp) -> Result<i64, CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn written<R, F: Fn(&mut String) -> R>(f: F) -> String {
-        let mut out = String::new();
-        f(&mut out);
-        out
-    }
-
-    fn kind<T: std::fmt::Debug>(result: Result<T, CodecError>) -> BigQueryCodecErrorKind {
-        match result.map_err(CodecError::into_serialize) {
-            Err(crate::errors::BigQueryError::SerializeError(err)) => err.kind,
-            other => panic!("expected a codec error, got {other:?}"),
-        }
-    }
+    use crate::types::testkit::{error_kind, written};
 
     #[test]
     fn civil_days_round_trip_over_bigquery_range() {
@@ -362,63 +359,75 @@ mod tests {
 
     #[test]
     fn temporal_strings_format_and_parse() {
-        assert_eq!(written(|o| fmt_date(19782, o)), "2024-02-29");
-        assert_eq!(written(|o| fmt_date(DATE_MIN_DAYS, o)), "0001-01-01");
-        assert_eq!(written(|o| fmt_time(0, o)), "00:00:00");
-        assert_eq!(written(|o| fmt_time(86_399_999_999, o)), "23:59:59.999999");
-        assert_eq!(written(|o| fmt_time(45_296_000_100, o)), "12:34:56.000100");
-        let dt = 19782 * MICROS_PER_DAY + 45_296_789_012;
+        assert_eq!(written(|text| fmt_date(19782, text)), "2024-02-29");
+        assert_eq!(written(|text| fmt_date(DATE_MIN_DAYS, text)), "0001-01-01");
+        assert_eq!(written(|text| fmt_time(0, text)), "00:00:00");
         assert_eq!(
-            written(|o| fmt_datetime(dt, o)),
+            written(|text| fmt_time(86_399_999_999, text)),
+            "23:59:59.999999"
+        );
+        assert_eq!(
+            written(|text| fmt_time(45_296_000_100, text)),
+            "12:34:56.000100"
+        );
+        let civil_micros = 19782 * MICROS_PER_DAY + 45_296_789_012;
+        assert_eq!(
+            written(|text| fmt_datetime(civil_micros, text)),
             "2024-02-29T12:34:56.789012"
         );
         assert_eq!(
-            written(|o| fmt_timestamp(dt, o)),
+            written(|text| fmt_timestamp(civil_micros, text)),
             "2024-02-29T12:34:56.789012Z"
         );
         assert_eq!(
-            written(|o| fmt_timestamp(-1, o)),
+            written(|text| fmt_timestamp(-1, text)),
             "1969-12-31T23:59:59.999999Z"
         );
         assert_eq!(
-            written(|o| fmt_timestamp(TIMESTAMP_MAX_MICROS, o)),
+            written(|text| fmt_timestamp(TIMESTAMP_MAX_MICROS, text)),
             "9999-12-31T23:59:59.999999Z"
         );
 
         assert_eq!(parse_date("2024-02-29").ok(), Some(19782));
         assert_eq!(
-            kind(parse_date("2023-02-29")),
+            error_kind(parse_date("2023-02-29")),
             BigQueryCodecErrorKind::InvalidText
         );
         assert_eq!(
-            kind(parse_date("0000-01-01")),
+            error_kind(parse_date("0000-01-01")),
             BigQueryCodecErrorKind::OutOfRange
         );
         assert_eq!(parse_time("12:34:56.000100").ok(), Some(45_296_000_100));
         assert_eq!(parse_time("12:34:56").ok(), Some(45_296_000_000));
         assert_eq!(parse_time("12:34:56.5").ok(), Some(45_296_500_000));
         assert_eq!(
-            kind(parse_time("24:00:00")),
+            error_kind(parse_time("24:00:00")),
             BigQueryCodecErrorKind::InvalidText
         );
         assert_eq!(
-            kind(parse_time("23:59:60")),
+            error_kind(parse_time("23:59:60")),
             BigQueryCodecErrorKind::InvalidText,
             "a leap second is not read as 23:59:59"
         );
-        assert_eq!(parse_datetime("2024-02-29T12:34:56.789012").ok(), Some(dt));
-        assert_eq!(parse_datetime("2024-02-29 12:34:56.789012").ok(), Some(dt));
+        assert_eq!(
+            parse_datetime("2024-02-29T12:34:56.789012").ok(),
+            Some(civil_micros)
+        );
+        assert_eq!(
+            parse_datetime("2024-02-29 12:34:56.789012").ok(),
+            Some(civil_micros)
+        );
         assert_eq!(
             parse_timestamp("2024-02-29T12:34:56.789012Z").ok(),
-            Some(dt)
+            Some(civil_micros)
         );
         assert_eq!(
             parse_timestamp("2024-02-29 12:34:56.789012Z").ok(),
-            Some(dt)
+            Some(civil_micros)
         );
         assert_eq!(
             parse_timestamp("2024-02-29T14:34:56.789012+02:00").ok(),
-            Some(dt)
+            Some(civil_micros)
         );
         assert_eq!(
             parse_timestamp("9999-12-31T23:59:59.999999Z").ok(),
@@ -447,57 +456,57 @@ mod tests {
             "2016-12-31T23:59:60Z",
         ] {
             assert_eq!(
-                kind(parse_timestamp(bad)),
+                error_kind(parse_timestamp(bad)),
                 BigQueryCodecErrorKind::InvalidText,
                 "{bad}"
             );
         }
         assert_eq!(
-            kind(parse_timestamp("0001-01-01T00:00:00+01:00")),
+            error_kind(parse_timestamp("0001-01-01T00:00:00+01:00")),
             BigQueryCodecErrorKind::OutOfRange
         );
     }
 
     #[test]
     fn jiff_display_forms_parse_to_the_same_value() {
-        let d: jiff::civil::Date = "2024-02-29".parse().expect("valid test input");
-        assert_eq!(parse_date(&d.to_string()).ok(), Some(19782));
-        let t: jiff::Timestamp = "2024-02-29T12:34:56.789012Z"
+        let date: jiff::civil::Date = "2024-02-29".parse().expect("valid test input");
+        assert_eq!(parse_date(&date.to_string()).ok(), Some(19782));
+        let timestamp: jiff::Timestamp = "2024-02-29T12:34:56.789012Z"
             .parse()
             .expect("valid test input");
         assert_eq!(
-            parse_timestamp(&t.to_string()).ok(),
+            parse_timestamp(&timestamp.to_string()).ok(),
             Some(19782 * MICROS_PER_DAY + 45_296_789_012)
         );
-        let tm: jiff::civil::Time = "23:59:59.999999".parse().expect("valid test input");
-        assert_eq!(parse_time(&tm.to_string()).ok(), Some(86_399_999_999));
-        let dt: jiff::civil::DateTime = "2024-02-29T12:34:56.789012"
+        let time: jiff::civil::Time = "23:59:59.999999".parse().expect("valid test input");
+        assert_eq!(parse_time(&time.to_string()).ok(), Some(86_399_999_999));
+        let datetime: jiff::civil::DateTime = "2024-02-29T12:34:56.789012"
             .parse()
             .expect("valid test input");
         assert_eq!(
-            parse_datetime(&dt.to_string()).ok(),
+            parse_datetime(&datetime.to_string()).ok(),
             Some(19782 * MICROS_PER_DAY + 45_296_789_012)
         );
 
-        assert_eq!(date_days(d).ok(), Some(19782));
-        assert_eq!(jiff_date(19782).ok(), Some(d));
-        assert_eq!(time_micros(tm), 86_399_999_999);
-        assert_eq!(jiff_time(86_399_999_999).ok(), Some(tm));
+        assert_eq!(date_days(date).ok(), Some(19782));
+        assert_eq!(jiff_date(19782).ok(), Some(date));
+        assert_eq!(time_micros(time), 86_399_999_999);
+        assert_eq!(jiff_time(86_399_999_999).ok(), Some(time));
         assert_eq!(
-            datetime_micros(dt).ok(),
+            datetime_micros(datetime).ok(),
             Some(19782 * MICROS_PER_DAY + 45_296_789_012)
         );
         assert_eq!(
             jiff_datetime(19782 * MICROS_PER_DAY + 45_296_789_012).ok(),
-            Some(dt)
+            Some(datetime)
         );
         assert_eq!(
-            timestamp_micros(t).ok(),
+            timestamp_micros(timestamp).ok(),
             Some(19782 * MICROS_PER_DAY + 45_296_789_012)
         );
         assert_eq!(
             jiff_timestamp(19782 * MICROS_PER_DAY + 45_296_789_012).ok(),
-            Some(t)
+            Some(timestamp)
         );
 
         let before_epoch: jiff::Timestamp = "1969-12-31T23:59:59.9999999Z"
@@ -506,16 +515,16 @@ mod tests {
         assert_eq!(timestamp_micros(before_epoch).ok(), Some(-1), "floored");
         let year_zero = jiff::civil::date(0, 12, 31);
         assert_eq!(
-            kind(date_days(year_zero)),
+            error_kind(date_days(year_zero)),
             BigQueryCodecErrorKind::OutOfRange
         );
         assert_eq!(
-            kind(jiff_timestamp(TIMESTAMP_MAX_MICROS)),
+            error_kind(jiff_timestamp(TIMESTAMP_MAX_MICROS)),
             BigQueryCodecErrorKind::OutOfRange,
             "above jiff's maximum"
         );
         assert_eq!(
-            kind(jiff_time(MICROS_PER_DAY)),
+            error_kind(jiff_time(MICROS_PER_DAY)),
             BigQueryCodecErrorKind::OutOfRange
         );
     }
@@ -527,12 +536,13 @@ mod tests {
             pack_time(45_296_123_456),
             (((12 << 12) | (34 << 6) | 56) << 20) | 123456
         );
-        let dt = i64::from(raw_date_days(jiff::civil::date(2026, 10, 4))) * MICROS_PER_DAY
+        let civil_micros = i64::from(raw_date_days(jiff::civil::date(2026, 10, 4)))
+            * MICROS_PER_DAY
             + 45_296_123_456;
         let secs = (2026i64 << 26) | (10 << 22) | (4 << 17) | (12 << 12) | (34 << 6) | 56;
-        assert_eq!(pack_datetime(dt), (secs << 20) | 123456);
+        assert_eq!(pack_datetime(civil_micros), (secs << 20) | 123456);
         assert_eq!(unpack_time(pack_time(45_296_123_456)), 45_296_123_456);
-        assert_eq!(unpack_datetime(pack_datetime(dt)), dt);
+        assert_eq!(unpack_datetime(pack_datetime(civil_micros)), civil_micros);
         let min = i64::from(DATE_MIN_DAYS) * MICROS_PER_DAY;
         assert_eq!(unpack_datetime(pack_datetime(min)), min);
     }

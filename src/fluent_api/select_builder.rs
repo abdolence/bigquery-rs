@@ -98,10 +98,10 @@ where
     ///     .fluent()
     ///     .select()
     ///     .from(BigQueryDatasetId::from_static("shop").table(BigQueryTableId::from_static("people")))
-    ///     .filter(|f| {
-    ///         f.for_all([
-    ///             f.field(path!(Person::city)).eq(city),
-    ///             f.field(path!(Person::year)).ge(2010),
+    ///     .filter(|filter| {
+    ///         filter.for_all([
+    ///             filter.field(path!(Person::city)).eq(city),
+    ///             filter.field(path!(Person::year)).ge(2010),
     ///         ])
     ///     })
     ///     .obj()

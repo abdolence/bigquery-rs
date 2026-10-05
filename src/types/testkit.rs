@@ -1,14 +1,54 @@
 //! proptest strategies for values inside BigQuery's range, in the canonical form both codecs'
 //! round-trip tests compare: the integers and bytes BigQuery itself stores.
 
+use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::types::civil::{
     DATE_MAX_DAYS, DATE_MIN_DAYS, MICROS_PER_DAY, TIMESTAMP_MAX_MICROS, TIMESTAMP_MIN_MICROS,
 };
+use crate::types::error::CodecError;
 use crate::types::interval::BigQueryInterval;
 use crate::types::kind::FieldKind;
-use crate::types::schema::BigQueryRangeElementType;
+use crate::types::schema::{
+    BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryRangeElementType,
+};
 use arrow_buffer::i256;
 use proptest::prelude::*;
+
+/// A column with no description and no default value.
+pub(crate) fn field(
+    name: &str,
+    field_type: BigQueryFieldType,
+    mode: BigQueryFieldMode,
+) -> BigQueryFieldSchema {
+    BigQueryFieldSchema {
+        name: name.into(),
+        field_type,
+        mode,
+        description: None,
+        default_value_expression: None,
+    }
+}
+
+/// The text `write` appends to an empty `String`.
+pub(crate) fn written<R>(write: impl FnOnce(&mut String) -> R) -> String {
+    let mut out = String::new();
+    write(&mut out);
+    out
+}
+
+/// The kind of the codec error `result` holds, as a caller sees it in
+/// [`BigQueryError::SerializeError`].
+///
+/// # Panics
+/// When `result` is not a codec error.
+pub(crate) fn error_kind<T: std::fmt::Debug>(
+    result: Result<T, CodecError>,
+) -> BigQueryCodecErrorKind {
+    match result.map_err(CodecError::into_serialize) {
+        Err(BigQueryError::SerializeError(err)) => err.kind,
+        other => panic!("expected a codec error, got {other:?}"),
+    }
+}
 
 /// One value of a column, in BigQuery's own units.
 #[derive(Clone, Debug, PartialEq)]
@@ -131,11 +171,13 @@ impl Canonical {
         )
             .prop_filter(
                 "a bounded range needs start < end",
-                |(start, end)| !matches!((start, end), (Some(s), Some(e)) if s == e),
+                |(start, end)| !matches!((start, end), (Some(start), Some(end)) if start == end),
             )
-            .prop_map(move |(a, b)| {
-                let (start, end) = match (a, b) {
-                    (Some(a), Some(b)) => (Some(a.min(b)), Some(a.max(b))),
+            .prop_map(move |(first, second)| {
+                let (start, end) = match (first, second) {
+                    (Some(first), Some(second)) => {
+                        (Some(first.min(second)), Some(first.max(second)))
+                    }
                     other => other,
                 };
                 Canonical::Range {
@@ -218,10 +260,10 @@ mod tests {
             (FieldKind::Geography, Canonical::Geography(wkt)) => {
                 wkt.starts_with("POINT(") && wkt.ends_with(')')
             }
-            (FieldKind::Interval, Canonical::Interval(iv)) => {
-                iv.nanos % 1000 == 0
-                    && (-120_000..=120_000).contains(&iv.months)
-                    && (-3_660_000..=3_660_000).contains(&iv.days)
+            (FieldKind::Interval, Canonical::Interval(interval)) => {
+                interval.nanos % 1000 == 0
+                    && (-120_000..=120_000).contains(&interval.months)
+                    && (-3_660_000..=3_660_000).contains(&interval.days)
             }
             (
                 FieldKind::Range,

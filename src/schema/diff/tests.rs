@@ -2,29 +2,18 @@
 //! normalisation, rename, recreate and request-body rules the plan depends on.
 
 use super::*;
+use crate::db::fake::table::v2_field;
+use crate::db::fake::{ORDERS, SHOP};
 use crate::schema::declaration::BigQueryTableDeclarationDraft;
+use crate::types::testkit::field;
 use crate::{
-    BigQueryDatasetId, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType,
-    BigQueryPartitionUnit, BigQueryPartitioning, BigQueryRecreateMethod, BigQueryRecreatePolicy,
-    BigQueryRefusal, BigQuerySchemaColumn, BigQuerySchemaColumnsBuilder, BigQueryTableId,
-    BigQueryWithheldChange, BigQueryWithheldReason,
+    BigQueryFieldMode, BigQueryFieldType, BigQueryPartitionUnit, BigQueryPartitioning,
+    BigQueryRecreateMethod, BigQueryRecreatePolicy, BigQueryRefusal, BigQuerySchemaColumn,
+    BigQuerySchemaColumnsBuilder, BigQueryWithheldChange, BigQueryWithheldReason,
 };
 use std::collections::HashMap;
 
 const COLUMNS: BigQuerySchemaColumnsBuilder = BigQuerySchemaColumnsBuilder;
-
-fn table_ref() -> BigQueryTableRef {
-    BigQueryDatasetId::from_static("shop").table(BigQueryTableId::from_static("orders"))
-}
-
-fn v2_field(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
-    v2::TableFieldSchema {
-        name: name.into(),
-        r#type: ty.into(),
-        mode: mode.into(),
-        ..Default::default()
-    }
-}
 
 fn v2_record(name: &str, fields: Vec<v2::TableFieldSchema>) -> v2::TableFieldSchema {
     v2::TableFieldSchema {
@@ -76,7 +65,7 @@ fn declare(
     columns: Vec<BigQuerySchemaColumn>,
     set: impl FnOnce(&mut BigQueryTableDeclarationDraft),
 ) -> BigQueryTableDeclaration {
-    let mut draft = BigQueryTableDeclarationDraft::new(table_ref());
+    let mut draft = BigQueryTableDeclarationDraft::new(SHOP.table(ORDERS));
     draft.columns = columns;
     set(&mut draft);
     BigQueryTableDeclaration::try_from(draft).expect("a valid declaration")
@@ -84,7 +73,7 @@ fn declare(
 
 fn plan_against(declaration: &BigQueryTableDeclaration, table: v2::Table) -> BigQueryTablePlan {
     let existing = ExistingTable::try_from(table).expect("a table the crate models");
-    declaration.plan(table_ref(), Some(&existing))
+    declaration.plan(SHOP.table(ORDERS), Some(&existing))
 }
 
 fn plan(columns: Vec<BigQuerySchemaColumn>, table: v2::Table) -> BigQueryTablePlan {
@@ -97,20 +86,6 @@ fn with(
 ) -> Vec<BigQuerySchemaColumn> {
     columns.push(extra);
     columns
-}
-
-fn field(
-    name: &str,
-    field_type: BigQueryFieldType,
-    mode: BigQueryFieldMode,
-) -> BigQueryFieldSchema {
-    BigQueryFieldSchema {
-        name: name.into(),
-        field_type,
-        mode,
-        description: None,
-        default_value_expression: None,
-    }
 }
 
 const STRING: BigQueryFieldType = BigQueryFieldType::String { max_length: None };
@@ -983,7 +958,7 @@ fn a_missing_table_is_created_as_declared() {
         d.description = Some("Orders".into());
         d.labels = [("team".to_string(), "shop".to_string())].into();
     });
-    let plan = declaration.plan(table_ref(), None);
+    let plan = declaration.plan(SHOP.table(ORDERS), None);
     let target = plan.create.expect("a create");
     assert_eq!(target.columns.len(), 5);
     assert_eq!(target.columns[2].name, "rec");

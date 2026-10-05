@@ -175,9 +175,9 @@ fn parse_json<'a, T>(
         &mut serde_json::Deserializer<serde_json::de::StrRead<'a>>,
     ) -> Result<T, serde_json::Error>,
 ) -> Result<T, CodecError> {
-    let mut de = serde_json::Deserializer::from_str(text);
-    read(&mut de)
-        .and_then(|value| de.end().map(|()| value))
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    read(&mut deserializer)
+        .and_then(|value| deserializer.end().map(|()| value))
         .map_err(|err| {
             CodecError::new(
                 BigQueryCodecErrorKind::Custom,
@@ -227,13 +227,13 @@ impl<'a> StructColumns<'a> {
         }
     }
 
-    pub(crate) fn name(&self, c: usize) -> &'a str {
-        self.fields[c].name()
+    pub(crate) fn name(&self, column: usize) -> &'a str {
+        self.fields[column].name()
     }
 
-    pub(crate) fn column(&self, c: usize) -> Result<&Column<'a>, CodecError> {
-        self.columns[c]
-            .get_or_init(|| Column::new(self.fields[c], self.arrays[c], &self.state))
+    pub(crate) fn column(&self, column: usize) -> Result<&Column<'a>, CodecError> {
+        self.columns[column]
+            .get_or_init(|| Column::new(self.fields[column], self.arrays[column], &self.state))
             .as_ref()
             .map_err(Clone::clone)
     }
@@ -244,10 +244,19 @@ impl<'a> StructColumns<'a> {
 
     fn plan(&self, fields: &'static [&'static str]) -> Rc<Plan> {
         let key = (fields.as_ptr() as usize, fields.len());
-        if let Some((_, _, plan)) = self.plans.borrow().iter().find(|(a, l, _)| (*a, *l) == key) {
+        if let Some((_, _, plan)) = self
+            .plans
+            .borrow()
+            .iter()
+            .find(|(address, length, _)| (*address, *length) == key)
+        {
             return plan.clone();
         }
-        let names: Vec<&str> = self.fields.iter().map(|f| f.name().as_str()).collect();
+        let names: Vec<&str> = self
+            .fields
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
         let plan = Rc::new(Plan::resolve(fields, &names));
         self.plans.borrow_mut().push((key.0, key.1, plan.clone()));
         self.state.plans_built.set(self.state.plans_built.get() + 1);
@@ -258,10 +267,10 @@ impl<'a> StructColumns<'a> {
         &self,
         row: usize,
         fields: &'static [&'static str],
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
         let plan = self.plan(fields);
-        v.visit_map(FieldMap::new(self, &plan, fields, row))
+        visitor.visit_map(FieldMap::new(self, &plan, fields, row))
     }
 
     #[cfg(test)]
@@ -275,8 +284,8 @@ impl<'a> StructColumns<'a> {
         let nested: usize = self
             .columns
             .iter()
-            .filter_map(|c| c.get())
-            .filter_map(|c| c.as_ref().ok())
+            .filter_map(|column| column.get())
+            .filter_map(|column| column.as_ref().ok())
             .map(Column::name_key_plans)
             .sum();
         own + nested
@@ -299,7 +308,7 @@ impl Column<'_> {
 struct EveryColumnMap<'n, 'a> {
     node: &'n StructColumns<'a>,
     row: usize,
-    i: usize,
+    next_column: usize,
 }
 
 impl<'a> MapAccess<'a> for EveryColumnMap<'_, 'a> {
@@ -309,24 +318,26 @@ impl<'a> MapAccess<'a> for EveryColumnMap<'_, 'a> {
         &mut self,
         seed: K,
     ) -> Result<Option<K::Value>, CodecError> {
-        if self.i >= self.node.fields.len() {
+        if self.next_column >= self.node.fields.len() {
             return Ok(None);
         }
-        self.i += 1;
-        seed.deserialize(BorrowedStrDeserializer::new(self.node.name(self.i - 1)))
-            .map(Some)
+        self.next_column += 1;
+        seed.deserialize(BorrowedStrDeserializer::new(
+            self.node.name(self.next_column - 1),
+        ))
+        .map(Some)
     }
 
     fn next_value_seed<S: DeserializeSeed<'a>>(&mut self, seed: S) -> Result<S::Value, CodecError> {
-        let c = self.i - 1;
+        let column = self.next_column - 1;
         self.node
-            .column(c)
+            .column(column)
             .and_then(|column| seed.deserialize(ValueDeserializer::new(column, self.row)))
-            .map_err(|e| e.at_field(self.node.name(c)))
+            .map_err(|error| error.at_field(self.node.name(column)))
     }
 
     fn size_hint(&self) -> Option<usize> {
-        Some(self.node.fields.len() - self.i)
+        Some(self.node.fields.len() - self.next_column)
     }
 }
 
@@ -334,7 +345,7 @@ impl<'a> MapAccess<'a> for EveryColumnMap<'_, 'a> {
 struct EveryColumnSeq<'n, 'a> {
     node: &'n StructColumns<'a>,
     row: usize,
-    i: usize,
+    next_column: usize,
 }
 
 impl<'a> SeqAccess<'a> for EveryColumnSeq<'_, 'a> {
@@ -344,27 +355,27 @@ impl<'a> SeqAccess<'a> for EveryColumnSeq<'_, 'a> {
         &mut self,
         seed: S,
     ) -> Result<Option<S::Value>, CodecError> {
-        if self.i >= self.node.fields.len() {
+        if self.next_column >= self.node.fields.len() {
             return Ok(None);
         }
-        let c = self.i;
-        self.i += 1;
+        let column = self.next_column;
+        self.next_column += 1;
         self.node
-            .column(c)
+            .column(column)
             .and_then(|column| seed.deserialize(ValueDeserializer::new(column, self.row)))
             .map(Some)
-            .map_err(|e| e.at_field(self.node.name(c)))
+            .map_err(|error| error.at_field(self.node.name(column)))
     }
 
     fn size_hint(&self) -> Option<usize> {
-        Some(self.node.fields.len() - self.i)
+        Some(self.node.fields.len() - self.next_column)
     }
 }
 
 struct ListSeq<'c, 'a> {
     items: &'c Column<'a>,
     start: usize,
-    i: usize,
+    next_element: usize,
     end: usize,
 }
 
@@ -375,24 +386,24 @@ impl<'a> SeqAccess<'a> for ListSeq<'_, 'a> {
         &mut self,
         seed: S,
     ) -> Result<Option<S::Value>, CodecError> {
-        if self.i >= self.end {
+        if self.next_element >= self.end {
             return Ok(None);
         }
-        let i = self.i;
-        self.i += 1;
-        seed.deserialize(ValueDeserializer::new(self.items, i))
+        let index = self.next_element;
+        self.next_element += 1;
+        seed.deserialize(ValueDeserializer::new(self.items, index))
             .map(Some)
-            .map_err(|e| e.at_index(i - self.start))
+            .map_err(|error| error.at_index(index - self.start))
     }
 
     fn size_hint(&self) -> Option<usize> {
-        Some(self.end - self.i)
+        Some(self.end - self.next_element)
     }
 }
 
 struct ByteSeq<'a> {
     bytes: &'a [u8],
-    i: usize,
+    next_byte: usize,
 }
 
 impl<'a> SeqAccess<'a> for ByteSeq<'a> {
@@ -402,15 +413,15 @@ impl<'a> SeqAccess<'a> for ByteSeq<'a> {
         &mut self,
         seed: S,
     ) -> Result<Option<S::Value>, CodecError> {
-        let Some(&byte) = self.bytes.get(self.i) else {
+        let Some(&byte) = self.bytes.get(self.next_byte) else {
             return Ok(None);
         };
-        self.i += 1;
+        self.next_byte += 1;
         seed.deserialize(U8Deserializer::new(byte)).map(Some)
     }
 
     fn size_hint(&self) -> Option<usize> {
-        Some(self.bytes.len() - self.i)
+        Some(self.bytes.len() - self.next_byte)
     }
 }
 
@@ -418,7 +429,7 @@ impl<'a> SeqAccess<'a> for ByteSeq<'a> {
 /// reads.
 struct IntervalSeq {
     value: IntervalMonthDayNano,
-    i: u8,
+    next_field: u8,
 }
 
 impl<'a> SeqAccess<'a> for IntervalSeq {
@@ -428,8 +439,8 @@ impl<'a> SeqAccess<'a> for IntervalSeq {
         &mut self,
         seed: S,
     ) -> Result<Option<S::Value>, CodecError> {
-        self.i += 1;
-        match self.i {
+        self.next_field += 1;
+        match self.next_field {
             1 => seed.deserialize(I32Deserializer::new(self.value.months)),
             2 => seed.deserialize(I32Deserializer::new(self.value.days)),
             3 => seed.deserialize(I64Deserializer::new(self.value.nanoseconds)),
@@ -440,11 +451,11 @@ impl<'a> SeqAccess<'a> for IntervalSeq {
 }
 
 impl From<IntervalMonthDayNano> for BigQueryInterval {
-    fn from(v: IntervalMonthDayNano) -> Self {
+    fn from(value: IntervalMonthDayNano) -> Self {
         BigQueryInterval {
-            months: v.months,
-            days: v.days,
-            nanos: v.nanoseconds,
+            months: value.months,
+            days: value.days,
+            nanos: value.nanoseconds,
         }
     }
 }
@@ -467,7 +478,9 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
 
     #[inline]
     fn is_null(&self) -> bool {
-        self.column.nulls.is_some_and(|n| n.is_null(self.row))
+        self.column
+            .nulls
+            .is_some_and(|nulls| nulls.is_null(self.row))
     }
 
     #[inline]
@@ -485,19 +498,19 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
     /// The canonical text of a value whose only Rust form besides a number or a wrapper is a
     /// string. `Ok(false)` for values that are not of that sort.
     fn text(&self, out: &mut String) -> Result<bool, CodecError> {
-        let r = self.row;
+        let row = self.row;
         match &self.column.values {
-            ColumnValues::Date(v) => civil::fmt_date(v[r], out)?,
-            ColumnValues::Time(v) => civil::fmt_time(v[r], out)?,
-            ColumnValues::DateTime(v) => civil::fmt_datetime(v[r], out)?,
-            ColumnValues::Timestamp(v) => civil::fmt_timestamp(v[r], out)?,
-            ColumnValues::Numeric { unscaled: v, scale } => {
-                decimal::fmt_decimal_i128(v[r], *scale, out)
+            ColumnValues::Date(values) => civil::fmt_date(values[row], out)?,
+            ColumnValues::Time(values) => civil::fmt_time(values[row], out)?,
+            ColumnValues::DateTime(values) => civil::fmt_datetime(values[row], out)?,
+            ColumnValues::Timestamp(values) => civil::fmt_timestamp(values[row], out)?,
+            ColumnValues::Numeric { unscaled, scale } => {
+                decimal::fmt_decimal_i128(unscaled[row], *scale, out)
             }
-            ColumnValues::BigNumeric { unscaled: v, scale } => {
-                decimal::fmt_decimal_i256(v[r], *scale, out)
+            ColumnValues::BigNumeric { unscaled, scale } => {
+                decimal::fmt_decimal_i256(unscaled[row], *scale, out)
             }
-            ColumnValues::Interval(v) => BigQueryInterval::from(v[r]).write_bq(out),
+            ColumnValues::Interval(values) => BigQueryInterval::from(values[row]).write_bq(out),
             _ => return Ok(false),
         }
         Ok(true)
@@ -505,12 +518,12 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
 
     /// The integer of a temporal value: days for DATE, microseconds otherwise.
     fn temporal_integer(&self) -> Option<i64> {
-        let r = self.row;
+        let row = self.row;
         match &self.column.values {
-            ColumnValues::Date(v) => Some(i64::from(v[r])),
-            ColumnValues::Time(v) | ColumnValues::DateTime(v) | ColumnValues::Timestamp(v) => {
-                Some(v[r])
-            }
+            ColumnValues::Date(values) => Some(i64::from(values[row])),
+            ColumnValues::Time(values)
+            | ColumnValues::DateTime(values)
+            | ColumnValues::Timestamp(values) => Some(values[row]),
             _ => None,
         }
     }
@@ -518,16 +531,11 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
     /// The whole number a NUMERIC or BIGNUMERIC value holds; `OutOfRange` when it has a
     /// fractional part or is beyond `i128`.
     fn whole_decimal(&self) -> Option<Result<i128, CodecError>> {
-        let r = self.row;
+        let row = self.row;
         let (value, scale) = match &self.column.values {
-            ColumnValues::Numeric { unscaled: v, scale } => (i256::from_i128(v[r]), *scale),
-            ColumnValues::BigNumeric { unscaled: v, scale } => (v[r], *scale),
+            ColumnValues::Numeric { unscaled, scale } => (i256::from_i128(unscaled[row]), *scale),
+            ColumnValues::BigNumeric { unscaled, scale } => (unscaled[row], *scale),
             _ => return None,
-        };
-        let text = || {
-            let mut out = String::new();
-            decimal::fmt_decimal_i256(value, scale, &mut out);
-            out
         };
         let divisor = i256::from_i128(10).wrapping_pow(scale);
         if value.wrapping_rem(divisor) != i256::ZERO {
@@ -536,30 +544,33 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
                 format!(
                     "{} has a fractional part and cannot be an integer; read it into a String, \
                      an f64 or a BigQueryDecimal",
-                    text()
+                    decimal::decimal_string(value, scale)
                 ),
             )));
         }
         Some(value.wrapping_div(divisor).to_i128().ok_or_else(|| {
             CodecError::new(
                 BigQueryCodecErrorKind::OutOfRange,
-                format!("{} does not fit in i128", text()),
+                format!(
+                    "{} does not fit in i128",
+                    decimal::decimal_string(value, scale)
+                ),
             )
         }))
     }
 
     /// An integer target of 64 bits or fewer; serde's visitors check the narrower ranges.
-    fn integer<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn integer<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        if let Some(x) = self.temporal_integer() {
-            return v.visit_i64(x);
+        if let Some(integer) = self.temporal_integer() {
+            return visitor.visit_i64(integer);
         }
         if let Some(whole) = self.whole_decimal() {
             let whole = whole?;
-            return if let Ok(x) = i64::try_from(whole) {
-                v.visit_i64(x)
-            } else if let Ok(x) = u64::try_from(whole) {
-                v.visit_u64(x)
+            return if let Ok(integer) = i64::try_from(whole) {
+                visitor.visit_i64(integer)
+            } else if let Ok(integer) = u64::try_from(whole) {
+                visitor.visit_u64(integer)
             } else {
                 Err(CodecError::new(
                     BigQueryCodecErrorKind::OutOfRange,
@@ -567,63 +578,67 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
                 ))
             };
         }
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 
-    fn integer128<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn integer128<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
         match self.whole_decimal() {
-            Some(whole) => v.visit_i128(whole?),
-            None => self.integer(v),
+            Some(whole) => visitor.visit_i128(whole?),
+            None => self.integer(visitor),
         }
     }
 
-    fn any_non_null<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        let r = self.row;
+    fn any_non_null<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        let row = self.row;
         match &self.column.values {
-            ColumnValues::Int64(a) => v.visit_i64(a[r]),
-            ColumnValues::Float64(a) => v.visit_f64(a[r]),
-            ColumnValues::Bool(a) => v.visit_bool(a.value(r)),
-            ColumnValues::String(a) => v.visit_borrowed_str(a.value(r)),
-            ColumnValues::Json { text: a, .. } => {
-                parse_json(a.value(r), |de| de::Deserializer::deserialize_any(de, v))
-            }
-            ColumnValues::Bytes(a) => v.visit_borrowed_bytes(a.value(r)),
+            ColumnValues::Int64(values) => visitor.visit_i64(values[row]),
+            ColumnValues::Float64(values) => visitor.visit_f64(values[row]),
+            ColumnValues::Bool(values) => visitor.visit_bool(values.value(row)),
+            ColumnValues::String(values) => visitor.visit_borrowed_str(values.value(row)),
+            ColumnValues::Json { text, .. } => parse_json(text.value(row), |deserializer| {
+                de::Deserializer::deserialize_any(deserializer, visitor)
+            }),
+            ColumnValues::Bytes(values) => visitor.visit_borrowed_bytes(values.value(row)),
             ColumnValues::List { offsets, items } => {
-                let (start, end) = (offsets[r] as usize, offsets[r + 1] as usize);
-                v.visit_seq(ListSeq {
+                let (start, end) = (offsets[row] as usize, offsets[row + 1] as usize);
+                visitor.visit_seq(ListSeq {
                     items,
                     start,
-                    i: start,
+                    next_element: start,
                     end,
                 })
             }
-            ColumnValues::Struct(node) => v.visit_map(EveryColumnMap { node, row: r, i: 0 }),
+            ColumnValues::Struct(node) => visitor.visit_map(EveryColumnMap {
+                node,
+                row,
+                next_column: 0,
+            }),
             _ => {
-                let mut s = String::with_capacity(48);
-                self.text(&mut s)?;
-                v.visit_str(&s)
+                let mut text = String::with_capacity(48);
+                self.text(&mut text)?;
+                visitor.visit_str(&text)
             }
         }
     }
 
     /// A string target. A jiff `Timestamp` cannot hold the last 25 hours of BigQuery's range,
     /// and its parse error would read as a bad text; it is reported as the range error it is.
-    fn string<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn string<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        if let ColumnValues::Json { text: a, .. } = &self.column.values {
-            return v.visit_borrowed_str(a.value(self.row));
+        if let ColumnValues::Json { text, .. } = &self.column.values {
+            return visitor.visit_borrowed_str(text.value(self.row));
         }
-        if let ColumnValues::Timestamp(a) = &self.column.values {
-            let micros = a[self.row];
-            let mut s = String::with_capacity(32);
-            civil::fmt_timestamp(micros, &mut s)?;
-            return v.visit_str(&s).map_err(|err| {
+        if let ColumnValues::Timestamp(values) = &self.column.values {
+            let micros = values[self.row];
+            let mut text = String::with_capacity(32);
+            civil::fmt_timestamp(micros, &mut text)?;
+            return visitor.visit_str(&text).map_err(|err| {
                 if micros > jiff_max_micros() {
                     CodecError::new(
                         BigQueryCodecErrorKind::OutOfRange,
                         format!(
-                            "TIMESTAMP {s} is above jiff::Timestamp's maximum; read it into a \
+                            "TIMESTAMP {text} is above jiff::Timestamp's maximum; read it into a \
                              String or an i64 ({err})"
                         ),
                     )
@@ -632,35 +647,35 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
                 }
             });
         }
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 }
 
 impl<'a> de::Deserializer<'a> for ValueDeserializer<'_, 'a> {
     type Error = CodecError;
 
-    fn deserialize_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_any<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         if self.is_null() {
-            return v.visit_unit();
+            return visitor.visit_unit();
         }
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 
     /// SQL NULL is `None`. JSON `null` is offered to the target as `Some` first, so that a
     /// target that holds `null`, such as `serde_json::Value`, keeps it apart from SQL NULL; a
     /// target that cannot read it fails, and the row is decoded again with that value as `None`.
-    fn deserialize_option<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_option<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         if self.is_null() {
-            return v.visit_none();
+            return visitor.visit_none();
         }
         let column = self.column;
-        if let ColumnValues::Json { text: a, state } = &column.values {
-            if a.value(self.row).trim_ascii() == "null" {
+        if let ColumnValues::Json { text, state } = &column.values {
+            if text.value(self.row).trim_ascii() == "null" {
                 let position = (std::ptr::from_ref(column) as usize, self.row);
                 if state.json_nones.borrow().contains(&position) {
-                    return v.visit_none();
+                    return visitor.visit_none();
                 }
-                let some = v.visit_some(self);
+                let some = visitor.visit_some(self);
                 if some.is_err() {
                     state.json_nones.borrow_mut().push(position);
                     state.redo.set(true);
@@ -668,137 +683,141 @@ impl<'a> de::Deserializer<'a> for ValueDeserializer<'_, 'a> {
                 return some;
             }
         }
-        v.visit_some(self)
+        visitor.visit_some(self)
     }
 
-    fn deserialize_unit<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_unit<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         if self.is_null() {
-            v.visit_unit()
+            visitor.visit_unit()
         } else {
-            self.any_non_null(v)
+            self.any_non_null(visitor)
         }
     }
 
     fn deserialize_unit_struct<V: Visitor<'a>>(
         self,
         _name: &'static str,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.deserialize_unit(v)
+        self.deserialize_unit(visitor)
     }
 
-    fn deserialize_ignored_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        v.visit_unit()
+    fn deserialize_ignored_any<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        visitor.visit_unit()
     }
 
-    fn deserialize_i8<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_i8<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_i16<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_i16<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_i32<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_i32<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_i64<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_i64<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_i128<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer128(v)
+    fn deserialize_i128<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer128(visitor)
     }
 
-    fn deserialize_u8<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_u8<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_u16<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_u16<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_u32<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_u32<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_u64<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer(v)
+    fn deserialize_u64<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer(visitor)
     }
 
-    fn deserialize_u128<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.integer128(v)
+    fn deserialize_u128<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.integer128(visitor)
     }
 
-    fn deserialize_f64<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_f64<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
         match &self.column.values {
             ColumnValues::Numeric { .. } | ColumnValues::BigNumeric { .. } => {
-                let mut s = String::with_capacity(48);
-                self.text(&mut s)?;
-                let x = s.parse().map_err(|_| {
+                let mut text = String::with_capacity(48);
+                self.text(&mut text)?;
+                let float = text.parse().map_err(|_| {
                     CodecError::new(
                         BigQueryCodecErrorKind::OutOfRange,
-                        format!("decimal `{s}` is not an f64"),
+                        format!("decimal `{text}` is not an f64"),
                     )
                 })?;
-                v.visit_f64(x)
+                visitor.visit_f64(float)
             }
             ColumnValues::Int64(_) => Err(CodecError::new(
                 BigQueryCodecErrorKind::TypeMismatch,
                 "an INT64 column cannot be read into a float; read it into an integer type",
             )),
-            _ => self.any_non_null(v),
+            _ => self.any_non_null(visitor),
         }
     }
 
-    fn deserialize_f32<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.deserialize_f64(v)
+    fn deserialize_f32<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.deserialize_f64(visitor)
     }
 
-    fn deserialize_seq<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_seq<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
         match &self.column.values {
-            ColumnValues::Bytes(a) => v.visit_seq(ByteSeq {
-                bytes: a.value(self.row),
-                i: 0,
+            ColumnValues::Bytes(values) => visitor.visit_seq(ByteSeq {
+                bytes: values.value(self.row),
+                next_byte: 0,
             }),
-            ColumnValues::Interval(a) => v.visit_seq(IntervalSeq {
-                value: a[self.row],
-                i: 0,
+            ColumnValues::Interval(values) => visitor.visit_seq(IntervalSeq {
+                value: values[self.row],
+                next_field: 0,
             }),
-            _ => self.any_non_null(v),
+            _ => self.any_non_null(visitor),
         }
     }
 
-    fn deserialize_tuple<V: Visitor<'a>>(self, _len: usize, v: V) -> Result<V::Value, CodecError> {
-        self.deserialize_seq(v)
+    fn deserialize_tuple<V: Visitor<'a>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, CodecError> {
+        self.deserialize_seq(visitor)
     }
 
     fn deserialize_tuple_struct<V: Visitor<'a>>(
         self,
         _name: &'static str,
         _len: usize,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.deserialize_seq(v)
+        self.deserialize_seq(visitor)
     }
 
     fn deserialize_struct<V: Visitor<'a>>(
         self,
         _name: &'static str,
         fields: &'static [&'static str],
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
         self.non_null()?;
         match &self.column.values {
-            ColumnValues::Struct(node) => node.visit_struct(self.row, fields, v),
-            ColumnValues::Interval(a) => v.visit_seq(IntervalSeq {
-                value: a[self.row],
-                i: 0,
+            ColumnValues::Struct(node) => node.visit_struct(self.row, fields, visitor),
+            ColumnValues::Interval(values) => visitor.visit_seq(IntervalSeq {
+                value: values[self.row],
+                next_field: 0,
             }),
-            _ => self.any_non_null(v),
+            _ => self.any_non_null(visitor),
         }
     }
 
@@ -807,18 +826,18 @@ impl<'a> de::Deserializer<'a> for ValueDeserializer<'_, 'a> {
     fn deserialize_newtype_struct<V: Visitor<'a>>(
         self,
         name: &'static str,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
         let Some(wanted) = temporal_tag_kind(name) else {
-            return v.visit_newtype_struct(self);
+            return visitor.visit_newtype_struct(self);
         };
         self.non_null()?;
-        let r = self.row;
+        let row = self.row;
         let raw = match (wanted, &self.column.values) {
-            (FieldKind::Date, ColumnValues::Date(a)) => i64::from(a[r]),
-            (FieldKind::Time, ColumnValues::Time(a))
-            | (FieldKind::DateTime, ColumnValues::DateTime(a))
-            | (FieldKind::Timestamp, ColumnValues::Timestamp(a)) => a[r],
+            (FieldKind::Date, ColumnValues::Date(values)) => i64::from(values[row]),
+            (FieldKind::Time, ColumnValues::Time(values))
+            | (FieldKind::DateTime, ColumnValues::DateTime(values))
+            | (FieldKind::Timestamp, ColumnValues::Timestamp(values)) => values[row],
             _ => {
                 return Err(CodecError::new(
                     BigQueryCodecErrorKind::TypeMismatch,
@@ -829,63 +848,63 @@ impl<'a> de::Deserializer<'a> for ValueDeserializer<'_, 'a> {
                 ))
             }
         };
-        v.visit_i64(raw)
+        visitor.visit_i64(raw)
     }
 
     fn deserialize_enum<V: Visitor<'a>>(
         self,
         name: &'static str,
         variants: &'static [&'static str],
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
         self.non_null()?;
         match &self.column.values {
-            ColumnValues::String(a) => {
-                v.visit_enum(BorrowedStrDeserializer::new(a.value(self.row)))
+            ColumnValues::String(values) => {
+                visitor.visit_enum(BorrowedStrDeserializer::new(values.value(self.row)))
             }
-            ColumnValues::Json { text: a, .. } => parse_json(a.value(self.row), |de| {
-                de::Deserializer::deserialize_enum(de, name, variants, v)
+            ColumnValues::Json { text, .. } => parse_json(text.value(self.row), |deserializer| {
+                de::Deserializer::deserialize_enum(deserializer, name, variants, visitor)
             }),
-            _ => self.any_non_null(v),
+            _ => self.any_non_null(visitor),
         }
     }
 
-    fn deserialize_str<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.string(v)
+    fn deserialize_str<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.string(visitor)
     }
 
-    fn deserialize_string<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        self.string(v)
+    fn deserialize_string<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        self.string(visitor)
     }
 
-    fn deserialize_bool<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_bool<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 
-    fn deserialize_char<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_char<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 
-    fn deserialize_bytes<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_bytes<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 
-    fn deserialize_byte_buf<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_byte_buf<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 
-    fn deserialize_map<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_map<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 
-    fn deserialize_identifier<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_identifier<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        self.any_non_null(v)
+        self.any_non_null(visitor)
     }
 }
 
@@ -898,11 +917,11 @@ struct RowDeserializer<'n, 'a> {
 impl<'a> de::Deserializer<'a> for RowDeserializer<'_, 'a> {
     type Error = CodecError;
 
-    fn deserialize_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        v.visit_map(EveryColumnMap {
+    fn deserialize_any<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        visitor.visit_map(EveryColumnMap {
             node: self.node,
             row: self.row,
-            i: 0,
+            next_column: 0,
         })
     }
 
@@ -910,42 +929,46 @@ impl<'a> de::Deserializer<'a> for RowDeserializer<'_, 'a> {
         self,
         _name: &'static str,
         fields: &'static [&'static str],
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.node.visit_struct(self.row, fields, v)
+        self.node.visit_struct(self.row, fields, visitor)
     }
 
-    fn deserialize_seq<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        v.visit_seq(EveryColumnSeq {
+    fn deserialize_seq<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        visitor.visit_seq(EveryColumnSeq {
             node: self.node,
             row: self.row,
-            i: 0,
+            next_column: 0,
         })
     }
 
-    fn deserialize_tuple<V: Visitor<'a>>(self, _len: usize, v: V) -> Result<V::Value, CodecError> {
-        self.deserialize_seq(v)
+    fn deserialize_tuple<V: Visitor<'a>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, CodecError> {
+        self.deserialize_seq(visitor)
     }
 
     fn deserialize_tuple_struct<V: Visitor<'a>>(
         self,
         _name: &'static str,
         _len: usize,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.deserialize_seq(v)
+        self.deserialize_seq(visitor)
     }
 
     fn deserialize_newtype_struct<V: Visitor<'a>>(
         self,
         _name: &'static str,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        v.visit_newtype_struct(self)
+        visitor.visit_newtype_struct(self)
     }
 
-    fn deserialize_option<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        v.visit_some(self)
+    fn deserialize_option<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        visitor.visit_some(self)
     }
 
     serde::forward_to_deserialize_any! {
@@ -988,19 +1011,19 @@ impl<'a> BatchDecoder<'a> {
         self.rows
     }
 
-    /// Decodes row `i`. An error belongs to that row only.
-    pub(crate) fn row<T: Deserialize<'a>>(&self, i: usize) -> Result<T, CodecError> {
-        if i >= self.rows {
+    /// Decodes the row at `index`. An error belongs to that row only.
+    pub(crate) fn row<T: Deserialize<'a>>(&self, index: usize) -> Result<T, CodecError> {
+        if index >= self.rows {
             return Err(CodecError::new(
                 BigQueryCodecErrorKind::Custom,
-                format!("row {i} of a batch with {} rows", self.rows),
+                format!("row {index} of a batch with {} rows", self.rows),
             ));
         }
         self.state.json_nones.borrow_mut().clear();
         loop {
             let result = T::deserialize(RowDeserializer {
                 node: &self.root,
-                row: i,
+                row: index,
             });
             // Every pass that asks for another adds a name-key plan or a `None` value, and
             // neither is undone within the row, so the loop ends.
@@ -1080,16 +1103,16 @@ impl<T: DeserializeOwned> Iterator for BigQueryBatchRows<'_, T> {
     type Item = BigQueryResult<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let i = self.next_row;
-        if i >= self.decoder.num_rows() {
+        let index = self.next_row;
+        if index >= self.decoder.num_rows() {
             return None;
         }
         self.next_row += 1;
-        Some(
-            self.decoder
-                .row(i)
-                .map_err(|e| e.with_row(self.first_row + i as u64).into_deserialize()),
-        )
+        Some(self.decoder.row(index).map_err(|error| {
+            error
+                .with_row(self.first_row + index as u64)
+                .into_deserialize()
+        }))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

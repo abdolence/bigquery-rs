@@ -69,13 +69,9 @@ mod tests {
     use super::*;
     use crate::fluent_api::{BigQueryExprBuilder, BigQuerySelectBuilder};
     use crate::paths;
-    use crate::{
-        BigQueryDatasetId, BigQueryDatasetRef, BigQueryReadCompression, BigQueryReadOptions,
-        BigQueryTableId,
-    };
+    use crate::{BigQueryDatasetRef, BigQueryReadCompression, BigQueryReadOptions};
 
-    const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-    const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+    use crate::db::fake::{ORDERS, SHOP};
 
     #[derive(serde::Deserialize)]
     struct Row {

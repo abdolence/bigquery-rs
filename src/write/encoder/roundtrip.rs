@@ -1,11 +1,12 @@
-//! Every type and mode of the type matrix, from the canonical value through each Rust form
-//! the contract lists, encoded, decoded against the plan's own descriptor and compared.
+//! Every BigQuery type and mode, from the canonical value through each Rust form the encoder
+//! accepts for it (`Canonical::targets`), encoded, decoded against the plan's own descriptor and
+//! compared.
 
-use super::tests::{field, message_descriptor};
+use super::tests::message_descriptor;
 use super::*;
 use crate::types::civil;
 use crate::types::decimal;
-use crate::types::testkit::Canonical;
+use crate::types::testkit::{field, written, Canonical};
 use crate::{
     BigQueryDate, BigQueryDateTime, BigQueryDecimal, BigQueryFieldMode, BigQueryFieldType,
     BigQueryInterval, BigQueryJson, BigQueryRange, BigQueryRangeElementType, BigQueryTableSchema,
@@ -28,28 +29,28 @@ enum Target {
     F64(f64),
     F32(f32),
     Bool(bool),
-    Str(String),
+    Text(String),
     Bytes(Vec<u8>),
     ByteBuf(serde_bytes::ByteBuf),
     Date(jiff::civil::Date),
-    BqDate(BigQueryDate),
+    BigQueryDate(BigQueryDate),
     Time(jiff::civil::Time),
-    BqTime(BigQueryTime),
+    BigQueryTime(BigQueryTime),
     DateTime(jiff::civil::DateTime),
-    BqDateTime(BigQueryDateTime),
+    BigQueryDateTime(BigQueryDateTime),
     Timestamp(jiff::Timestamp),
-    BqTimestamp(BigQueryTimestamp),
+    BigQueryTimestamp(BigQueryTimestamp),
     Decimal(BigQueryDecimal<String>),
     Json(BigQueryJson<serde_json::Value>),
     Value(serde_json::Value),
     Interval(BigQueryInterval),
     RangeDate(BigQueryRange<jiff::civil::Date>),
-    RangeBqDate(BigQueryRange<BigQueryDate>),
+    RangeBigQueryDate(BigQueryRange<BigQueryDate>),
     RangeDays(BigQueryRange<i32>),
     RangeDateTime(BigQueryRange<jiff::civil::DateTime>),
-    RangeBqDateTime(BigQueryRange<BigQueryDateTime>),
+    RangeBigQueryDateTime(BigQueryRange<BigQueryDateTime>),
     RangeTimestamp(BigQueryRange<jiff::Timestamp>),
-    RangeBqTimestamp(BigQueryRange<BigQueryTimestamp>),
+    RangeBigQueryTimestamp(BigQueryRange<BigQueryTimestamp>),
     RangeMicros(BigQueryRange<i64>),
     Struct(StructValue),
     Map(BTreeMap<String, i64>),
@@ -57,24 +58,18 @@ enum Target {
 
 #[derive(Serialize, Clone, Debug)]
 struct StructValue {
-    x: i64,
+    quantity: i64,
 }
 
 #[derive(Serialize)]
 struct Row<V> {
-    v: V,
+    value: V,
 }
 
-fn text(write: impl FnOnce(&mut String)) -> String {
-    let mut out = String::new();
-    write(&mut out);
-    out
-}
-
-fn bound<T>(b: Option<i64>, convert: impl Fn(i64) -> Option<T>) -> Option<Option<T>> {
-    match b {
+fn bound<T>(value: Option<i64>, convert: impl Fn(i64) -> Option<T>) -> Option<Option<T>> {
+    match value {
         None => Some(None),
-        Some(v) => convert(v).map(Some),
+        Some(value) => convert(value).map(Some),
     }
 }
 
@@ -93,99 +88,114 @@ impl Canonical {
     /// Every Rust form the contract lists for `value`'s type, which can hold `value`.
     fn targets(&self) -> Vec<Target> {
         match self.clone() {
-            Canonical::Int64(x) => {
-                let mut out = vec![Target::I64(x)];
-                out.extend(i32::try_from(x).ok().map(Target::I32));
-                out.extend(u64::try_from(x).ok().map(Target::U64));
+            Canonical::Int64(integer) => {
+                let mut out = vec![Target::I64(integer)];
+                out.extend(i32::try_from(integer).ok().map(Target::I32));
+                out.extend(u64::try_from(integer).ok().map(Target::U64));
                 out
             }
             Canonical::Float64(bits) => {
-                let x = f64::from_bits(bits);
-                let mut out = vec![Target::F64(x)];
-                let narrow = x as f32;
-                if !x.is_nan() && f64::from(narrow).to_bits() == bits {
+                let float = f64::from_bits(bits);
+                let mut out = vec![Target::F64(float)];
+                let narrow = float as f32;
+                if !float.is_nan() && f64::from(narrow).to_bits() == bits {
                     out.push(Target::F32(narrow));
                 }
                 out
             }
-            Canonical::Bool(b) => vec![Target::Bool(b)],
-            Canonical::String(s) => vec![Target::Str(s)],
-            Canonical::Bytes(b) => vec![
-                Target::ByteBuf(serde_bytes::ByteBuf::from(b.clone())),
-                Target::Bytes(b),
+            Canonical::Bool(flag) => vec![Target::Bool(flag)],
+            Canonical::String(text) => vec![Target::Text(text)],
+            Canonical::Bytes(bytes) => vec![
+                Target::ByteBuf(serde_bytes::ByteBuf::from(bytes.clone())),
+                Target::Bytes(bytes),
             ],
             Canonical::Date(days) => {
-                let d = civil::jiff_date(days).expect("BigQuery's DATE range is inside jiff's");
+                let date = civil::jiff_date(days).expect("BigQuery's DATE range is inside jiff's");
                 vec![
-                    Target::Date(d),
-                    Target::BqDate(BigQueryDate(d)),
+                    Target::Date(date),
+                    Target::BigQueryDate(BigQueryDate(date)),
                     Target::I32(days),
-                    Target::Str(text(|o| {
-                        civil::fmt_date(days, o).expect("inside BigQuery's DATE range")
+                    Target::Text(written(|out| {
+                        civil::fmt_date(days, out).expect("inside BigQuery's DATE range")
                     })),
                 ]
             }
-            Canonical::Time(us) => {
-                let t = civil::jiff_time(us).expect("a time of day");
+            Canonical::Time(micros) => {
+                let time = civil::jiff_time(micros).expect("a time of day");
                 vec![
-                    Target::Time(t),
-                    Target::BqTime(BigQueryTime(t)),
-                    Target::I64(us),
-                    Target::Str(text(|o| civil::fmt_time(us, o).expect("a time of day"))),
-                ]
-            }
-            Canonical::DateTime(us) => {
-                let dt =
-                    civil::jiff_datetime(us).expect("BigQuery's DATETIME range is inside jiff's");
-                vec![
-                    Target::DateTime(dt),
-                    Target::BqDateTime(BigQueryDateTime(dt)),
-                    Target::I64(us),
-                    Target::Str(text(|o| {
-                        civil::fmt_datetime(us, o).expect("inside BigQuery's DATETIME range")
+                    Target::Time(time),
+                    Target::BigQueryTime(BigQueryTime(time)),
+                    Target::I64(micros),
+                    Target::Text(written(|out| {
+                        civil::fmt_time(micros, out).expect("a time of day")
                     })),
                 ]
             }
-            Canonical::Timestamp(us) => {
+            Canonical::DateTime(micros) => {
+                let datetime = civil::jiff_datetime(micros)
+                    .expect("BigQuery's DATETIME range is inside jiff's");
+                vec![
+                    Target::DateTime(datetime),
+                    Target::BigQueryDateTime(BigQueryDateTime(datetime)),
+                    Target::I64(micros),
+                    Target::Text(written(|out| {
+                        civil::fmt_datetime(micros, out).expect("inside BigQuery's DATETIME range")
+                    })),
+                ]
+            }
+            Canonical::Timestamp(micros) => {
                 let mut out = vec![
-                    Target::I64(us),
-                    Target::Str(text(|o| {
-                        civil::fmt_timestamp(us, o).expect("inside BigQuery's TIMESTAMP range")
+                    Target::I64(micros),
+                    Target::Text(written(|out| {
+                        civil::fmt_timestamp(micros, out)
+                            .expect("inside BigQuery's TIMESTAMP range")
                     })),
                 ];
                 // jiff ends below BigQuery's maximum; the integer and text forms cover the rest.
-                if let Ok(ts) = civil::jiff_timestamp(us) {
-                    out.push(Target::Timestamp(ts));
-                    out.push(Target::BqTimestamp(BigQueryTimestamp(ts)));
+                if let Ok(timestamp) = civil::jiff_timestamp(micros) {
+                    out.push(Target::Timestamp(timestamp));
+                    out.push(Target::BigQueryTimestamp(BigQueryTimestamp(timestamp)));
                 }
                 out
             }
-            Canonical::Numeric(v) => {
-                let s = text(|o| decimal::fmt_decimal_i128(v, decimal::NUMERIC_SCALE, o));
-                let mut out = vec![Target::Decimal(BigQueryDecimal(s.clone())), Target::Str(s)];
+            Canonical::Numeric(unscaled) => {
+                let text =
+                    written(|out| decimal::fmt_decimal_i128(unscaled, decimal::NUMERIC_SCALE, out));
+                let mut out = vec![
+                    Target::Decimal(BigQueryDecimal(text.clone())),
+                    Target::Text(text),
+                ];
                 let scale = 10i128.pow(decimal::NUMERIC_SCALE);
-                if v % scale == 0 {
-                    out.extend(i64::try_from(v / scale).ok().map(Target::I64));
+                if unscaled % scale == 0 {
+                    out.extend(i64::try_from(unscaled / scale).ok().map(Target::I64));
                 }
                 out
             }
-            Canonical::BigNumeric(v) => {
-                let s = text(|o| decimal::fmt_decimal_i256(v, decimal::BIGNUMERIC_SCALE, o));
-                vec![Target::Decimal(BigQueryDecimal(s.clone())), Target::Str(s)]
+            Canonical::BigNumeric(unscaled) => {
+                let text = written(|out| {
+                    decimal::fmt_decimal_i256(unscaled, decimal::BIGNUMERIC_SCALE, out)
+                });
+                vec![
+                    Target::Decimal(BigQueryDecimal(text.clone())),
+                    Target::Text(text),
+                ]
             }
-            Canonical::Geography(s) => vec![Target::Str(s)],
-            Canonical::Json(v) => {
-                let mut out = vec![Target::Str(v.to_string())];
+            Canonical::Geography(text) => vec![Target::Text(text)],
+            Canonical::Json(json) => {
+                let mut out = vec![Target::Text(json.to_string())];
                 // A top-level `Value::String` serializes as a string, which a JSON column takes
                 // as the JSON text itself.
-                if !v.is_string() {
-                    out.push(Target::Value(v.clone()));
+                if !json.is_string() {
+                    out.push(Target::Value(json.clone()));
                 }
-                out.push(Target::Json(BigQueryJson(v)));
+                out.push(Target::Json(BigQueryJson(json)));
                 out
             }
-            Canonical::Interval(iv) => {
-                vec![Target::Str(text(|o| iv.write_bq(o))), Target::Interval(iv)]
+            Canonical::Interval(interval) => {
+                vec![
+                    Target::Text(written(|out| interval.write_bq(out))),
+                    Target::Interval(interval),
+                ]
             }
             Canonical::Range {
                 element,
@@ -195,31 +205,34 @@ impl Canonical {
                 let mut out = Vec::new();
                 match element {
                     BigQueryRangeElementType::Date => {
-                        let date = |v: i64| civil::jiff_date(i32::try_from(v).ok()?).ok();
+                        let date = |days: i64| civil::jiff_date(i32::try_from(days).ok()?).ok();
                         out.extend(range(start, end, date).map(Target::RangeDate));
                         out.extend(
-                            range(start, end, |v| date(v).map(BigQueryDate))
-                                .map(Target::RangeBqDate),
+                            range(start, end, |days| date(days).map(BigQueryDate))
+                                .map(Target::RangeBigQueryDate),
                         );
                         out.extend(
-                            range(start, end, |v| i32::try_from(v).ok()).map(Target::RangeDays),
+                            range(start, end, |days| i32::try_from(days).ok())
+                                .map(Target::RangeDays),
                         );
                     }
                     BigQueryRangeElementType::DateTime => {
-                        let dt = |v: i64| civil::jiff_datetime(v).ok();
-                        out.extend(range(start, end, dt).map(Target::RangeDateTime));
+                        let datetime = |micros: i64| civil::jiff_datetime(micros).ok();
+                        out.extend(range(start, end, datetime).map(Target::RangeDateTime));
                         out.extend(
-                            range(start, end, |v| dt(v).map(BigQueryDateTime))
-                                .map(Target::RangeBqDateTime),
+                            range(start, end, |micros| datetime(micros).map(BigQueryDateTime))
+                                .map(Target::RangeBigQueryDateTime),
                         );
                         out.extend(range(start, end, Some).map(Target::RangeMicros));
                     }
                     BigQueryRangeElementType::Timestamp => {
-                        let ts = |v: i64| civil::jiff_timestamp(v).ok();
-                        out.extend(range(start, end, ts).map(Target::RangeTimestamp));
+                        let timestamp = |micros: i64| civil::jiff_timestamp(micros).ok();
+                        out.extend(range(start, end, timestamp).map(Target::RangeTimestamp));
                         out.extend(
-                            range(start, end, |v| ts(v).map(BigQueryTimestamp))
-                                .map(Target::RangeBqTimestamp),
+                            range(start, end, |micros| {
+                                timestamp(micros).map(BigQueryTimestamp)
+                            })
+                            .map(Target::RangeBigQueryTimestamp),
                         );
                         out.extend(range(start, end, Some).map(Target::RangeMicros));
                     }
@@ -282,9 +295,9 @@ impl Canonical {
                         .has_field_by_name(name)
                         .then(|| message.get_field_by_name(name))
                         .flatten()
-                        .map(|v| match Canonical::decoded(&element_type, &v) {
-                            Canonical::Date(d) => i64::from(d),
-                            Canonical::DateTime(v) | Canonical::Timestamp(v) => v,
+                        .map(|side| match Canonical::decoded(&element_type, &side) {
+                            Canonical::Date(days) => i64::from(days),
+                            Canonical::DateTime(micros) | Canonical::Timestamp(micros) => micros,
                             other => panic!("not a RANGE element: {other:?}"),
                         })
                 };
@@ -296,17 +309,21 @@ impl Canonical {
             }
             FieldType::Struct(_) => {
                 let message = value.as_message().expect("a STRUCT message");
-                let x = message.get_field_by_name("x").expect("x is declared");
-                Canonical::decoded(&FieldType::Int64, &x)
+                let quantity = message
+                    .get_field_by_name("quantity")
+                    .expect("quantity is declared");
+                Canonical::decoded(&FieldType::Int64, &quantity)
             }
         }
     }
 
     fn struct_targets(&self) -> Vec<Target> {
         match self {
-            Canonical::Int64(x) => vec![
-                Target::Struct(StructValue { x: *x }),
-                Target::Map([("x".to_string(), *x)].into()),
+            Canonical::Int64(quantity) => vec![
+                Target::Struct(StructValue {
+                    quantity: *quantity,
+                }),
+                Target::Map([("quantity".to_string(), *quantity)].into()),
             ],
             other => panic!("a STRUCT case carries its field's INT64, got {other:?}"),
         }
@@ -348,7 +365,7 @@ fn cases() -> Vec<Case> {
         range(BigQueryRangeElementType::Timestamp),
         Case {
             field_type: FieldType::Struct(vec![field(
-                "x",
+                "quantity",
                 FieldType::Int64,
                 BigQueryFieldMode::Nullable,
             )]),
@@ -366,7 +383,7 @@ struct Column {
 impl Column {
     fn new(field_type: &BigQueryFieldType, mode: BigQueryFieldMode) -> Self {
         let schema = BigQueryTableSchema {
-            fields: vec![field("v", field_type.clone(), mode)],
+            fields: vec![field("value", field_type.clone(), mode)],
         };
         let plan = Arc::new(WritePlan::new(&schema, false));
         let descriptor = message_descriptor(&plan);
@@ -377,20 +394,24 @@ impl Column {
         }
     }
 
-    fn decode<V: Serialize>(&self, v: &V) -> Result<Option<Value>, TestCaseError> {
+    fn decode<V: Serialize>(&self, value: &V) -> Result<Option<Value>, TestCaseError> {
         let mut out = Vec::new();
         Encoder::new(self.plan.clone())
-            .encode(&Row { v }, &mut out)
-            .map_err(|e| {
-                TestCaseError::fail(format!("{} does not encode: {e}", self.field_type))
+            .encode(&Row { value }, &mut out)
+            .map_err(|error| {
+                TestCaseError::fail(format!("{} does not encode: {error}", self.field_type))
             })?;
         let message =
-            DynamicMessage::decode(self.descriptor.clone(), out.as_slice()).map_err(|e| {
-                TestCaseError::fail(format!("{} does not decode: {e}", self.field_type))
+            DynamicMessage::decode(self.descriptor.clone(), out.as_slice()).map_err(|error| {
+                TestCaseError::fail(format!("{} does not decode: {error}", self.field_type))
             })?;
         Ok(message
-            .has_field_by_name("v")
-            .then(|| message.get_field_by_name("v").map(|v| v.into_owned()))
+            .has_field_by_name("value")
+            .then(|| {
+                message
+                    .get_field_by_name("value")
+                    .map(|value| value.into_owned())
+            })
             .flatten())
     }
 
@@ -415,7 +436,7 @@ fn check(case: &Case, values: &[Canonical]) -> Result<(), TestCaseError> {
             (&nullable, nullable.decode(&Some(target))?),
             (&required, required.decode(target)?),
         ] {
-            let got = got.map(|v| column.canonical(&v));
+            let got = got.map(|value| column.canonical(&value));
             prop_assert_eq!(
                 got.as_ref(),
                 Some(first),
@@ -430,14 +451,17 @@ fn check(case: &Case, values: &[Canonical]) -> Result<(), TestCaseError> {
     let repeated = Column::new(&case.field_type, BigQueryFieldMode::Repeated);
     let per_value: Vec<Vec<Target>> = values.iter().map(targets_of).collect();
     let widest = per_value.iter().map(Vec::len).max().unwrap_or(0);
-    for j in 0..widest {
-        let elements: Vec<&Target> = per_value.iter().map(|t| &t[j % t.len()]).collect();
+    for form in 0..widest {
+        let elements: Vec<&Target> = per_value
+            .iter()
+            .map(|targets| &targets[form % targets.len()])
+            .collect();
         let got = repeated.decode(&elements)?;
         let got: Vec<Canonical> = got
-            .and_then(|v| v.as_list().map(<[Value]>::to_vec))
+            .and_then(|list| list.as_list().map(<[Value]>::to_vec))
             .unwrap_or_default()
             .iter()
-            .map(|v| repeated.canonical(v))
+            .map(|element| repeated.canonical(element))
             .collect();
         prop_assert_eq!(
             &got,

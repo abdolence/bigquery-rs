@@ -83,12 +83,12 @@ impl FieldKind {
 }
 
 fn classify(data_type: &DataType, metadata: &Metadata) -> Option<FieldKind> {
-    let ext = metadata.get(ARROW_EXTENSION_NAME).map(String::as_str);
+    let extension = metadata.get(ARROW_EXTENSION_NAME).map(String::as_str);
     Some(match data_type {
         DataType::Int64 => FieldKind::Int64,
         DataType::Float64 => FieldKind::Float64,
         DataType::Boolean => FieldKind::Bool,
-        DataType::Utf8 => match ext {
+        DataType::Utf8 => match extension {
             Some("google:sqlType:json") => FieldKind::Json,
             Some("google:sqlType:geography") => FieldKind::Geography,
             _ => FieldKind::String,

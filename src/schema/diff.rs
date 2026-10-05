@@ -8,6 +8,7 @@ use crate::db::proto::millis;
 use crate::schema::declaration::DeclaredColumn;
 use crate::schema::existing::ExistingTable;
 use crate::schema::plan::ChangeStep;
+use crate::sql::dotted_path;
 use crate::BigQueryLabels;
 use crate::{
     BigQueryDecimalParams, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType,
@@ -103,24 +104,20 @@ impl BigQueryTableDeclaration {
 }
 
 /// Column names compare as BigQuery compares them, ignoring case.
-fn same_name(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b)
+fn same_name(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
 }
 
-fn same_columns(a: &[String], b: &[String]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_name(a, b))
+fn same_columns(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| same_name(left, right))
 }
 
 fn find<'f>(fields: &'f [BigQueryFieldSchema], name: &str) -> Option<&'f BigQueryFieldSchema> {
-    fields.iter().find(|f| same_name(&f.name, name))
-}
-
-fn join(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{prefix}.{name}")
-    }
+    fields.iter().find(|field| same_name(&field.name, name))
 }
 
 impl DeclaredColumn {
@@ -135,22 +132,27 @@ impl DeclaredColumn {
     }
 }
 
-fn decimal_widens(from: Option<BigQueryDecimalParams>, to: Option<BigQueryDecimalParams>) -> bool {
-    match (from, to) {
-        (Some(_), None) => true,
-        (Some(a), Some(b)) => {
-            b.scale >= a.scale
-                && i32::from(b.precision) - i32::from(b.scale)
-                    >= i32::from(a.precision) - i32::from(a.scale)
+impl BigQueryDecimalParams {
+    /// Whether a column with these parameters takes the parameters `to`, `None` being the
+    /// unparameterized type: every value fits in at least as many integer and fractional digits.
+    fn widens_to(self, to: Option<BigQueryDecimalParams>) -> bool {
+        match to {
+            None => true,
+            Some(to) => {
+                to.scale >= self.scale
+                    && i32::from(to.precision) - i32::from(to.scale)
+                        >= i32::from(self.precision) - i32::from(self.scale)
+            }
         }
-        (None, _) => false,
     }
 }
 
+/// Whether a `STRING(n)` or `BYTES(n)` column of length `from` takes the length `to`, `None`
+/// being no limit.
 fn length_widens(from: Option<u64>, to: Option<u64>) -> bool {
     match (from, to) {
         (Some(_), None) => true,
-        (Some(a), Some(b)) => b > a,
+        (Some(from), Some(to)) => to > from,
         (None, _) => false,
     }
 }
@@ -166,10 +168,11 @@ impl BigQueryFieldType {
         match (self, to) {
             (Int64, Numeric(None) | BigNumeric(None)) => true,
             (Numeric(None), BigNumeric(None)) => true,
-            (Numeric(a), Numeric(b)) => decimal_widens(*a, *b),
-            (BigNumeric(a), BigNumeric(b)) => decimal_widens(*a, *b),
-            (String { max_length: a }, String { max_length: b }) => length_widens(*a, *b),
-            (Bytes { max_length: a }, Bytes { max_length: b }) => length_widens(*a, *b),
+            (Numeric(from), Numeric(to)) | (BigNumeric(from), BigNumeric(to)) => {
+                from.is_some_and(|from| from.widens_to(*to))
+            }
+            (String { max_length: from }, String { max_length: to })
+            | (Bytes { max_length: from }, Bytes { max_length: to }) => length_widens(*from, *to),
             _ => false,
         }
     }
@@ -322,7 +325,7 @@ impl Diff<'_> {
         existing: &[BigQueryFieldSchema],
     ) {
         for field in declared {
-            let path = join(prefix, &field.name);
+            let path = dotted_path(prefix, &field.name);
             match find(existing, &field.name) {
                 Some(current) => self.compare(&path, None, field, current),
                 None => self.add(path, field),
@@ -331,7 +334,7 @@ impl Diff<'_> {
         for current in existing {
             if find(declared, &current.name).is_none() {
                 self.undeclared(BigQuerySchemaChange::DropNestedField {
-                    path: join(prefix, &current.name),
+                    path: dotted_path(prefix, &current.name),
                     field_type: current.field_type.clone(),
                 });
             }

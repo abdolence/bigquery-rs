@@ -16,25 +16,31 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn batch(cols: Vec<(Field, ArrayRef)>) -> RecordBatch {
-    let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = cols.into_iter().unzip();
+fn batch(columns: Vec<(Field, ArrayRef)>) -> RecordBatch {
+    let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = columns.into_iter().unzip();
     RecordBatch::try_new(Arc::new(arrow_schema::Schema::new(fields)), arrays)
         .expect("the test columns form a batch")
 }
 
-fn col<A: Array + 'static>(name: &str, a: A) -> (Field, ArrayRef) {
-    (Field::new(name, a.data_type().clone(), true), Arc::new(a))
+fn column<A: Array + 'static>(name: &str, array: A) -> (Field, ArrayRef) {
+    (
+        Field::new(name, array.data_type().clone(), true),
+        Arc::new(array),
+    )
 }
 
-fn required<A: Array + 'static>(name: &str, a: A) -> (Field, ArrayRef) {
-    (Field::new(name, a.data_type().clone(), false), Arc::new(a))
+fn required<A: Array + 'static>(name: &str, array: A) -> (Field, ArrayRef) {
+    (
+        Field::new(name, array.data_type().clone(), false),
+        Arc::new(array),
+    )
 }
 
-fn ext_meta(name: &str) -> HashMap<String, String> {
+fn extension_metadata(name: &str) -> HashMap<String, String> {
     HashMap::from([("ARROW:extension:name".to_string(), name.to_string())])
 }
 
-fn range_meta() -> HashMap<String, String> {
+fn range_metadata() -> HashMap<String, String> {
     HashMap::from([("google:sqlType".to_string(), "range".to_string())])
 }
 
@@ -47,10 +53,10 @@ fn list_with(
     metadata: HashMap<String, String>,
 ) -> (Field, ArrayRef) {
     let item = Arc::new(Field::new("item", values.data_type().clone(), true));
-    let a = ListArray::new(item, OffsetBuffer::new(offsets.into()), values, None);
+    let array = ListArray::new(item, OffsetBuffer::new(offsets.into()), values, None);
     (
-        Field::new(name, a.data_type().clone(), false).with_metadata(metadata),
-        Arc::new(a),
+        Field::new(name, array.data_type().clone(), false).with_metadata(metadata),
+        Arc::new(array),
     )
 }
 
@@ -58,108 +64,131 @@ fn list(name: &str, offsets: Vec<i32>, values: ArrayRef) -> (Field, ArrayRef) {
     list_with(name, offsets, values, HashMap::new())
 }
 
-fn strukt(
+fn struct_column(
     name: &str,
     children: Vec<(Field, ArrayRef)>,
     nulls: Option<Vec<bool>>,
 ) -> (Field, ArrayRef) {
     let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = children.into_iter().unzip();
-    let a = StructArray::new(Fields::from(fields), arrays, nulls.map(NullBuffer::from));
-    (Field::new(name, a.data_type().clone(), true), Arc::new(a))
+    let array = StructArray::new(Fields::from(fields), arrays, nulls.map(NullBuffer::from));
+    (
+        Field::new(name, array.data_type().clone(), true),
+        Arc::new(array),
+    )
 }
 
-fn ts_micros(s: &str) -> i64 {
-    civil::parse_timestamp(s).expect("a valid test timestamp")
+fn timestamp_micros(text: &str) -> i64 {
+    civil::parse_timestamp(text).expect("a valid test timestamp")
 }
 
-fn rows<T: DeserializeOwned>(b: &RecordBatch) -> Vec<T> {
-    decode_rows::<T>(b, 0)
+fn rows<T: DeserializeOwned>(batch: &RecordBatch) -> Vec<T> {
+    decode_rows::<T>(batch, 0)
         .into_iter()
         .collect::<BigQueryResult<Vec<T>>>()
-        .unwrap_or_else(|e| panic!("every row decodes: {e}"))
+        .unwrap_or_else(|error| panic!("every row decodes: {error}"))
 }
 
-fn row<T: DeserializeOwned>(b: &RecordBatch, i: usize) -> Result<T, BigQuerySerializationError> {
-    match decode_rows::<T>(b, 0).swap_remove(i) {
-        Ok(v) => Ok(v),
+fn row<T: DeserializeOwned>(
+    batch: &RecordBatch,
+    index: usize,
+) -> Result<T, BigQuerySerializationError> {
+    match decode_rows::<T>(batch, 0).swap_remove(index) {
+        Ok(value) => Ok(value),
         Err(BigQueryError::DeserializeError(details)) => Err(details),
         Err(other) => panic!("expected a deserialize error, got {other:?}"),
     }
 }
 
-fn row_err<T: DeserializeOwned>(b: &RecordBatch, i: usize) -> BigQuerySerializationError {
-    match row::<T>(b, i) {
-        Ok(_) => panic!("row {i} decoded, and it must fail"),
-        Err(e) => e,
+fn row_error<T: DeserializeOwned>(batch: &RecordBatch, index: usize) -> BigQuerySerializationError {
+    match row::<T>(batch, index) {
+        Ok(_) => panic!("row {index} decoded, and it must fail"),
+        Err(error) => error,
     }
 }
 
 fn all_scalars() -> RecordBatch {
     batch(vec![
-        col("i", Int64Array::from(vec![i64::MIN])),
-        col("f", Float64Array::from(vec![f64::NEG_INFINITY])),
-        col("b", BooleanArray::from(vec![true])),
-        col("s", StringArray::from(vec!["héllo 世界 🦀"])),
-        col("y", BinaryArray::from_vec(vec![&[0u8, 255, 16][..]])),
-        col("d", Date32Array::from(vec![-719162])),
-        col("t", Time64MicrosecondArray::from(vec![86_399_999_999])),
+        column("quantity", Int64Array::from(vec![i64::MIN])),
+        column("price", Float64Array::from(vec![f64::NEG_INFINITY])),
+        column("in_stock", BooleanArray::from(vec![true])),
+        column("name", StringArray::from(vec!["héllo 世界 🦀"])),
+        column("payload", BinaryArray::from_vec(vec![&[0u8, 255, 16][..]])),
+        column("order_date", Date32Array::from(vec![-719162])),
+        column(
+            "pickup_time",
+            Time64MicrosecondArray::from(vec![86_399_999_999]),
+        ),
         {
-            let (f, a) = col(
-                "dt",
-                TimestampMicrosecondArray::from(vec![ts_micros("2024-02-29T12:34:56.789012Z")]),
+            let (field, array) = column(
+                "placed_local",
+                TimestampMicrosecondArray::from(vec![timestamp_micros(
+                    "2024-02-29T12:34:56.789012Z",
+                )]),
             );
-            (f.with_metadata(ext_meta("google:sqlType:datetime")), a)
+            (
+                field.with_metadata(extension_metadata("google:sqlType:datetime")),
+                array,
+            )
         },
-        col(
-            "ts",
-            TimestampMicrosecondArray::from(vec![ts_micros("1969-07-20T20:17:40Z")])
+        column(
+            "placed_at",
+            TimestampMicrosecondArray::from(vec![timestamp_micros("1969-07-20T20:17:40Z")])
                 .with_timezone("UTC"),
         ),
-        col(
-            "num",
+        column(
+            "total",
             Decimal128Array::from(vec![10i128.pow(38) - 1])
                 .with_precision_and_scale(38, 9)
                 .expect("NUMERIC's Arrow type"),
         ),
-        col(
-            "big",
+        column(
+            "big_total",
             Decimal256Array::from(vec![i256::MIN])
                 .with_precision_and_scale(76, 38)
                 .expect("BIGNUMERIC's Arrow type"),
         ),
         {
-            let (f, a) = col("js", StringArray::from(vec![r#"{"a":1,"b":[true,null]}"#]));
-            (f.with_metadata(ext_meta("google:sqlType:json")), a)
+            let (field, array) = column(
+                "attributes",
+                StringArray::from(vec![r#"{"quantity":1,"in_stock":[true,null]}"#]),
+            );
+            (
+                field.with_metadata(extension_metadata("google:sqlType:json")),
+                array,
+            )
         },
         {
-            let (f, a) = col(
-                "iv",
+            let (field, array) = column(
+                "lead_time",
                 IntervalMonthDayNanoArray::from(vec![IntervalMonthDayNano::new(
                     14,
                     -3,
                     14_706_000_789_000,
                 )]),
             );
-            (f.with_metadata(ext_meta("google:sqlType:interval")), a)
+            (
+                field.with_metadata(extension_metadata("google:sqlType:interval")),
+                array,
+            )
         },
     ])
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
 struct Scalars {
-    i: i64,
-    f: f64,
-    b: bool,
-    s: String,
-    y: Vec<u8>,
-    d: jiff::civil::Date,
-    t: jiff::civil::Time,
-    dt: jiff::civil::DateTime,
-    ts: jiff::Timestamp,
-    num: String,
-    big: String,
-    js: BigQueryJson<serde_json::Value>,
-    iv: crate::BigQueryInterval,
+    quantity: i64,
+    price: f64,
+    in_stock: bool,
+    name: String,
+    payload: Vec<u8>,
+    order_date: jiff::civil::Date,
+    pickup_time: jiff::civil::Time,
+    placed_local: jiff::civil::DateTime,
+    placed_at: jiff::Timestamp,
+    total: String,
+    big_total: String,
+    attributes: BigQueryJson<serde_json::Value>,
+    lead_time: crate::BigQueryInterval,
 }
 
 #[test]
@@ -168,20 +197,21 @@ fn scalars_decode_into_their_rust_forms() {
     assert_eq!(
         got,
         vec![Scalars {
-            i: i64::MIN,
-            f: f64::NEG_INFINITY,
-            b: true,
-            s: "héllo 世界 🦀".into(),
-            y: vec![0, 255, 16],
-            d: jiff::civil::date(1, 1, 1),
-            t: "23:59:59.999999".parse().expect("valid"),
-            dt: "2024-02-29T12:34:56.789012".parse().expect("valid"),
-            ts: "1969-07-20T20:17:40Z".parse().expect("valid"),
-            num: "99999999999999999999999999999.999999999".into(),
-            big: "-578960446186580977117854925043439539266.34992332820282019728792003956564819968"
-                .into(),
-            js: BigQueryJson(serde_json::json!({"a": 1, "b": [true, null]})),
-            iv: crate::BigQueryInterval {
+            quantity: i64::MIN,
+            price: f64::NEG_INFINITY,
+            in_stock: true,
+            name: "héllo 世界 🦀".into(),
+            payload: vec![0, 255, 16],
+            order_date: jiff::civil::date(1, 1, 1),
+            pickup_time: "23:59:59.999999".parse().expect("valid"),
+            placed_local: "2024-02-29T12:34:56.789012".parse().expect("valid"),
+            placed_at: "1969-07-20T20:17:40Z".parse().expect("valid"),
+            total: "99999999999999999999999999999.999999999".into(),
+            big_total:
+                "-578960446186580977117854925043439539266.34992332820282019728792003956564819968"
+                    .into(),
+            attributes: BigQueryJson(serde_json::json!({"quantity": 1, "in_stock": [true, null]})),
+            lead_time: crate::BigQueryInterval {
                 months: 14,
                 days: -3,
                 nanos: 14_706_000_789_000,
@@ -192,105 +222,125 @@ fn scalars_decode_into_their_rust_forms() {
 
 #[test]
 fn batch_rows_yield_every_row_past_a_failing_one() {
-    let b = batch(vec![col(
-        "x",
+    let batch = batch(vec![column(
+        "quantity",
         Int64Array::from(vec![Some(1), None, Some(3)]),
     )]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct R {
-        x: i64,
+    struct Order {
+        quantity: i64,
     }
-    let decoded: Vec<_> = BigQueryBatchRows::<R>::new(&b).collect();
+    let decoded: Vec<_> = BigQueryBatchRows::<Order>::new(&batch).collect();
     assert_eq!(decoded.len(), 3);
-    assert_eq!(decoded[0].as_ref().ok(), Some(&R { x: 1 }));
-    let Err(BigQueryError::DeserializeError(e)) = &decoded[1] else {
+    assert_eq!(decoded[0].as_ref().ok(), Some(&Order { quantity: 1 }));
+    let Err(BigQueryError::DeserializeError(error)) = &decoded[1] else {
         panic!("the NULL row must fail, got {:?}", decoded[1]);
     };
-    assert_eq!(e.row, Some(1));
-    assert_eq!(decoded[2].as_ref().ok(), Some(&R { x: 3 }));
+    assert_eq!(error.row, Some(1));
+    assert_eq!(decoded[2].as_ref().ok(), Some(&Order { quantity: 3 }));
 }
 
 #[test]
 fn null_cells_need_option_and_errors_carry_row_and_path() {
-    let b = batch(vec![col("x", Int64Array::from(vec![Some(1), None]))]);
+    let batch = batch(vec![column(
+        "quantity",
+        Int64Array::from(vec![Some(1), None]),
+    )]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct O {
-        x: Option<i64>,
+    struct OptionalOrder {
+        quantity: Option<i64>,
     }
     #[derive(Deserialize, Debug)]
-    struct R {
+    struct Order {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        x: i64,
+        quantity: i64,
     }
-    assert_eq!(rows::<O>(&b), vec![O { x: Some(1) }, O { x: None }]);
-    let decoded = decode_rows::<R>(&b, 40);
+    assert_eq!(
+        rows::<OptionalOrder>(&batch),
+        vec![
+            OptionalOrder { quantity: Some(1) },
+            OptionalOrder { quantity: None }
+        ]
+    );
+    let decoded = decode_rows::<Order>(&batch, 40);
     assert!(decoded[0].is_ok());
-    let Err(BigQueryError::DeserializeError(e)) = &decoded[1] else {
+    let Err(BigQueryError::DeserializeError(error)) = &decoded[1] else {
         panic!("the NULL row must fail, got {:?}", decoded[1]);
     };
-    assert_eq!(e.kind, BigQueryCodecErrorKind::NullForNonOption);
-    assert_eq!(e.row, Some(41));
-    assert_eq!(e.path, "x");
+    assert_eq!(error.kind, BigQueryCodecErrorKind::NullForNonOption);
+    assert_eq!(error.row, Some(41));
+    assert_eq!(error.path, "quantity");
 }
 
 fn nested() -> RecordBatch {
-    let inner = strukt(
+    let inner = struct_column(
         "inner",
-        vec![col("x", Date32Array::from(vec![Some(19782), None, None]))],
+        vec![column(
+            "delivered_on",
+            Date32Array::from(vec![Some(19782), None, None]),
+        )],
         Some(vec![true, false, true]),
     );
     let tags = list(
         "tags",
         vec![0, 2, 2, 3],
-        Arc::new(StringArray::from(vec!["x", "y", "z"])),
+        Arc::new(StringArray::from(vec!["gift", "fragile", "express"])),
     );
-    let rec = strukt(
-        "rec",
+    let line_item = struct_column(
+        "line_item",
         vec![
-            col("a", Int64Array::from(vec![Some(7), None, None])),
+            column("quantity", Int64Array::from(vec![Some(7), None, None])),
             tags,
             inner,
         ],
         Some(vec![true, false, true]),
     );
-    let kv = StructArray::new(
+    let measurement_values = StructArray::new(
         Fields::from(vec![
-            Field::new("k", DataType::Utf8, true),
-            Field::new("v", DataType::Float64, true),
+            Field::new("unit", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
         ]),
         vec![
-            Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+            Arc::new(StringArray::from(vec![Some("kg"), Some("cm"), None])),
             Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
         ],
         None,
     );
-    let recs = list("recs", vec![0, 2, 2, 3], Arc::new(kv));
-    batch(vec![col("id", Int64Array::from(vec![0, 1, 2])), rec, recs])
+    let measurements = list(
+        "measurements",
+        vec![0, 2, 2, 3],
+        Arc::new(measurement_values),
+    );
+    batch(vec![
+        column("id", Int64Array::from(vec![0, 1, 2])),
+        line_item,
+        measurements,
+    ])
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
 struct Inner {
-    x: Option<jiff::civil::Date>,
+    delivered_on: Option<jiff::civil::Date>,
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
-struct Rec {
-    a: Option<i64>,
+struct LineItem {
+    quantity: Option<i64>,
     tags: Vec<String>,
     inner: Option<Inner>,
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
-struct Kv {
-    k: Option<String>,
-    v: Option<f64>,
+struct Measurement {
+    unit: Option<String>,
+    amount: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
 struct NestedRow {
     id: i64,
-    rec: Option<Rec>,
-    recs: Vec<Kv>,
+    line_item: Option<LineItem>,
+    measurements: Vec<Measurement>,
 }
 
 #[test]
@@ -300,37 +350,40 @@ fn nested_struct_list_and_list_of_struct() {
         vec![
             NestedRow {
                 id: 0,
-                rec: Some(Rec {
-                    a: Some(7),
-                    tags: vec!["x".into(), "y".into()],
+                line_item: Some(LineItem {
+                    quantity: Some(7),
+                    tags: vec!["gift".into(), "fragile".into()],
                     inner: Some(Inner {
-                        x: Some(jiff::civil::date(2024, 2, 29))
+                        delivered_on: Some(jiff::civil::date(2024, 2, 29))
                     }),
                 }),
-                recs: vec![
-                    Kv {
-                        k: Some("a".into()),
-                        v: Some(1.0)
+                measurements: vec![
+                    Measurement {
+                        unit: Some("kg".into()),
+                        amount: Some(1.0)
                     },
-                    Kv {
-                        k: Some("b".into()),
-                        v: Some(2.0)
+                    Measurement {
+                        unit: Some("cm".into()),
+                        amount: Some(2.0)
                     }
                 ],
             },
             NestedRow {
                 id: 1,
-                rec: None,
-                recs: vec![]
+                line_item: None,
+                measurements: vec![]
             },
             NestedRow {
                 id: 2,
-                rec: Some(Rec {
-                    a: None,
-                    tags: vec!["z".into()],
-                    inner: Some(Inner { x: None }),
+                line_item: Some(LineItem {
+                    quantity: None,
+                    tags: vec!["express".into()],
+                    inner: Some(Inner { delivered_on: None }),
                 }),
-                recs: vec![Kv { k: None, v: None }],
+                measurements: vec![Measurement {
+                    unit: None,
+                    amount: None
+                }],
             },
         ]
     );
@@ -341,93 +394,110 @@ fn null_struct_into_bare_struct_is_an_error() {
     #[derive(Deserialize, Debug)]
     struct Bare {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        rec: Rec,
+        line_item: LineItem,
     }
-    let e = row_err::<Bare>(&nested(), 1);
+    let error = row_error::<Bare>(&nested(), 1);
     assert_eq!(
-        (e.row, e.path.as_str(), e.kind),
-        (Some(1), "rec", BigQueryCodecErrorKind::NullForNonOption)
+        (error.row, error.path.as_str(), error.kind),
+        (
+            Some(1),
+            "line_item",
+            BigQueryCodecErrorKind::NullForNonOption
+        )
     );
 }
 
 #[test]
 fn error_path_names_the_nested_list_element() {
     #[derive(Deserialize, Debug)]
-    struct KvBad {
+    struct BadMeasurement {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        v: Option<String>,
+        amount: Option<String>,
     }
     #[derive(Deserialize, Debug)]
     struct Bad {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        recs: Vec<KvBad>,
+        measurements: Vec<BadMeasurement>,
     }
-    let e = row_err::<Bad>(&nested(), 0);
+    let error = row_error::<Bad>(&nested(), 0);
     assert_eq!(
-        (e.row, e.path.as_str(), e.kind),
-        (Some(0), "recs[0].v", BigQueryCodecErrorKind::TypeMismatch)
+        (error.row, error.path.as_str(), error.kind),
+        (
+            Some(0),
+            "measurements[0].amount",
+            BigQueryCodecErrorKind::TypeMismatch
+        )
     );
 
     #[derive(Deserialize, Debug)]
-    struct RecBadTag {
+    struct LineItemBadTag {
         #[allow(dead_code, reason = "decoded only to see it fail")]
         tags: Vec<i64>,
     }
     #[derive(Deserialize, Debug)]
     struct BadTag {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        rec: Option<RecBadTag>,
+        line_item: Option<LineItemBadTag>,
     }
-    let e = row_err::<BadTag>(&nested(), 2);
-    assert_eq!((e.row, e.path.as_str()), (Some(2), "rec.tags[0]"));
+    let error = row_error::<BadTag>(&nested(), 2);
+    assert_eq!(
+        (error.row, error.path.as_str()),
+        (Some(2), "line_item.tags[0]")
+    );
 }
 
 #[test]
 fn unnamed_columns_are_never_visited() {
-    let b = batch(vec![
-        col("id", Int64Array::from(vec![1, 2])),
-        col("odd", Float32Array::from(vec![1.0, 2.0])),
+    let batch = batch(vec![
+        column("id", Int64Array::from(vec![1, 2])),
+        column("odd", Float32Array::from(vec![1.0, 2.0])),
     ]);
     #[derive(Deserialize, Debug, PartialEq)]
     struct Id {
         id: i64,
     }
-    assert_eq!(rows::<Id>(&b), vec![Id { id: 1 }, Id { id: 2 }]);
+    assert_eq!(rows::<Id>(&batch), vec![Id { id: 1 }, Id { id: 2 }]);
 }
 
 #[test]
 fn unknown_arrow_type_fails_only_rows_that_name_it() {
-    let rec = strukt(
-        "rec",
-        vec![col("odd", Float32Array::from(vec![1.0, 2.0]))],
+    let line_item = struct_column(
+        "line_item",
+        vec![column("odd", Float32Array::from(vec![1.0, 2.0]))],
         Some(vec![false, true]),
     );
-    let b = batch(vec![col("id", Int64Array::from(vec![1, 2])), rec]);
+    let batch = batch(vec![column("id", Int64Array::from(vec![1, 2])), line_item]);
     #[derive(Deserialize, Debug, PartialEq)]
     struct Odd {
         odd: f32,
     }
     #[derive(Deserialize, Debug, PartialEq)]
-    struct R {
+    struct Order {
         id: i64,
-        rec: Option<Odd>,
+        line_item: Option<Odd>,
     }
-    assert_eq!(row::<R>(&b, 0), Ok(R { id: 1, rec: None }));
-    let e = row_err::<R>(&b, 1);
-    assert_eq!(e.kind, BigQueryCodecErrorKind::UnsupportedType);
-    assert_eq!(e.path, "rec.odd");
+    assert_eq!(
+        row::<Order>(&batch, 0),
+        Ok(Order {
+            id: 1,
+            line_item: None
+        })
+    );
+    let error = row_error::<Order>(&batch, 1);
+    assert_eq!(error.kind, BigQueryCodecErrorKind::UnsupportedType);
+    assert_eq!(error.path, "line_item.odd");
 }
 
 #[test]
 fn the_field_plan_is_built_once_per_batch() {
-    let b = nested();
-    let decoder = BatchDecoder::new(&b);
-    for i in 0..3 {
+    let batch = nested();
+    let decoder = BatchDecoder::new(&batch);
+    for index in 0..3 {
         decoder
-            .row::<NestedRow>(i)
-            .unwrap_or_else(|e| panic!("row {i}: {e}"));
+            .row::<NestedRow>(index)
+            .unwrap_or_else(|error| panic!("row {index}: {error}"));
     }
-    // One plan for the row, one each for rec, rec.inner and the recs element.
+    // One plan for the row, one each for line_item, line_item.inner and the measurements element.
     assert_eq!(decoder.plans_built(), 4);
 }
 
@@ -435,200 +505,209 @@ fn the_field_plan_is_built_once_per_batch() {
 fn bignumeric_numeric_and_interval_alternate_targets() {
     #[derive(Deserialize, Debug, PartialEq)]
     struct Alt {
-        num: f64,
-        big: f64,
-        iv: String,
-        num_dec: BigQueryDecimal<String>,
+        total: f64,
+        big_total: f64,
+        lead_time: String,
+        total_decimal: BigQueryDecimal<String>,
     }
-    let b = all_scalars();
-    let mut cols: Vec<(Field, ArrayRef)> = b
+    let scalars = all_scalars();
+    let mut columns: Vec<(Field, ArrayRef)> = scalars
         .schema()
         .fields()
         .iter()
-        .zip(b.columns())
-        .map(|(f, a)| (f.as_ref().clone(), a.clone()))
+        .zip(scalars.columns())
+        .map(|(field, array)| (field.as_ref().clone(), array.clone()))
         .collect();
-    cols.push(col(
-        "num_dec",
+    columns.push(column(
+        "total_decimal",
         Decimal128Array::from(vec![1_500_000_000i128])
             .with_precision_and_scale(38, 9)
             .expect("NUMERIC's Arrow type"),
     ));
-    let got: Alt = rows(&batch(cols)).remove(0);
-    assert_eq!(got.num, 1e29);
+    let got: Alt = rows(&batch(columns)).remove(0);
+    assert_eq!(got.total, 1e29);
     assert_eq!(
-        got.big,
+        got.big_total,
         "-578960446186580977117854925043439539266.34992332820282019728792003956564819968"
             .parse::<f64>()
             .expect("valid")
     );
-    assert_eq!(got.iv, "1-2 -3 4:5:6.000789");
-    assert_eq!(got.num_dec, BigQueryDecimal("1.5".to_string()));
+    assert_eq!(got.lead_time, "1-2 -3 4:5:6.000789");
+    assert_eq!(got.total_decimal, BigQueryDecimal("1.5".to_string()));
 }
 
 #[test]
 fn timestamp_forms_cover_the_full_bigquery_range() {
     let max = civil::TIMESTAMP_MAX_MICROS;
-    let b = batch(vec![col(
-        "ts",
+    let batch = batch(vec![column(
+        "placed_at",
         TimestampMicrosecondArray::from(vec![max, -1]).with_timezone("UTC"),
     )]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct S {
-        ts: String,
+    struct TextTimestamp {
+        placed_at: String,
     }
     #[derive(Deserialize, Debug, PartialEq)]
-    struct I {
-        ts: i64,
+    struct IntegerTimestamp {
+        placed_at: i64,
     }
     #[derive(Deserialize, Debug, PartialEq)]
-    struct J {
-        ts: jiff::Timestamp,
+    struct JiffTimestamp {
+        placed_at: jiff::Timestamp,
     }
     assert_eq!(
-        row::<S>(&b, 0).map(|r| r.ts),
+        row::<TextTimestamp>(&batch, 0).map(|row| row.placed_at),
         Ok("9999-12-31T23:59:59.999999Z".to_string())
     );
-    assert_eq!(row::<I>(&b, 0).map(|r| r.ts), Ok(max));
     assert_eq!(
-        row::<J>(&b, 1).map(|r| r.ts),
+        row::<IntegerTimestamp>(&batch, 0).map(|row| row.placed_at),
+        Ok(max)
+    );
+    assert_eq!(
+        row::<JiffTimestamp>(&batch, 1).map(|row| row.placed_at),
         Ok("1969-12-31T23:59:59.999999Z".parse().expect("valid"))
     );
 }
 
 #[test]
 fn timestamp_above_jiff_max_fails_only_that_row() {
-    let b = batch(vec![col(
-        "ts",
+    let batch = batch(vec![column(
+        "placed_at",
         TimestampMicrosecondArray::from(vec![civil::TIMESTAMP_MAX_MICROS, 0]).with_timezone("UTC"),
     )]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct J {
-        ts: jiff::Timestamp,
+    struct JiffTimestamp {
+        placed_at: jiff::Timestamp,
     }
     #[derive(Deserialize, Debug, PartialEq)]
-    struct W {
-        ts: BigQueryTimestamp,
+    struct WrappedTimestamp {
+        placed_at: BigQueryTimestamp,
     }
-    let e = row_err::<J>(&b, 0);
+    let error = row_error::<JiffTimestamp>(&batch, 0);
     assert_eq!(
-        (e.row, e.path.as_str(), e.kind),
-        (Some(0), "ts", BigQueryCodecErrorKind::OutOfRange)
+        (error.row, error.path.as_str(), error.kind),
+        (Some(0), "placed_at", BigQueryCodecErrorKind::OutOfRange)
     );
     assert_eq!(
-        row::<J>(&b, 1),
-        Ok(J {
-            ts: jiff::Timestamp::UNIX_EPOCH
+        row::<JiffTimestamp>(&batch, 1),
+        Ok(JiffTimestamp {
+            placed_at: jiff::Timestamp::UNIX_EPOCH
         })
     );
-    assert_eq!(row_err::<W>(&b, 0).kind, BigQueryCodecErrorKind::OutOfRange);
     assert_eq!(
-        row::<W>(&b, 1),
-        Ok(W {
-            ts: BigQueryTimestamp(jiff::Timestamp::UNIX_EPOCH)
+        row_error::<WrappedTimestamp>(&batch, 0).kind,
+        BigQueryCodecErrorKind::OutOfRange
+    );
+    assert_eq!(
+        row::<WrappedTimestamp>(&batch, 1),
+        Ok(WrappedTimestamp {
+            placed_at: BigQueryTimestamp(jiff::Timestamp::UNIX_EPOCH)
         })
     );
 }
 
 #[test]
 fn borrowed_str_and_bytes_live_as_long_as_the_batch() {
-    let b = batch(vec![
-        col("s", StringArray::from(vec!["abc"])),
-        col("y", BinaryArray::from_vec(vec![&b"\x01\x02"[..]])),
+    let batch = batch(vec![
+        column("name", StringArray::from(vec!["abc"])),
+        column("payload", BinaryArray::from_vec(vec![&b"\x01\x02"[..]])),
     ]);
     #[derive(Deserialize)]
-    struct B<'a> {
-        s: &'a str,
-        y: &'a [u8],
+    struct Borrowed<'a> {
+        name: &'a str,
+        payload: &'a [u8],
     }
-    let decoder = BatchDecoder::new(&b);
-    let r: B = decoder.row(0).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!((r.s, r.y), ("abc", &[1u8, 2][..]));
+    let decoder = BatchDecoder::new(&batch);
+    let borrowed: Borrowed = decoder.row(0).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!((borrowed.name, borrowed.payload), ("abc", &[1u8, 2][..]));
 }
 
 #[test]
 fn dynamic_rows_through_deserialize_any() {
-    let b = nested();
+    let batch = nested();
     assert_eq!(
-        row::<serde_json::Value>(&b, 1),
-        Ok(serde_json::json!({"id": 1, "rec": null, "recs": []}))
+        row::<serde_json::Value>(&batch, 1),
+        Ok(serde_json::json!({"id": 1, "line_item": null, "measurements": []}))
     );
-    let v = row::<serde_json::Value>(&b, 0).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(v["rec"]["inner"]["x"], "2024-02-29");
-    assert_eq!(v["recs"][1]["v"], 2.0);
+    let value = row::<serde_json::Value>(&batch, 0).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(value["line_item"]["inner"]["delivered_on"], "2024-02-29");
+    assert_eq!(value["measurements"][1]["amount"], 2.0);
 }
 
 #[test]
 fn temporal_wrappers_decode_from_integers() {
     let day = 19_782; // 2024-02-29
-    let at = ts_micros("2024-02-29T12:34:56.789012Z");
-    let (local_field, local) = col("local", TimestampMicrosecondArray::from(vec![at]));
-    let b = batch(vec![
-        col("day", Date32Array::from(vec![day])),
-        col("tod", Time64MicrosecondArray::from(vec![45_296_000_001])),
+    let at = timestamp_micros("2024-02-29T12:34:56.789012Z");
+    let (local_field, local) = column("local", TimestampMicrosecondArray::from(vec![at]));
+    let batch = batch(vec![
+        column("day", Date32Array::from(vec![day])),
+        column(
+            "time_of_day",
+            Time64MicrosecondArray::from(vec![45_296_000_001]),
+        ),
         (
-            local_field.with_metadata(ext_meta("google:sqlType:datetime")),
+            local_field.with_metadata(extension_metadata("google:sqlType:datetime")),
             local,
         ),
-        col(
+        column(
             "at",
             TimestampMicrosecondArray::from(vec![at]).with_timezone("UTC"),
         ),
-        col("no_day", Date32Array::from(vec![None::<i32>])),
+        column("no_day", Date32Array::from(vec![None::<i32>])),
         list(
-            "ats",
+            "seen_at",
             vec![0, 2],
             Arc::new(TimestampMicrosecondArray::from(vec![0, at]).with_timezone("UTC")),
         ),
-        col("day_with", Date32Array::from(vec![day])),
-        col(
-            "at_opt",
+        column("day_with", Date32Array::from(vec![day])),
+        column(
+            "maybe_at",
             TimestampMicrosecondArray::from(vec![at]).with_timezone("UTC"),
         ),
     ]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct W {
+    struct TemporalWrappers {
         day: BigQueryDate,
-        tod: BigQueryTime,
+        time_of_day: BigQueryTime,
         local: BigQueryDateTime,
         at: BigQueryTimestamp,
         no_day: Option<BigQueryDate>,
-        ats: Vec<BigQueryTimestamp>,
+        seen_at: Vec<BigQueryTimestamp>,
         #[serde(with = "crate::serialize_as_date")]
         day_with: jiff::civil::Date,
         #[serde(with = "crate::serialize_as_optional_timestamp")]
-        at_opt: Option<jiff::Timestamp>,
+        maybe_at: Option<jiff::Timestamp>,
     }
-    let ts: jiff::Timestamp = "2024-02-29T12:34:56.789012Z".parse().expect("valid");
+    let timestamp: jiff::Timestamp = "2024-02-29T12:34:56.789012Z".parse().expect("valid");
     assert_eq!(
-        rows::<W>(&b),
-        vec![W {
+        rows::<TemporalWrappers>(&batch),
+        vec![TemporalWrappers {
             day: BigQueryDate(jiff::civil::date(2024, 2, 29)),
-            tod: BigQueryTime(jiff::civil::time(12, 34, 56, 1_000)),
+            time_of_day: BigQueryTime(jiff::civil::time(12, 34, 56, 1_000)),
             local: BigQueryDateTime("2024-02-29T12:34:56.789012".parse().expect("valid")),
-            at: BigQueryTimestamp(ts),
+            at: BigQueryTimestamp(timestamp),
             no_day: None,
-            ats: vec![
+            seen_at: vec![
                 BigQueryTimestamp(jiff::Timestamp::UNIX_EPOCH),
-                BigQueryTimestamp(ts)
+                BigQueryTimestamp(timestamp)
             ],
             day_with: jiff::civil::date(2024, 2, 29),
-            at_opt: Some(ts),
+            maybe_at: Some(timestamp),
         }]
     );
 }
 
 #[test]
 fn temporal_wrapper_on_another_temporal_column_is_type_mismatch() {
-    let (dt_field, dt) = col("local", TimestampMicrosecondArray::from(vec![0]));
-    let b = batch(vec![
-        col(
+    let (local_field, local_array) = column("local", TimestampMicrosecondArray::from(vec![0]));
+    let batch = batch(vec![
+        column(
             "at",
             TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC"),
         ),
         (
-            dt_field.with_metadata(ext_meta("google:sqlType:datetime")),
-            dt,
+            local_field.with_metadata(extension_metadata("google:sqlType:datetime")),
+            local_array,
         ),
     ]);
     #[derive(Deserialize, Debug)]
@@ -641,14 +720,14 @@ fn temporal_wrapper_on_another_temporal_column_is_type_mismatch() {
         #[allow(dead_code, reason = "decoded only to see it fail")]
         local: BigQueryTimestamp,
     }
-    let e = row_err::<DateOnTimestamp>(&b, 0);
+    let error = row_error::<DateOnTimestamp>(&batch, 0);
     assert_eq!(
-        (e.path.as_str(), e.kind),
+        (error.path.as_str(), error.kind),
         ("at", BigQueryCodecErrorKind::TypeMismatch)
     );
-    let e = row_err::<TimestampOnDateTime>(&b, 0);
+    let error = row_error::<TimestampOnDateTime>(&batch, 0);
     assert_eq!(
-        (e.path.as_str(), e.kind),
+        (error.path.as_str(), error.kind),
         ("local", BigQueryCodecErrorKind::TypeMismatch)
     );
 }
@@ -666,30 +745,44 @@ fn numeric_reads_into_integers_only_when_whole() {
     ])
     .with_precision_and_scale(76, 38)
     .expect("BIGNUMERIC's Arrow type");
-    let b = batch(vec![col("num", numeric), col("big", big)]);
+    let batch = batch(vec![column("total", numeric), column("big_total", big)]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct N {
-        num: i64,
+    struct WholeNumeric {
+        total: i64,
     }
     #[derive(Deserialize, Debug, PartialEq)]
-    struct B {
-        big: i128,
+    struct WholeBigNumeric {
+        big_total: i128,
     }
     #[derive(Deserialize, Debug, PartialEq)]
     struct Narrow {
-        num: u8,
+        total: u8,
     }
-    assert_eq!(row::<N>(&b, 0), Ok(N { num: 5 }));
-    let e = row_err::<N>(&b, 1);
     assert_eq!(
-        (e.path.as_str(), e.kind),
-        ("num", BigQueryCodecErrorKind::OutOfRange)
+        row::<WholeNumeric>(&batch, 0),
+        Ok(WholeNumeric { total: 5 })
     );
-    assert_eq!(row::<N>(&b, 2), Ok(N { num: -2 }));
-    assert_eq!(row::<B>(&b, 0), Ok(B { big: i128::MAX }));
-    assert_eq!(row::<B>(&b, 1), Ok(B { big: 1 }));
+    let error = row_error::<WholeNumeric>(&batch, 1);
     assert_eq!(
-        row_err::<Narrow>(&b, 2).kind,
+        (error.path.as_str(), error.kind),
+        ("total", BigQueryCodecErrorKind::OutOfRange)
+    );
+    assert_eq!(
+        row::<WholeNumeric>(&batch, 2),
+        Ok(WholeNumeric { total: -2 })
+    );
+    assert_eq!(
+        row::<WholeBigNumeric>(&batch, 0),
+        Ok(WholeBigNumeric {
+            big_total: i128::MAX
+        })
+    );
+    assert_eq!(
+        row::<WholeBigNumeric>(&batch, 1),
+        Ok(WholeBigNumeric { big_total: 1 })
+    );
+    assert_eq!(
+        row_error::<Narrow>(&batch, 2).kind,
         BigQueryCodecErrorKind::OutOfRange
     );
 }
@@ -712,30 +805,32 @@ fn required_range_unbounded_end_reads_as_epoch() {
     };
     let required = children(None);
     let nullable = children(Some(vec![false, true]));
-    let b = batch(vec![
+    let batch = batch(vec![
         (
-            Field::new("r", required.data_type().clone(), false).with_metadata(range_meta()),
+            Field::new("booked", required.data_type().clone(), false)
+                .with_metadata(range_metadata()),
             Arc::new(required) as ArrayRef,
         ),
         (
-            Field::new("n", nullable.data_type().clone(), true).with_metadata(range_meta()),
+            Field::new("tentative", nullable.data_type().clone(), true)
+                .with_metadata(range_metadata()),
             Arc::new(nullable),
         ),
     ]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct R {
-        r: BigQueryRange<jiff::civil::Date>,
-        n: Option<BigQueryRange<jiff::civil::Date>>,
+    struct Booking {
+        booked: BigQueryRange<jiff::civil::Date>,
+        tentative: Option<BigQueryRange<jiff::civil::Date>>,
     }
     let epoch = jiff::civil::date(1970, 1, 1);
     assert_eq!(
-        row::<R>(&b, 0),
-        Ok(R {
-            r: BigQueryRange {
+        row::<Booking>(&batch, 0),
+        Ok(Booking {
+            booked: BigQueryRange {
                 start: Some(epoch),
                 end: Some(jiff::civil::date(1970, 1, 6))
             },
-            n: Some(BigQueryRange {
+            tentative: Some(BigQueryRange {
                 start: None,
                 end: Some(jiff::civil::date(1970, 1, 6))
             }),
@@ -745,148 +840,164 @@ fn required_range_unbounded_end_reads_as_epoch() {
 
 #[test]
 fn json_column_parses_into_any_shape_but_a_string() {
-    let (f, a) = col(
-        "js",
-        StringArray::from(vec![Some(r#"{"a":1,"b":["x"]}"#), Some("null"), None]),
+    let (field, array) = column(
+        "attributes",
+        StringArray::from(vec![
+            Some(r#"{"quantity":1,"tags":["gift"]}"#),
+            Some("null"),
+            None,
+        ]),
     );
-    let (lf, la) = list_with(
-        "ajs",
+    let (list_field, list_array) = list_with(
+        "attribute_list",
         vec![0, 2, 2, 2],
-        Arc::new(StringArray::from(vec![r#"{"a":2,"b":[]}"#, "[1,2]"])),
-        ext_meta("google:sqlType:json"),
+        Arc::new(StringArray::from(vec![
+            r#"{"quantity":2,"tags":[]}"#,
+            "[1,2]",
+        ])),
+        extension_metadata("google:sqlType:json"),
     );
-    let b = batch(vec![
-        (f.with_metadata(ext_meta("google:sqlType:json")), a),
-        (lf, la),
+    let batch = batch(vec![
+        (
+            field.with_metadata(extension_metadata("google:sqlType:json")),
+            array,
+        ),
+        (list_field, list_array),
     ]);
 
     #[derive(Deserialize, Debug, PartialEq)]
     struct Doc {
-        a: i64,
-        b: Vec<String>,
+        quantity: i64,
+        tags: Vec<String>,
     }
     #[derive(Deserialize, Debug, PartialEq)]
     struct Typed {
-        js: Option<Doc>,
+        attributes: Option<Doc>,
     }
     #[derive(Deserialize, Debug, PartialEq)]
     struct Values {
-        js: Option<serde_json::Value>,
-        ajs: Vec<serde_json::Value>,
+        attributes: Option<serde_json::Value>,
+        attribute_list: Vec<serde_json::Value>,
     }
     #[derive(Deserialize, Debug, PartialEq)]
     struct Raw {
-        js: Option<String>,
-        ajs: Vec<String>,
+        attributes: Option<String>,
+        attribute_list: Vec<String>,
     }
     #[derive(Deserialize, Debug, PartialEq)]
     struct Maps {
-        js: HashMap<String, serde_json::Value>,
+        attributes: HashMap<String, serde_json::Value>,
     }
 
     assert_eq!(
-        row::<Typed>(&b, 0),
+        row::<Typed>(&batch, 0),
         Ok(Typed {
-            js: Some(Doc {
-                a: 1,
-                b: vec!["x".into()]
+            attributes: Some(Doc {
+                quantity: 1,
+                tags: vec!["gift".into()]
             })
         })
     );
     assert_eq!(
-        row::<Values>(&b, 0),
+        row::<Values>(&batch, 0),
         Ok(Values {
-            js: Some(serde_json::json!({"a": 1, "b": ["x"]})),
-            ajs: vec![
-                serde_json::json!({"a": 2, "b": []}),
+            attributes: Some(serde_json::json!({"quantity": 1, "tags": ["gift"]})),
+            attribute_list: vec![
+                serde_json::json!({"quantity": 2, "tags": []}),
                 serde_json::json!([1, 2])
             ],
         })
     );
     assert_eq!(
-        row::<Values>(&b, 1),
+        row::<Values>(&batch, 1),
         Ok(Values {
-            js: Some(serde_json::Value::Null),
-            ajs: vec![]
+            attributes: Some(serde_json::Value::Null),
+            attribute_list: vec![]
         }),
         "JSON null stays apart from SQL NULL"
     );
     assert_eq!(
-        row::<Values>(&b, 2),
+        row::<Values>(&batch, 2),
         Ok(Values {
-            js: None,
-            ajs: vec![]
+            attributes: None,
+            attribute_list: vec![]
         })
     );
     assert_eq!(
-        row::<Raw>(&b, 0),
+        row::<Raw>(&batch, 0),
         Ok(Raw {
-            js: Some(r#"{"a":1,"b":["x"]}"#.into()),
-            ajs: vec![r#"{"a":2,"b":[]}"#.into(), "[1,2]".into()],
+            attributes: Some(r#"{"quantity":1,"tags":["gift"]}"#.into()),
+            attribute_list: vec![r#"{"quantity":2,"tags":[]}"#.into(), "[1,2]".into()],
         }),
         "a String gets the JSON text as it is"
     );
-    assert_eq!(row::<Maps>(&b, 0).map(|m| m.js.len()), Ok(2));
+    assert_eq!(
+        row::<Maps>(&batch, 0).map(|maps| maps.attributes.len()),
+        Ok(2)
+    );
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
 struct NullDoc {
-    a: i64,
+    quantity: i64,
 }
 
-/// A JSON column `js` holding `{"a":1}`, JSON `null` and SQL NULL, in that order.
+/// A JSON column `attributes` holding `{"quantity":1}`, JSON `null` and SQL NULL, in that order.
 fn json_nulls() -> RecordBatch {
-    let (f, a) = col(
-        "js",
-        StringArray::from(vec![Some(r#"{"a":1}"#), Some("null"), None]),
+    let (field, array) = column(
+        "attributes",
+        StringArray::from(vec![Some(r#"{"quantity":1}"#), Some("null"), None]),
     );
-    batch(vec![(f.with_metadata(ext_meta("google:sqlType:json")), a)])
+    batch(vec![(
+        field.with_metadata(extension_metadata("google:sqlType:json")),
+        array,
+    )])
 }
 
 #[test]
 fn json_null_into_an_option_of_a_typed_target_is_none() {
     #[derive(Deserialize, Debug, PartialEq)]
     struct Typed {
-        js: Option<NullDoc>,
+        attributes: Option<NullDoc>,
     }
-    let b = json_nulls();
+    let batch = json_nulls();
     assert_eq!(
-        row::<Typed>(&b, 0),
+        row::<Typed>(&batch, 0),
         Ok(Typed {
-            js: Some(NullDoc { a: 1 })
+            attributes: Some(NullDoc { quantity: 1 })
         })
     );
-    assert_eq!(row::<Typed>(&b, 1), Ok(Typed { js: None }));
-    assert_eq!(row::<Typed>(&b, 2), Ok(Typed { js: None }));
+    assert_eq!(row::<Typed>(&batch, 1), Ok(Typed { attributes: None }));
+    assert_eq!(row::<Typed>(&batch, 2), Ok(Typed { attributes: None }));
     #[derive(Deserialize, Debug, PartialEq)]
     struct Int {
-        js: Option<i64>,
+        attributes: Option<i64>,
     }
-    assert_eq!(row::<Int>(&b, 1), Ok(Int { js: None }));
+    assert_eq!(row::<Int>(&batch, 1), Ok(Int { attributes: None }));
 }
 
 #[test]
 fn json_null_into_an_option_of_a_value_stays_apart_from_sql_null() {
     #[derive(Deserialize, Debug, PartialEq)]
     struct Values {
-        js: Option<serde_json::Value>,
+        attributes: Option<serde_json::Value>,
     }
-    let b = json_nulls();
+    let batch = json_nulls();
     assert_eq!(
-        row::<Values>(&b, 1),
+        row::<Values>(&batch, 1),
         Ok(Values {
-            js: Some(serde_json::Value::Null)
+            attributes: Some(serde_json::Value::Null)
         })
     );
-    assert_eq!(row::<Values>(&b, 2), Ok(Values { js: None }));
+    assert_eq!(row::<Values>(&batch, 2), Ok(Values { attributes: None }));
     #[derive(Deserialize, Debug, PartialEq)]
     struct Raw {
-        js: Option<String>,
+        attributes: Option<String>,
     }
     assert_eq!(
-        row::<Raw>(&b, 1),
+        row::<Raw>(&batch, 1),
         Ok(Raw {
-            js: Some("null".into())
+            attributes: Some("null".into())
         }),
         "a String is the JSON text, and `null` is text"
     );
@@ -897,12 +1008,12 @@ fn json_null_into_a_bare_typed_target_is_an_error() {
     #[derive(Deserialize, Debug)]
     struct Bare {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        js: NullDoc,
+        attributes: NullDoc,
     }
-    let e = row_err::<Bare>(&json_nulls(), 1);
+    let error = row_error::<Bare>(&json_nulls(), 1);
     assert_eq!(
-        (e.path.as_str(), e.kind),
-        ("js", BigQueryCodecErrorKind::Custom)
+        (error.path.as_str(), error.kind),
+        ("attributes", BigQueryCodecErrorKind::Custom)
     );
 }
 
@@ -910,32 +1021,48 @@ fn json_null_into_a_bare_typed_target_is_an_error() {
 fn json_null_into_an_option_of_the_wrapper_follows_its_inner_type() {
     #[derive(Deserialize, Debug, PartialEq)]
     struct Wrapped {
-        js: Option<BigQueryJson<serde_json::Value>>,
-        #[serde(rename = "js2")]
+        attributes: Option<BigQueryJson<serde_json::Value>>,
+        #[serde(rename = "typed_attributes")]
         typed: Option<BigQueryJson<NullDoc>>,
-        #[serde(rename = "js3", with = "crate::serialize_as_optional_json")]
+        #[serde(rename = "attributes_with", with = "crate::serialize_as_optional_json")]
         with: Option<NullDoc>,
     }
-    let (f1, a1) = col("js", StringArray::from(vec![Some("null"), None]));
-    let (f2, a2) = col("js2", StringArray::from(vec![Some("null"), None]));
-    let (f3, a3) = col("js3", StringArray::from(vec![Some("null"), None]));
-    let b = batch(vec![
-        (f1.with_metadata(ext_meta("google:sqlType:json")), a1),
-        (f2.with_metadata(ext_meta("google:sqlType:json")), a2),
-        (f3.with_metadata(ext_meta("google:sqlType:json")), a3),
+    let (json_field, json_array) =
+        column("attributes", StringArray::from(vec![Some("null"), None]));
+    let (typed_field, typed_array) = column(
+        "typed_attributes",
+        StringArray::from(vec![Some("null"), None]),
+    );
+    let (with_field, with_array) = column(
+        "attributes_with",
+        StringArray::from(vec![Some("null"), None]),
+    );
+    let batch = batch(vec![
+        (
+            json_field.with_metadata(extension_metadata("google:sqlType:json")),
+            json_array,
+        ),
+        (
+            typed_field.with_metadata(extension_metadata("google:sqlType:json")),
+            typed_array,
+        ),
+        (
+            with_field.with_metadata(extension_metadata("google:sqlType:json")),
+            with_array,
+        ),
     ]);
     assert_eq!(
-        row::<Wrapped>(&b, 0),
+        row::<Wrapped>(&batch, 0),
         Ok(Wrapped {
-            js: Some(BigQueryJson(serde_json::Value::Null)),
+            attributes: Some(BigQueryJson(serde_json::Value::Null)),
             typed: None,
             with: None,
         })
     );
     assert_eq!(
-        row::<Wrapped>(&b, 1),
+        row::<Wrapped>(&batch, 1),
         Ok(Wrapped {
-            js: None,
+            attributes: None,
             typed: None,
             with: None
         })
@@ -944,36 +1071,39 @@ fn json_null_into_an_option_of_the_wrapper_follows_its_inner_type() {
 
 #[test]
 fn json_null_elements_of_an_array_into_options_are_none() {
-    let (lf, la) = list_with(
-        "ajs",
+    let (list_field, list_array) = list_with(
+        "attribute_list",
         vec![0, 3],
-        Arc::new(StringArray::from(vec!["null", r#"{"a":2}"#, "null"])),
-        ext_meta("google:sqlType:json"),
+        Arc::new(StringArray::from(vec!["null", r#"{"quantity":2}"#, "null"])),
+        extension_metadata("google:sqlType:json"),
     );
     #[derive(Deserialize, Debug, PartialEq)]
     struct Docs {
-        ajs: Vec<Option<NullDoc>>,
+        attribute_list: Vec<Option<NullDoc>>,
     }
     assert_eq!(
-        row::<Docs>(&batch(vec![(lf, la)]), 0),
+        row::<Docs>(&batch(vec![(list_field, list_array)]), 0),
         Ok(Docs {
-            ajs: vec![None, Some(NullDoc { a: 2 }), None]
+            attribute_list: vec![None, Some(NullDoc { quantity: 2 }), None]
         })
     );
 }
 
 #[test]
 fn bytes_column_into_json_value_is_an_error() {
-    let b = batch(vec![col("y", BinaryArray::from_vec(vec![&b"\x01"[..]]))]);
+    let batch = batch(vec![column(
+        "payload",
+        BinaryArray::from_vec(vec![&b"\x01"[..]]),
+    )]);
     #[derive(Deserialize, Debug)]
-    struct J {
+    struct JsonPayload {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        y: serde_json::Value,
+        payload: serde_json::Value,
     }
-    let e = row_err::<J>(&b, 0);
+    let error = row_error::<JsonPayload>(&batch, 0);
     assert_eq!(
-        (e.path.as_str(), e.kind),
-        ("y", BigQueryCodecErrorKind::TypeMismatch)
+        (error.path.as_str(), error.kind),
+        ("payload", BigQueryCodecErrorKind::TypeMismatch)
     );
 }
 
@@ -1145,12 +1275,12 @@ fn required_field_without_column_is_a_missing_field_error() {
         #[allow(dead_code, reason = "decoded only to see it fail")]
         not_a_column: i64,
     }
-    let e = row_err::<RequiredMissing>(&full_batch(), 0);
-    assert_eq!(e.kind, BigQueryCodecErrorKind::Custom);
+    let error = row_error::<RequiredMissing>(&full_batch(), 0);
+    assert_eq!(error.kind, BigQueryCodecErrorKind::Custom);
     assert!(
-        e.message.contains("missing field `not_a_column`"),
+        error.message.contains("missing field `not_a_column`"),
         "{}",
-        e.message
+        error.message
     );
 }
 
@@ -1196,21 +1326,21 @@ struct Deny {
 
 #[test]
 fn deny_unknown_fields_rejects_extra_columns_in_every_row() {
-    let b = full_batch();
-    for i in 0..2 {
-        let e = row_err::<Deny>(&b, i);
+    let batch = full_batch();
+    for index in 0..2 {
+        let error = row_error::<Deny>(&batch, index);
         assert!(
-            e.message.contains("unknown field"),
-            "row {i}: {}",
-            e.message
+            error.message.contains("unknown field"),
+            "row {index}: {}",
+            error.message
         );
     }
 }
 
 #[test]
 fn deny_unknown_fields_accepts_exact_columns() {
-    let b = batch(vec![required("id", Int64Array::from(vec![1, 2]))]);
-    assert_eq!(rows::<Deny>(&b), [Deny { id: 1 }, Deny { id: 2 }]);
+    let batch = batch(vec![required("id", Int64Array::from(vec![1, 2]))]);
+    assert_eq!(rows::<Deny>(&batch), [Deny { id: 1 }, Deny { id: 2 }]);
 }
 
 #[test]
@@ -1256,13 +1386,13 @@ fn alias_with_both_columns_is_a_duplicate_field_error() {
         #[serde(alias = "user_name")]
         name: String,
     }
-    let b = alias_batch();
-    for i in 0..2 {
-        let e = row_err::<Alias>(&b, i);
+    let batch = alias_batch();
+    for index in 0..2 {
+        let error = row_error::<Alias>(&batch, index);
         assert!(
-            e.message.contains("duplicate field"),
-            "row {i}: {}",
-            e.message
+            error.message.contains("duplicate field"),
+            "row {index}: {}",
+            error.message
         );
     }
 }
@@ -1278,32 +1408,40 @@ fn alias_with_deny_unknown_fields_is_a_duplicate_field_error() {
         #[serde(alias = "user_name")]
         name: String,
     }
-    let e = row_err::<Alias>(&alias_batch(), 0);
-    assert!(e.message.contains("duplicate field"), "{}", e.message);
+    let error = row_error::<Alias>(&alias_batch(), 0);
+    assert!(
+        error.message.contains("duplicate field"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
 fn alias_on_the_first_field_with_every_name_a_column_is_an_error() {
-    let b = batch(vec![
-        required("a", Int64Array::from(vec![1])),
-        required("x", Int64Array::from(vec![2])),
-        required("b", Int64Array::from(vec![3])),
+    let batch = batch(vec![
+        required("quantity", Int64Array::from(vec![1])),
+        required("amount", Int64Array::from(vec![2])),
+        required("total", Int64Array::from(vec![3])),
     ]);
     #[derive(Deserialize, Debug)]
     struct First {
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        #[serde(alias = "x")]
-        a: i64,
+        #[serde(alias = "amount")]
+        quantity: i64,
         #[allow(dead_code, reason = "decoded only to see it fail")]
-        b: i64,
+        total: i64,
     }
-    let e = row_err::<First>(&b, 0);
-    assert!(e.message.contains("duplicate field"), "{}", e.message);
+    let error = row_error::<First>(&batch, 0);
+    assert!(
+        error.message.contains("duplicate field"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
 fn alias_with_only_the_alias_column_decodes() {
-    let b = batch(vec![
+    let batch = batch(vec![
         required("id", Int64Array::from(vec![1])),
         required("user_name", StringArray::from(vec!["ann"])),
     ]);
@@ -1314,7 +1452,7 @@ fn alias_with_only_the_alias_column_decodes() {
         name: String,
     }
     assert_eq!(
-        rows::<Alias>(&b),
+        rows::<Alias>(&batch),
         [Alias {
             id: 1,
             name: "ann".to_string()
@@ -1327,7 +1465,7 @@ fn alias_and_default_decode_by_name() {
     #[derive(Deserialize, Debug, PartialEq)]
     struct AliasDefault {
         #[serde(alias = "user_name", default)]
-        a: String,
+        customer: String,
         extra: String,
         #[serde(default)]
         other: String,
@@ -1336,12 +1474,12 @@ fn alias_and_default_decode_by_name() {
         rows::<AliasDefault>(&full_batch()),
         [
             AliasDefault {
-                a: "ann".to_string(),
+                customer: "ann".to_string(),
                 extra: "e1".to_string(),
                 other: "".to_string()
             },
             AliasDefault {
-                a: "bob".to_string(),
+                customer: "bob".to_string(),
                 extra: "e2".to_string(),
                 other: "".to_string()
             }
@@ -1351,9 +1489,11 @@ fn alias_and_default_decode_by_name() {
 
 #[test]
 fn plain_struct_keeps_index_keys() {
-    let b = all_scalars();
-    let decoder = BatchDecoder::new(&b);
-    decoder.row::<Scalars>(0).unwrap_or_else(|e| panic!("{e}"));
+    let batch = all_scalars();
+    let decoder = BatchDecoder::new(&batch);
+    decoder
+        .row::<Scalars>(0)
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(decoder.name_key_plans(), 0);
 }
 
@@ -1366,13 +1506,15 @@ fn trailing_skip_is_not_an_alias() {
         #[serde(skip)]
         cache: Option<String>,
     }
-    let b = batch(vec![
+    let batch = batch(vec![
         required("id", Int64Array::from(vec![1])),
         required("extra", StringArray::from(vec!["e1"])),
     ]);
-    let decoder = BatchDecoder::new(&b);
+    let decoder = BatchDecoder::new(&batch);
     assert_eq!(
-        decoder.row::<TrailingSkip>(0).map_err(|e| e.to_string()),
+        decoder
+            .row::<TrailingSkip>(0)
+            .map_err(|error| error.to_string()),
         Ok(TrailingSkip {
             id: 1,
             extra: "e1".to_string(),
@@ -1391,16 +1533,16 @@ struct Tail {
 fn tail_batch() -> RecordBatch {
     batch(vec![
         required("id", Int64Array::from(vec![7])),
-        required("rest", StringArray::from(vec!["r"])),
+        required("rest", StringArray::from(vec!["ignored"])),
     ])
 }
 
 #[test]
 fn ignored_any_field_falls_back_to_string_keys() {
-    let b = tail_batch();
-    let decoder = BatchDecoder::new(&b);
+    let batch = tail_batch();
+    let decoder = BatchDecoder::new(&batch);
     assert_eq!(
-        decoder.row::<Tail>(0).map_err(|e| e.to_string()),
+        decoder.row::<Tail>(0).map_err(|error| error.to_string()),
         Ok(Tail {
             id: 7,
             rest: IgnoredAny
@@ -1411,21 +1553,21 @@ fn ignored_any_field_falls_back_to_string_keys() {
 
 #[test]
 fn swallowed_probe_error_still_redoes_the_row() {
-    fn lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Tail>, D::Error> {
-        Ok(Option::<Tail>::deserialize(d).unwrap_or(None))
+    fn lenient<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Tail>, D::Error> {
+        Ok(Option::<Tail>::deserialize(deserializer).unwrap_or(None))
     }
     #[derive(Deserialize, Debug, PartialEq)]
     struct Outer {
         #[serde(deserialize_with = "lenient")]
-        rec: Option<Tail>,
+        line_item: Option<Tail>,
     }
     let tail = tail_batch();
-    let rec = StructArray::from(tail);
-    let b = batch(vec![col("rec", rec)]);
+    let line_item = StructArray::from(tail);
+    let batch = batch(vec![column("line_item", line_item)]);
     assert_eq!(
-        row::<Outer>(&b, 0),
+        row::<Outer>(&batch, 0),
         Ok(Outer {
-            rec: Some(Tail {
+            line_item: Some(Tail {
                 id: 7,
                 rest: IgnoredAny
             })
@@ -1436,8 +1578,14 @@ fn swallowed_probe_error_still_redoes_the_row() {
 // The round trip of every type and mode: canonical values built into the Arrow arrays
 // BigQuery sends, decoded into each Rust target of the type, and mapped back.
 
-fn opt_ints<T: Copy>(values: &[Option<Canonical>], f: impl Fn(&Canonical) -> T) -> Vec<Option<T>> {
-    values.iter().map(|v| v.as_ref().map(&f)).collect()
+fn optional_values<T: Copy>(
+    values: &[Option<Canonical>],
+    convert: impl Fn(&Canonical) -> T,
+) -> Vec<Option<T>> {
+    values
+        .iter()
+        .map(|value| value.as_ref().map(&convert))
+        .collect()
 }
 
 fn range_child_type(element: BigQueryRangeElementType) -> DataType {
@@ -1455,7 +1603,7 @@ fn range_child(element: BigQueryRangeElementType, values: Vec<Option<i64>>) -> A
         BigQueryRangeElementType::Date => Arc::new(Date32Array::from(
             values
                 .into_iter()
-                .map(|v| v.map(|d| i32::try_from(d).expect("DATE days fit i32")))
+                .map(|value| value.map(|days| i32::try_from(days).expect("DATE days fit i32")))
                 .collect::<Vec<_>>(),
         )),
         BigQueryRangeElementType::DateTime => Arc::new(TimestampMicrosecondArray::from(values)),
@@ -1472,98 +1620,110 @@ fn arrow_values(
     values: &[Option<Canonical>],
 ) -> (ArrayRef, HashMap<String, String>) {
     let none = HashMap::new();
-    let unexpected = |v: &Canonical| -> ! { panic!("{kind:?} column got {v:?}") };
+    let unexpected = |value: &Canonical| -> ! { panic!("{kind:?} column got {value:?}") };
     match kind {
         FieldKind::Int64 => (
-            Arc::new(Int64Array::from(opt_ints(values, |v| match v {
-                Canonical::Int64(x) => *x,
-                v => unexpected(v),
-            }))),
+            Arc::new(Int64Array::from(optional_values(
+                values,
+                |value| match value {
+                    Canonical::Int64(inner) => *inner,
+                    value => unexpected(value),
+                },
+            ))),
             none,
         ),
         FieldKind::Float64 => (
-            Arc::new(Float64Array::from(opt_ints(values, |v| match v {
-                Canonical::Float64(bits) => f64::from_bits(*bits),
-                v => unexpected(v),
-            }))),
+            Arc::new(Float64Array::from(optional_values(
+                values,
+                |value| match value {
+                    Canonical::Float64(bits) => f64::from_bits(*bits),
+                    value => unexpected(value),
+                },
+            ))),
             none,
         ),
         FieldKind::Bool => (
-            Arc::new(BooleanArray::from(opt_ints(values, |v| match v {
-                Canonical::Bool(x) => *x,
-                v => unexpected(v),
-            }))),
+            Arc::new(BooleanArray::from(optional_values(
+                values,
+                |value| match value {
+                    Canonical::Bool(inner) => *inner,
+                    value => unexpected(value),
+                },
+            ))),
             none,
         ),
         FieldKind::String | FieldKind::Geography | FieldKind::Json => {
             let text: Vec<Option<String>> = values
                 .iter()
-                .map(|v| {
-                    v.as_ref().map(|v| match v {
-                        Canonical::String(s) | Canonical::Geography(s) => s.clone(),
-                        Canonical::Json(j) => j.to_string(),
-                        v => unexpected(v),
+                .map(|value| {
+                    value.as_ref().map(|value| match value {
+                        Canonical::String(text) | Canonical::Geography(text) => text.clone(),
+                        Canonical::Json(json) => json.to_string(),
+                        value => unexpected(value),
                     })
                 })
                 .collect();
-            let meta = match kind {
-                FieldKind::Json => ext_meta("google:sqlType:json"),
+            let field_metadata = match kind {
+                FieldKind::Json => extension_metadata("google:sqlType:json"),
                 FieldKind::Geography => {
-                    let mut m = ext_meta("google:sqlType:geography");
-                    m.insert(
+                    let mut metadata = extension_metadata("google:sqlType:geography");
+                    metadata.insert(
                         "ARROW:extension:metadata".into(),
                         r#"{"encoding": "WKT"}"#.into(),
                     );
-                    m
+                    metadata
                 }
                 _ => none,
             };
-            (Arc::new(StringArray::from(text)), meta)
+            (Arc::new(StringArray::from(text)), field_metadata)
         }
         FieldKind::Bytes => {
             let bytes: Vec<Option<&[u8]>> = values
                 .iter()
-                .map(|v| {
-                    v.as_ref().map(|v| match v {
-                        Canonical::Bytes(b) => b.as_slice(),
-                        v => unexpected(v),
+                .map(|value| {
+                    value.as_ref().map(|value| match value {
+                        Canonical::Bytes(bytes) => bytes.as_slice(),
+                        value => unexpected(value),
                     })
                 })
                 .collect();
             (Arc::new(BinaryArray::from_opt_vec(bytes)), none)
         }
         FieldKind::Date => (
-            Arc::new(Date32Array::from(opt_ints(values, |v| match v {
-                Canonical::Date(d) => *d,
-                v => unexpected(v),
-            }))),
+            Arc::new(Date32Array::from(optional_values(
+                values,
+                |value| match value {
+                    Canonical::Date(days) => *days,
+                    value => unexpected(value),
+                },
+            ))),
             none,
         ),
         FieldKind::Time => (
-            Arc::new(Time64MicrosecondArray::from(opt_ints(
+            Arc::new(Time64MicrosecondArray::from(optional_values(
                 values,
-                |v| match v {
-                    Canonical::Time(t) => *t,
-                    v => unexpected(v),
+                |value| match value {
+                    Canonical::Time(micros) => *micros,
+                    value => unexpected(value),
                 },
             ))),
             none,
         ),
         FieldKind::DateTime => (
-            Arc::new(TimestampMicrosecondArray::from(opt_ints(
+            Arc::new(TimestampMicrosecondArray::from(optional_values(
                 values,
-                |v| match v {
-                    Canonical::DateTime(t) => *t,
-                    v => unexpected(v),
+                |value| match value {
+                    Canonical::DateTime(micros) => *micros,
+                    value => unexpected(value),
                 },
             ))),
-            ext_meta("google:sqlType:datetime"),
+            extension_metadata("google:sqlType:datetime"),
         ),
         FieldKind::Timestamp => (
             Arc::new(
-                TimestampMicrosecondArray::from(opt_ints(values, |v| match v {
-                    Canonical::Timestamp(t) => *t,
-                    v => unexpected(v),
+                TimestampMicrosecondArray::from(optional_values(values, |value| match value {
+                    Canonical::Timestamp(micros) => *micros,
+                    value => unexpected(value),
                 }))
                 .with_timezone("UTC"),
             ),
@@ -1571,9 +1731,9 @@ fn arrow_values(
         ),
         FieldKind::Numeric => (
             Arc::new(
-                Decimal128Array::from(opt_ints(values, |v| match v {
-                    Canonical::Numeric(x) => *x,
-                    v => unexpected(v),
+                Decimal128Array::from(optional_values(values, |value| match value {
+                    Canonical::Numeric(inner) => *inner,
+                    value => unexpected(value),
                 }))
                 .with_precision_and_scale(38, 9)
                 .expect("NUMERIC's Arrow type"),
@@ -1582,9 +1742,9 @@ fn arrow_values(
         ),
         FieldKind::BigNumeric => (
             Arc::new(
-                Decimal256Array::from(opt_ints(values, |v| match v {
-                    Canonical::BigNumeric(x) => *x,
-                    v => unexpected(v),
+                Decimal256Array::from(optional_values(values, |value| match value {
+                    Canonical::BigNumeric(inner) => *inner,
+                    value => unexpected(value),
                 }))
                 .with_precision_and_scale(76, 38)
                 .expect("BIGNUMERIC's Arrow type"),
@@ -1592,34 +1752,37 @@ fn arrow_values(
             none,
         ),
         FieldKind::Interval => (
-            Arc::new(IntervalMonthDayNanoArray::from(opt_ints(
+            Arc::new(IntervalMonthDayNanoArray::from(optional_values(
                 values,
-                |v| match v {
-                    Canonical::Interval(iv) => {
-                        IntervalMonthDayNano::new(iv.months, iv.days, iv.nanos)
+                |value| match value {
+                    Canonical::Interval(interval) => {
+                        IntervalMonthDayNano::new(interval.months, interval.days, interval.nanos)
                     }
-                    v => unexpected(v),
+                    value => unexpected(value),
                 },
             ))),
-            ext_meta("google:sqlType:interval"),
+            extension_metadata("google:sqlType:interval"),
         ),
         FieldKind::Range => {
             let element = values
                 .iter()
                 .flatten()
-                .find_map(|v| match v {
+                .find_map(|value| match value {
                     Canonical::Range { element, .. } => Some(*element),
                     _ => None,
                 })
                 .unwrap_or(BigQueryRangeElementType::Date);
             let bound = |pick: fn(&Canonical) -> Option<i64>| -> Vec<Option<i64>> {
-                values.iter().map(|v| v.as_ref().and_then(pick)).collect()
+                values
+                    .iter()
+                    .map(|value| value.as_ref().and_then(pick))
+                    .collect()
             };
-            let start = bound(|v| match v {
+            let start = bound(|value| match value {
                 Canonical::Range { start, .. } => *start,
                 _ => None,
             });
-            let end = bound(|v| match v {
+            let end = bound(|value| match value {
                 Canonical::Range { end, .. } => *end,
                 _ => None,
             });
@@ -1634,54 +1797,56 @@ fn arrow_values(
                     vec![range_child(element, start), range_child(element, end)],
                     Some(nulls),
                 )),
-                range_meta(),
+                range_metadata(),
             )
         }
         FieldKind::Struct => panic!("STRUCT columns are covered by the nested tests"),
     }
 }
 
-/// A batch of `n` (NULLABLE, every third row NULL), `r` (REQUIRED) and `a` (REPEATED, up to
-/// three values from the row on) over `values`.
+/// A batch of `nullable` (NULLABLE, every third row NULL), `required` (REQUIRED) and `repeated`
+/// (REPEATED, up to three values from the row on) over `values`.
 fn mode_batch(kind: FieldKind, values: &[Canonical]) -> RecordBatch {
     let nullable: Vec<Option<Canonical>> = values
         .iter()
         .enumerate()
-        .map(|(i, v)| (i % 3 != 2).then(|| v.clone()))
+        .map(|(index, value)| (index % 3 != 2).then(|| value.clone()))
         .collect();
     let all: Vec<Option<Canonical>> = values.iter().cloned().map(Some).collect();
     let mut offsets = vec![0i32];
     let mut flat = Vec::new();
-    for i in 0..values.len() {
+    for index in 0..values.len() {
         flat.extend(
-            values[i..(i + 3).min(values.len())]
+            values[index..(index + 3).min(values.len())]
                 .iter()
                 .cloned()
                 .map(Some),
         );
         offsets.push(i32::try_from(flat.len()).expect("a small test list"));
     }
-    let (n, n_meta) = arrow_values(kind, &nullable);
-    let (r, r_meta) = arrow_values(kind, &all);
-    let (a, a_meta) = arrow_values(kind, &flat);
+    let (nullable_array, nullable_metadata) = arrow_values(kind, &nullable);
+    let (required_array, required_metadata) = arrow_values(kind, &all);
+    let (repeated_array, repeated_metadata) = arrow_values(kind, &flat);
     batch(vec![
         (
-            Field::new("n", n.data_type().clone(), true).with_metadata(n_meta),
-            n,
+            Field::new("nullable", nullable_array.data_type().clone(), true)
+                .with_metadata(nullable_metadata),
+            nullable_array,
         ),
         (
-            Field::new("r", r.data_type().clone(), false).with_metadata(r_meta),
-            r,
+            Field::new("required", required_array.data_type().clone(), false)
+                .with_metadata(required_metadata),
+            required_array,
         ),
-        list_with("a", offsets, a, a_meta),
+        list_with("repeated", offsets, repeated_array, repeated_metadata),
     ])
 }
 
 #[derive(Deserialize)]
 struct ModeRow<X> {
-    n: Option<X>,
-    r: X,
-    a: Vec<X>,
+    nullable: Option<X>,
+    required: X,
+    repeated: Vec<X>,
 }
 
 /// Decodes `values` in every mode into `X` and checks that `back` gives each value again.
@@ -1694,30 +1859,31 @@ fn check_target<X: DeserializeOwned>(
     if values.is_empty() {
         return Ok(());
     }
-    let b = mode_batch(kind, values);
-    for (i, decoded) in decode_rows::<ModeRow<X>>(&b, 0).into_iter().enumerate() {
-        let decoded = decoded
-            .map_err(|e| TestCaseError::fail(format!("{kind:?} into {target}, row {i}: {e}")))?;
-        let expected_n = (i % 3 != 2).then(|| values[i].clone());
+    let batch = mode_batch(kind, values);
+    for (index, decoded) in decode_rows::<ModeRow<X>>(&batch, 0).into_iter().enumerate() {
+        let decoded = decoded.map_err(|error| {
+            TestCaseError::fail(format!("{kind:?} into {target}, row {index}: {error}"))
+        })?;
+        let expected_nullable = (index % 3 != 2).then(|| values[index].clone());
         prop_assert_eq!(
-            decoded.n.map(&back),
-            expected_n,
-            "{:?} n into {}",
+            decoded.nullable.map(&back),
+            expected_nullable,
+            "{:?} nullable into {}",
             kind,
             target
         );
         prop_assert_eq!(
-            back(decoded.r),
-            values[i].clone(),
-            "{:?} r into {}",
+            back(decoded.required),
+            values[index].clone(),
+            "{:?} required into {}",
             kind,
             target
         );
-        let a: Vec<Canonical> = decoded.a.into_iter().map(&back).collect();
+        let repeated: Vec<Canonical> = decoded.repeated.into_iter().map(&back).collect();
         prop_assert_eq!(
-            a,
-            values[i..(i + 3).min(values.len())].to_vec(),
-            "{:?} a into {}",
+            repeated,
+            values[index..(index + 3).min(values.len())].to_vec(),
+            "{:?} repeated into {}",
             kind,
             target
         );
@@ -1729,10 +1895,10 @@ fn below_jiff_max(values: &[Canonical]) -> Vec<Canonical> {
     let max = jiff::Timestamp::MAX.as_microsecond();
     values
         .iter()
-        .filter(|v| match v {
-            Canonical::Timestamp(t) => *t <= max,
+        .filter(|value| match value {
+            Canonical::Timestamp(micros) => *micros <= max,
             Canonical::Range { start, end, .. } => {
-                start.is_none_or(|s| s <= max) && end.is_none_or(|e| e <= max)
+                start.is_none_or(|start| start <= max) && end.is_none_or(|end| end <= max)
             }
             _ => true,
         })
@@ -1740,134 +1906,146 @@ fn below_jiff_max(values: &[Canonical]) -> Vec<Canonical> {
         .collect()
 }
 
-fn checks(kind: FieldKind, v: &[Canonical]) -> Result<(), TestCaseError> {
-    let ok = |r: Result<i64, CodecError>| r.unwrap_or_else(|e| panic!("{e}"));
+fn checks(kind: FieldKind, values: &[Canonical]) -> Result<(), TestCaseError> {
+    let ok = |result: Result<i64, CodecError>| result.unwrap_or_else(|error| panic!("{error}"));
     match kind {
         FieldKind::Int64 => {
-            check_target(kind, "i64", v, Canonical::Int64)?;
-            check_target(kind, "i128", v, |x: i128| {
-                Canonical::Int64(i64::try_from(x).expect("an INT64 value"))
+            check_target(kind, "i64", values, Canonical::Int64)?;
+            check_target(kind, "i128", values, |decoded: i128| {
+                Canonical::Int64(i64::try_from(decoded).expect("an INT64 value"))
             })?;
         }
-        FieldKind::Float64 => {
-            check_target(kind, "f64", v, |x: f64| Canonical::Float64(x.to_bits()))?
-        }
-        FieldKind::Bool => check_target(kind, "bool", v, Canonical::Bool)?,
+        FieldKind::Float64 => check_target(kind, "f64", values, |decoded: f64| {
+            Canonical::Float64(decoded.to_bits())
+        })?,
+        FieldKind::Bool => check_target(kind, "bool", values, Canonical::Bool)?,
         FieldKind::String => {
-            check_target(kind, "String", v, Canonical::String)?;
-            check_target(kind, "Box<str>", v, |x: Box<str>| {
-                Canonical::String(x.into())
+            check_target(kind, "String", values, Canonical::String)?;
+            check_target(kind, "Box<str>", values, |decoded: Box<str>| {
+                Canonical::String(decoded.into())
             })?;
         }
         FieldKind::Bytes => {
-            check_target(kind, "Vec<u8>", v, Canonical::Bytes)?;
-            check_target(kind, "ByteBuf", v, |x: serde_bytes::ByteBuf| {
-                Canonical::Bytes(x.into_vec())
+            check_target(kind, "Vec<u8>", values, Canonical::Bytes)?;
+            check_target(kind, "ByteBuf", values, |decoded: serde_bytes::ByteBuf| {
+                Canonical::Bytes(decoded.into_vec())
             })?;
         }
         FieldKind::Date => {
-            check_target(kind, "jiff Date", v, |d: jiff::civil::Date| {
-                Canonical::Date(civil::date_days(d).expect("in range"))
+            check_target(kind, "jiff Date", values, |date: jiff::civil::Date| {
+                Canonical::Date(civil::date_days(date).expect("in range"))
             })?;
-            check_target(kind, "BigQueryDate", v, |d: BigQueryDate| {
-                Canonical::Date(civil::date_days(d.0).expect("in range"))
+            check_target(kind, "BigQueryDate", values, |date: BigQueryDate| {
+                Canonical::Date(civil::date_days(date.0).expect("in range"))
             })?;
-            check_target(kind, "String", v, |s: String| {
-                Canonical::Date(civil::parse_date(&s).expect("DATE text"))
+            check_target(kind, "String", values, |text: String| {
+                Canonical::Date(civil::parse_date(&text).expect("DATE text"))
             })?;
-            check_target(kind, "i32", v, Canonical::Date)?;
+            check_target(kind, "i32", values, Canonical::Date)?;
         }
         FieldKind::Time => {
-            check_target(kind, "jiff Time", v, |t: jiff::civil::Time| {
-                Canonical::Time(civil::time_micros(t))
+            check_target(kind, "jiff Time", values, |time: jiff::civil::Time| {
+                Canonical::Time(civil::time_micros(time))
             })?;
-            check_target(kind, "BigQueryTime", v, |t: BigQueryTime| {
-                Canonical::Time(civil::time_micros(t.0))
+            check_target(kind, "BigQueryTime", values, |time: BigQueryTime| {
+                Canonical::Time(civil::time_micros(time.0))
             })?;
-            check_target(kind, "String", v, |s: String| {
-                Canonical::Time(ok(civil::parse_time(&s)))
+            check_target(kind, "String", values, |text: String| {
+                Canonical::Time(ok(civil::parse_time(&text)))
             })?;
-            check_target(kind, "i64", v, Canonical::Time)?;
+            check_target(kind, "i64", values, Canonical::Time)?;
         }
         FieldKind::DateTime => {
-            check_target(kind, "jiff DateTime", v, |t: jiff::civil::DateTime| {
-                Canonical::DateTime(ok(civil::datetime_micros(t)))
+            check_target(
+                kind,
+                "jiff DateTime",
+                values,
+                |time: jiff::civil::DateTime| Canonical::DateTime(ok(civil::datetime_micros(time))),
+            )?;
+            check_target(
+                kind,
+                "BigQueryDateTime",
+                values,
+                |time: BigQueryDateTime| Canonical::DateTime(ok(civil::datetime_micros(time.0))),
+            )?;
+            check_target(kind, "String", values, |text: String| {
+                Canonical::DateTime(ok(civil::parse_datetime(&text)))
             })?;
-            check_target(kind, "BigQueryDateTime", v, |t: BigQueryDateTime| {
-                Canonical::DateTime(ok(civil::datetime_micros(t.0)))
-            })?;
-            check_target(kind, "String", v, |s: String| {
-                Canonical::DateTime(ok(civil::parse_datetime(&s)))
-            })?;
-            check_target(kind, "i64", v, Canonical::DateTime)?;
+            check_target(kind, "i64", values, Canonical::DateTime)?;
         }
         FieldKind::Timestamp => {
-            let safe = below_jiff_max(v);
-            check_target(kind, "jiff Timestamp", &safe, |t: jiff::Timestamp| {
-                Canonical::Timestamp(ok(civil::timestamp_micros(t)))
+            let safe = below_jiff_max(values);
+            check_target(kind, "jiff Timestamp", &safe, |time: jiff::Timestamp| {
+                Canonical::Timestamp(ok(civil::timestamp_micros(time)))
             })?;
-            check_target(kind, "BigQueryTimestamp", &safe, |t: BigQueryTimestamp| {
-                Canonical::Timestamp(ok(civil::timestamp_micros(t.0)))
+            check_target(
+                kind,
+                "BigQueryTimestamp",
+                &safe,
+                |time: BigQueryTimestamp| Canonical::Timestamp(ok(civil::timestamp_micros(time.0))),
+            )?;
+            check_target(kind, "String", values, |text: String| {
+                Canonical::Timestamp(ok(civil::parse_timestamp(&text)))
             })?;
-            check_target(kind, "String", v, |s: String| {
-                Canonical::Timestamp(ok(civil::parse_timestamp(&s)))
-            })?;
-            check_target(kind, "i64", v, Canonical::Timestamp)?;
+            check_target(kind, "i64", values, Canonical::Timestamp)?;
         }
         FieldKind::Numeric => {
-            let numeric = |s: &str| {
+            let numeric = |text: &str| {
                 Canonical::Numeric(
-                    decimal::parse_numeric(s)
+                    decimal::parse_numeric(text)
                         .expect("NUMERIC text")
                         .to_i128()
                         .expect("NUMERIC fits i128"),
                 )
             };
-            check_target(kind, "String", v, |s: String| numeric(&s))?;
+            check_target(kind, "String", values, |text: String| numeric(&text))?;
             check_target(
                 kind,
                 "BigQueryDecimal<String>",
-                v,
-                |s: BigQueryDecimal<String>| numeric(&s.0),
+                values,
+                |text: BigQueryDecimal<String>| numeric(&text.0),
             )?;
         }
         FieldKind::BigNumeric => {
-            let big = |s: &str| Canonical::BigNumeric(decimal::parse_bignumeric(s).expect("text"));
-            check_target(kind, "String", v, |s: String| big(&s))?;
+            let big =
+                |text: &str| Canonical::BigNumeric(decimal::parse_bignumeric(text).expect("text"));
+            check_target(kind, "String", values, |text: String| big(&text))?;
             check_target(
                 kind,
                 "BigQueryDecimal<String>",
-                v,
-                |s: BigQueryDecimal<String>| big(&s.0),
+                values,
+                |text: BigQueryDecimal<String>| big(&text.0),
             )?;
         }
-        FieldKind::Geography => check_target(kind, "String", v, Canonical::Geography)?,
+        FieldKind::Geography => check_target(kind, "String", values, Canonical::Geography)?,
         FieldKind::Json => {
-            check_target(kind, "String", v, |s: String| {
-                Canonical::Json(serde_json::from_str(&s).expect("JSON text"))
+            check_target(kind, "String", values, |text: String| {
+                Canonical::Json(serde_json::from_str(&text).expect("JSON text"))
             })?;
             check_target(
                 kind,
                 "BigQueryJson<Value>",
-                v,
-                |j: BigQueryJson<serde_json::Value>| Canonical::Json(j.0),
+                values,
+                |json: BigQueryJson<serde_json::Value>| Canonical::Json(json.0),
             )?;
-            check_target(kind, "Value", v, Canonical::Json)?;
+            check_target(kind, "Value", values, Canonical::Json)?;
         }
         FieldKind::Interval => {
-            check_target(kind, "BigQueryInterval", v, Canonical::Interval)?;
-            check_target(kind, "String", v, |s: String| {
-                Canonical::Interval(crate::BigQueryInterval::parse_bq(&s).expect("INTERVAL text"))
+            check_target(kind, "BigQueryInterval", values, Canonical::Interval)?;
+            check_target(kind, "String", values, |text: String| {
+                Canonical::Interval(
+                    crate::BigQueryInterval::parse_bq(&text).expect("INTERVAL text"),
+                )
             })?;
         }
-        FieldKind::Range => range_checks(v)?,
+        FieldKind::Range => range_checks(values)?,
         FieldKind::Struct => {}
     }
     Ok(())
 }
 
-fn range_checks(v: &[Canonical]) -> Result<(), TestCaseError> {
-    let Some(Canonical::Range { element, .. }) = v.first() else {
+fn range_checks(values: &[Canonical]) -> Result<(), TestCaseError> {
+    let Some(Canonical::Range { element, .. }) = values.first() else {
         return Ok(());
     };
     let element = *element;
@@ -1877,62 +2055,81 @@ fn range_checks(v: &[Canonical]) -> Result<(), TestCaseError> {
         start,
         end,
     };
-    let ok = |r: Result<i64, CodecError>| r.unwrap_or_else(|e| panic!("{e}"));
+    let ok = |result: Result<i64, CodecError>| result.unwrap_or_else(|error| panic!("{error}"));
     match element {
         BigQueryRangeElementType::Date => {
-            let days = |d: jiff::civil::Date| i64::from(civil::date_days(d).expect("in range"));
+            let days =
+                |date: jiff::civil::Date| i64::from(civil::date_days(date).expect("in range"));
             check_target(
                 kind,
                 "BigQueryRange<Date>",
-                v,
-                |r: BigQueryRange<jiff::civil::Date>| back(r.start.map(days), r.end.map(days)),
+                values,
+                |range: BigQueryRange<jiff::civil::Date>| {
+                    back(range.start.map(days), range.end.map(days))
+                },
             )?;
             check_target(
                 kind,
                 "BigQueryRange<BigQueryDate>",
-                v,
-                |r: BigQueryRange<BigQueryDate>| {
-                    back(r.start.map(|d| days(d.0)), r.end.map(|d| days(d.0)))
+                values,
+                |range: BigQueryRange<BigQueryDate>| {
+                    back(
+                        range.start.map(|date| days(date.0)),
+                        range.end.map(|date| days(date.0)),
+                    )
                 },
             )?;
-            check_target(kind, "BigQueryRange<i32>", v, |r: BigQueryRange<i32>| {
-                back(r.start.map(i64::from), r.end.map(i64::from))
-            })?;
+            check_target(
+                kind,
+                "BigQueryRange<i32>",
+                values,
+                |range: BigQueryRange<i32>| {
+                    back(range.start.map(i64::from), range.end.map(i64::from))
+                },
+            )?;
         }
         BigQueryRangeElementType::DateTime => {
-            let micros = |d: jiff::civil::DateTime| ok(civil::datetime_micros(d));
+            let micros = |date: jiff::civil::DateTime| ok(civil::datetime_micros(date));
             check_target(
                 kind,
                 "BigQueryRange<DateTime>",
-                v,
-                |r: BigQueryRange<jiff::civil::DateTime>| {
-                    back(r.start.map(micros), r.end.map(micros))
+                values,
+                |range: BigQueryRange<jiff::civil::DateTime>| {
+                    back(range.start.map(micros), range.end.map(micros))
                 },
             )?;
-            check_target(kind, "BigQueryRange<i64>", v, |r: BigQueryRange<i64>| {
-                back(r.start, r.end)
-            })?;
+            check_target(
+                kind,
+                "BigQueryRange<i64>",
+                values,
+                |range: BigQueryRange<i64>| back(range.start, range.end),
+            )?;
         }
         BigQueryRangeElementType::Timestamp => {
-            let micros = |t: BigQueryTimestamp| ok(civil::timestamp_micros(t.0));
+            let micros = |timestamp: BigQueryTimestamp| ok(civil::timestamp_micros(timestamp.0));
             check_target(
                 kind,
                 "BigQueryRange<BigQueryTimestamp>",
-                &below_jiff_max(v),
-                |r: BigQueryRange<BigQueryTimestamp>| back(r.start.map(micros), r.end.map(micros)),
+                &below_jiff_max(values),
+                |range: BigQueryRange<BigQueryTimestamp>| {
+                    back(range.start.map(micros), range.end.map(micros))
+                },
             )?;
             check_target(
                 kind,
                 "BigQueryRange<String>",
-                v,
-                |r: BigQueryRange<String>| {
-                    let parse = |s: String| ok(civil::parse_timestamp(&s));
-                    back(r.start.map(parse), r.end.map(parse))
+                values,
+                |range: BigQueryRange<String>| {
+                    let parse = |text: String| ok(civil::parse_timestamp(&text));
+                    back(range.start.map(parse), range.end.map(parse))
                 },
             )?;
-            check_target(kind, "BigQueryRange<i64>", v, |r: BigQueryRange<i64>| {
-                back(r.start, r.end)
-            })?;
+            check_target(
+                kind,
+                "BigQueryRange<i64>",
+                values,
+                |range: BigQueryRange<i64>| back(range.start, range.end),
+            )?;
         }
     }
     Ok(())
@@ -1962,7 +2159,7 @@ fn every_type_and_mode_decodes_its_canonical_arrow_form() {
         let strategy = proptest::collection::vec(Canonical::strategy(kind), 1..8);
         runner
             .run(&strategy, |values| checks(kind, &values))
-            .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
     }
     for element in [
         BigQueryRangeElementType::Date,
@@ -1973,7 +2170,7 @@ fn every_type_and_mode_decodes_its_canonical_arrow_form() {
         let strategy = proptest::collection::vec(Canonical::range_strategy(element), 1..8);
         runner
             .run(&strategy, |values| checks(FieldKind::Range, &values))
-            .unwrap_or_else(|e| panic!("RANGE<{element:?}>: {e}"));
+            .unwrap_or_else(|error| panic!("RANGE<{element:?}>: {error}"));
     }
 }
 
@@ -1994,36 +2191,46 @@ fn parameterised_decimals_read_at_their_own_scale() {
                 .expect("NUMERIC(5, 1)'s Arrow type"),
         ),
     );
-    let b = batch(vec![col("p", numeric), col("big", big), tags]);
+    let batch = batch(vec![
+        column("price", numeric),
+        column("big_total", big),
+        tags,
+    ]);
     #[derive(Deserialize, Debug, PartialEq)]
-    struct P {
-        p: String,
-        big: String,
+    struct Prices {
+        price: String,
+        big_total: String,
         tags: Vec<String>,
     }
     #[derive(Deserialize, Debug, PartialEq)]
     struct Whole {
-        p: i64,
-        big: i64,
+        price: i64,
+        big_total: i64,
     }
     assert_eq!(
-        rows::<P>(&b),
+        rows::<Prices>(&batch),
         [
-            P {
-                p: "12345678.91".to_string(),
-                big: "-0.015".to_string(),
+            Prices {
+                price: "12345678.91".to_string(),
+                big_total: "-0.015".to_string(),
                 tags: vec!["0.7".to_string()]
             },
-            P {
-                p: "5".to_string(),
-                big: "2".to_string(),
+            Prices {
+                price: "5".to_string(),
+                big_total: "2".to_string(),
                 tags: vec![]
             }
         ]
     );
-    assert_eq!(row::<Whole>(&b, 1), Ok(Whole { p: 5, big: 2 }));
     assert_eq!(
-        row_err::<Whole>(&b, 0).kind,
+        row::<Whole>(&batch, 1),
+        Ok(Whole {
+            price: 5,
+            big_total: 2
+        })
+    );
+    assert_eq!(
+        row_error::<Whole>(&batch, 0).kind,
         BigQueryCodecErrorKind::OutOfRange
     );
 }

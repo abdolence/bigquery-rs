@@ -47,60 +47,71 @@ fn residents() -> Vec<Resident> {
     names
         .iter()
         .enumerate()
-        .map(|(i, name)| {
-            let i = i as i64;
+        .map(|(index, name)| {
+            let index = index as i64;
             let seen =
-                jiff::Timestamp::from_microsecond(1_700_000_000_123_456 + i * 86_400_000_000)
+                jiff::Timestamp::from_microsecond(1_700_000_000_123_456 + index * 86_400_000_000)
                     .expect("in range");
             Resident {
-                id: i,
+                id: index,
                 name: name.to_string(),
-                born: jiff::civil::date(1950 + i as i16 * 7, 1 + i as i8, 1 + 3 * i as i8),
+                born: jiff::civil::date(
+                    1950 + index as i16 * 7,
+                    1 + index as i8,
+                    1 + 3 * index as i8,
+                ),
                 seen,
                 seen_fast: BigQueryTimestamp(seen),
-                wakes: BigQueryTime(jiff::civil::time(5 + i as i8, 30, 0, 250_000_000)),
+                wakes: BigQueryTime(jiff::civil::time(5 + index as i8, 30, 0, 250_000_000)),
                 // Canonical NUMERIC text: no trailing fractional zeros.
-                balance: format!("{}.{:02}", 1000 * i - 3500, i * 6 + 1),
-                photo: (0..i as u8 * 3).collect(),
-                tags: (0..i % 3).map(|t| format!("län{t}")).collect(),
-                home: (i % 4 != 3).then(|| Home {
-                    county: ["Skåne", "Uppsala", "Gotland"][(i % 3) as usize].into(),
-                    zip: (i % 2 == 0).then_some(10_000 + i),
+                balance: format!("{}.{:02}", 1000 * index - 3500, index * 6 + 1),
+                photo: (0..index as u8 * 3).collect(),
+                tags: (0..index % 3).map(|tag| format!("län{tag}")).collect(),
+                home: (index % 4 != 3).then(|| Home {
+                    county: ["Skåne", "Uppsala", "Gotland"][(index % 3) as usize].into(),
+                    zip: (index % 2 == 0).then_some(10_000 + index),
                 }),
             }
         })
         .collect()
 }
 
-fn string_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+fn string_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
-fn timestamp_literal(t: jiff::Timestamp) -> String {
-    format!("TIMESTAMP '{}'", t.strftime("%Y-%m-%d %H:%M:%S%.6f+00"))
+fn timestamp_literal(instant: jiff::Timestamp) -> String {
+    format!(
+        "TIMESTAMP '{}'",
+        instant.strftime("%Y-%m-%d %H:%M:%S%.6f+00")
+    )
 }
 
-fn row_literal(r: &Resident) -> String {
-    let tags: Vec<String> = r.tags.iter().map(|t| string_literal(t)).collect();
-    let home = match &r.home {
-        Some(h) => format!(
+fn row_literal(resident: &Resident) -> String {
+    let tags: Vec<String> = resident
+        .tags
+        .iter()
+        .map(|tag| string_literal(tag))
+        .collect();
+    let home = match &resident.home {
+        Some(home) => format!(
             "STRUCT({} AS county, {} AS zip)",
-            string_literal(&h.county),
-            h.zip
-                .map_or("CAST(NULL AS INT64)".into(), |z| z.to_string())
+            string_literal(&home.county),
+            home.zip
+                .map_or("CAST(NULL AS INT64)".into(), |zip| zip.to_string())
         ),
         None => "NULL".into(),
     };
     format!(
         "({}, {}, DATE '{}', {}, {}, TIME '{}', NUMERIC '{}', FROM_BASE64('{}'), ARRAY<STRING>[{}], {})",
-        r.id,
-        string_literal(&r.name),
-        r.born,
-        timestamp_literal(r.seen),
-        timestamp_literal(r.seen_fast.0),
-        r.wakes.0,
-        r.balance,
-        base64::engine::general_purpose::STANDARD.encode(&r.photo),
+        resident.id,
+        string_literal(&resident.name),
+        resident.born,
+        timestamp_literal(resident.seen),
+        timestamp_literal(resident.seen_fast.0),
+        resident.wakes.0,
+        resident.balance,
+        base64::engine::general_purpose::STANDARD.encode(&resident.photo),
         tags.join(", "),
         home
     )

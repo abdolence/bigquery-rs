@@ -12,136 +12,161 @@ use common::{with_scratch, Scratch, TestResult, RUN_LABEL};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Pair {
-    a: i64,
-    b: String,
+    number: i64,
+    label: String,
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
 struct Echo {
-    i: i64,
-    f: f64,
-    s: String,
-    b: bool,
+    integer: i64,
+    float: f64,
+    text: String,
+    flag: bool,
     bytes: Vec<u8>,
-    num: String,
-    big: String,
-    d: jiff::civil::Date,
-    t: jiff::civil::Time,
-    dt: jiff::civil::DateTime,
-    ts: jiff::Timestamp,
-    ts_plain: jiff::Timestamp,
-    geo: String,
-    j: BigQueryJson<serde_json::Value>,
-    iv: BigQueryInterval,
-    r: BigQueryRange<BigQueryDate>,
-    arr: Vec<i64>,
-    st: Pair,
-    null_i: Option<i64>,
-    null_ts: Option<jiff::Timestamp>,
+    numeric: String,
+    bignumeric: String,
+    date: jiff::civil::Date,
+    time: jiff::civil::Time,
+    datetime: jiff::civil::DateTime,
+    timestamp: jiff::Timestamp,
+    plain_timestamp: jiff::Timestamp,
+    geography: String,
+    document: BigQueryJson<serde_json::Value>,
+    period: BigQueryInterval,
+    date_range: BigQueryRange<BigQueryDate>,
+    integers: Vec<i64>,
+    pair: Pair,
+    null_integer: Option<i64>,
+    null_timestamp: Option<jiff::Timestamp>,
 }
 
 #[tokio::test]
 async fn named_parameters_of_every_kind_round_trip() -> TestResult {
-    with_scratch("named_parameters_of_every_kind_round_trip", async |l| {
-        let ts: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse()?;
-        let d = jiff::civil::date(2024, 2, 29);
-        let t = jiff::civil::time(23, 59, 59, 999_999_000);
-        let iv = BigQueryInterval {
-            months: 14,
-            days: -3,
-            nanos: 3_723_500_000_000,
-        };
-        let columns = [
-            "i", "f", "s", "b", "bytes", "num", "big", "d", "t", "dt", "ts", "ts_plain", "geo",
-            "j", "iv", "r", "arr", "st", "null_i", "null_ts",
-        ];
-        let sql = format!(
-            "SELECT {}",
-            columns
-                .iter()
-                .map(|c| format!("@{c} AS {c}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let rows: Vec<Echo> =
-            l.db.fluent()
+    with_scratch(
+        "named_parameters_of_every_kind_round_trip",
+        async |scratch| {
+            let timestamp: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse()?;
+            let date = jiff::civil::date(2024, 2, 29);
+            let time = jiff::civil::time(23, 59, 59, 999_999_000);
+            let interval = BigQueryInterval {
+                months: 14,
+                days: -3,
+                nanos: 3_723_500_000_000,
+            };
+            let columns = [
+                "integer",
+                "float",
+                "text",
+                "flag",
+                "bytes",
+                "numeric",
+                "bignumeric",
+                "date",
+                "time",
+                "datetime",
+                "timestamp",
+                "plain_timestamp",
+                "geography",
+                "document",
+                "period",
+                "date_range",
+                "integers",
+                "pair",
+                "null_integer",
+                "null_timestamp",
+            ];
+            let sql = format!(
+                "SELECT {}",
+                columns
+                    .iter()
+                    .map(|column| format!("@{column} AS {column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let rows: Vec<Echo> = scratch
+                .db
+                .fluent()
                 .query(sql)
-                .label(RUN_LABEL, l.dataset.as_str())
-                .param("i", -42)
-                .param("f", 1.5)
-                .param("s", "Åsa Öberg")
-                .param("b", true)
+                .label(RUN_LABEL, scratch.dataset.as_str())
+                .param("integer", -42)
+                .param("float", 1.5)
+                .param("text", "Åsa Öberg")
+                .param("flag", true)
                 .param("bytes", serde_bytes::ByteBuf::from(vec![0u8, 255]))
-                .param("num", BigQueryDecimal("123.450"))
+                .param("numeric", BigQueryDecimal("123.450"))
                 .param(
-                    "big",
+                    "bignumeric",
                     BigQueryDecimal("0.00000000000000000000000000000000000001"),
                 )
-                .param("d", BigQueryDate(d))
-                .param("t", BigQueryTime(t))
-                .param("dt", BigQueryDateTime(d.to_datetime(t)))
-                .param("ts", BigQueryTimestamp(ts))
-                .param_as("ts_plain", BigQueryFieldType::Timestamp, ts)
-                .param_as("geo", BigQueryFieldType::Geography, "POINT(1 2)")
-                .param("j", BigQueryJson(serde_json::json!({"stad": "Malmö"})))
-                .param("iv", iv)
+                .param("date", BigQueryDate(date))
+                .param("time", BigQueryTime(time))
+                .param("datetime", BigQueryDateTime(date.to_datetime(time)))
+                .param("timestamp", BigQueryTimestamp(timestamp))
+                .param_as("plain_timestamp", BigQueryFieldType::Timestamp, timestamp)
+                .param_as("geography", BigQueryFieldType::Geography, "POINT(1 2)")
                 .param(
-                    "r",
+                    "document",
+                    BigQueryJson(serde_json::json!({"stad": "Malmö"})),
+                )
+                .param("period", interval)
+                .param(
+                    "date_range",
                     BigQueryRange {
-                        start: Some(BigQueryDate(d)),
+                        start: Some(BigQueryDate(date)),
                         end: None,
                     },
                 )
-                .param("arr", vec![1i64, 2, 3])
+                .param("integers", vec![1i64, 2, 3])
                 .param(
-                    "st",
+                    "pair",
                     Pair {
-                        a: 7,
-                        b: "z".into(),
+                        number: 7,
+                        label: "z".into(),
                     },
                 )
-                .param_as("null_i", BigQueryFieldType::Int64, None::<i64>)
+                .param_as("null_integer", BigQueryFieldType::Int64, None::<i64>)
                 .param_as(
-                    "null_ts",
+                    "null_timestamp",
                     BigQueryFieldType::Timestamp,
                     None::<jiff::Timestamp>,
                 )
                 .obj::<Echo>()
                 .query()
                 .await?;
-        assert_eq!(
-            rows,
-            [Echo {
-                i: -42,
-                f: 1.5,
-                s: "Åsa Öberg".into(),
-                b: true,
-                bytes: vec![0, 255],
-                num: "123.45".into(),
-                big: "0.00000000000000000000000000000000000001".into(),
-                d,
-                t,
-                dt: d.to_datetime(t),
-                ts,
-                ts_plain: ts,
-                geo: "POINT(1 2)".into(),
-                j: BigQueryJson(serde_json::json!({"stad": "Malmö"})),
-                iv,
-                r: BigQueryRange {
-                    start: Some(BigQueryDate(d)),
-                    end: None,
-                },
-                arr: vec![1, 2, 3],
-                st: Pair {
-                    a: 7,
-                    b: "z".into()
-                },
-                null_i: None,
-                null_ts: None,
-            }]
-        );
-        Ok(())
-    })
+            assert_eq!(
+                rows,
+                [Echo {
+                    integer: -42,
+                    float: 1.5,
+                    text: "Åsa Öberg".into(),
+                    flag: true,
+                    bytes: vec![0, 255],
+                    numeric: "123.45".into(),
+                    bignumeric: "0.00000000000000000000000000000000000001".into(),
+                    date,
+                    time,
+                    datetime: date.to_datetime(time),
+                    timestamp,
+                    plain_timestamp: timestamp,
+                    geography: "POINT(1 2)".into(),
+                    document: BigQueryJson(serde_json::json!({"stad": "Malmö"})),
+                    period: interval,
+                    date_range: BigQueryRange {
+                        start: Some(BigQueryDate(date)),
+                        end: None,
+                    },
+                    integers: vec![1, 2, 3],
+                    pair: Pair {
+                        number: 7,
+                        label: "z".into()
+                    },
+                    null_integer: None,
+                    null_timestamp: None,
+                }]
+            );
+            Ok(())
+        },
+    )
     .await
 }
 
@@ -149,42 +174,47 @@ async fn named_parameters_of_every_kind_round_trip() -> TestResult {
 async fn result_over_the_inline_limit_is_read_through_storage_read() -> TestResult {
     with_scratch(
         "result_over_the_inline_limit_is_read_through_storage_read",
-        async |l| {
+        async |scratch| {
             #[derive(Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
             struct Row {
-                x: i64,
-                s: String,
+                number: i64,
+                label: String,
             }
-            let mut rows: Vec<Row> =
-                l.db.fluent()
-                    .query(
-                        "SELECT x, CONCAT('r', CAST(x AS STRING)) AS s \
-                     FROM UNNEST(GENERATE_ARRAY(1, 50)) AS x",
-                    )
-                    .label(RUN_LABEL, l.dataset.as_str())
-                    .inline_rows_limit(10)
-                    .obj::<Row>()
-                    .query()
-                    .await?;
+            let mut rows: Vec<Row> = scratch
+                .db
+                .fluent()
+                .query(
+                    "SELECT number, CONCAT('r', CAST(number AS STRING)) AS label \
+                     FROM UNNEST(GENERATE_ARRAY(1, 50)) AS number",
+                )
+                .label(RUN_LABEL, scratch.dataset.as_str())
+                .inline_rows_limit(10)
+                .obj::<Row>()
+                .query()
+                .await?;
             rows.sort();
             let expected: Vec<Row> = (1..=50)
-                .map(|x| Row {
-                    x,
-                    s: format!("r{x}"),
+                .map(|number| Row {
+                    number,
+                    label: format!("r{number}"),
                 })
                 .collect();
             assert_eq!(rows, expected);
 
-            let batches: Vec<arrow_array::RecordBatch> =
-                l.db.fluent()
-                    .query("SELECT x FROM UNNEST(GENERATE_ARRAY(1, 30)) AS x")
-                    .label(RUN_LABEL, l.dataset.as_str())
-                    .inline_rows_limit(5)
-                    .record_batches()
-                    .await?
-                    .try_collect()
-                    .await?;
-            assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 30);
+            let batches: Vec<arrow_array::RecordBatch> = scratch
+                .db
+                .fluent()
+                .query("SELECT number FROM UNNEST(GENERATE_ARRAY(1, 30)) AS number")
+                .label(RUN_LABEL, scratch.dataset.as_str())
+                .inline_rows_limit(5)
+                .record_batches()
+                .await?
+                .try_collect()
+                .await?;
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                30
+            );
             Ok(())
         },
     )
@@ -193,24 +223,25 @@ async fn result_over_the_inline_limit_is_read_through_storage_read() -> TestResu
 
 #[tokio::test]
 async fn stats_report_what_a_query_job_used() -> TestResult {
-    with_scratch("stats_report_what_a_query_job_used", async |l| {
+    with_scratch("stats_report_what_a_query_job_used", async |scratch| {
         #[derive(Deserialize)]
         struct Row {
-            x: i64,
+            number: i64,
         }
         // Generated rows read no table, so they process and bill 0 bytes; the cache is off
         // so that the job runs and uses slots.
-        let sql = "SELECT x FROM UNNEST(GENERATE_ARRAY(1, 1000)) AS x";
-        let (rows, inline): (Vec<Row>, _) =
-            l.db.fluent()
-                .query(sql)
-                .label(RUN_LABEL, l.dataset.as_str())
-                .use_query_cache(false)
-                .obj::<Row>()
-                .query_with_stats()
-                .await?;
+        let sql = "SELECT number FROM UNNEST(GENERATE_ARRAY(1, 1000)) AS number";
+        let (rows, inline): (Vec<Row>, _) = scratch
+            .db
+            .fluent()
+            .query(sql)
+            .label(RUN_LABEL, scratch.dataset.as_str())
+            .use_query_cache(false)
+            .obj::<Row>()
+            .query_with_stats()
+            .await?;
         eprintln!("LIVE stats inline: {inline:?}");
-        assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
+        assert_eq!(rows.iter().map(|row| row.number).sum::<i64>(), 500_500);
         assert_eq!(
             inline.job, None,
             "a short query runs without a job: {inline:?}"
@@ -223,18 +254,19 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
         assert_eq!(inline.cache_hit, Some(false));
         assert!(inline.total_slot_ms.is_some(), "{inline:?}");
 
-        let (rows, read) =
-            l.db.fluent()
-                .query(sql)
-                .label(RUN_LABEL, l.dataset.as_str())
-                .use_query_cache(false)
-                .inline_rows_limit(10)
-                .obj::<Row>()
-                .stream_query_with_stats()
-                .await?;
+        let (rows, read) = scratch
+            .db
+            .fluent()
+            .query(sql)
+            .label(RUN_LABEL, scratch.dataset.as_str())
+            .use_query_cache(false)
+            .inline_rows_limit(10)
+            .obj::<Row>()
+            .stream_query_with_stats()
+            .await?;
         let rows: Vec<Row> = rows.try_collect().await?;
         eprintln!("LIVE stats storage read: {read:?}");
-        assert_eq!(rows.iter().map(|r| r.x).sum::<i64>(), 500_500);
+        assert_eq!(rows.iter().map(|row| row.number).sum::<i64>(), 500_500);
         assert!(
             read.job.is_some(),
             "a result over the inline limit has a job: {read:?}"
@@ -251,19 +283,21 @@ async fn stats_report_what_a_query_job_used() -> TestResult {
 }
 
 /// `sql` with the scratch dataset as its default dataset, labelled with the run.
-fn scratch_query<'a>(l: &'a Scratch, sql: &str) -> BigQueryQueryBuilder<'a, BigQueryDb> {
-    l.db.fluent()
+fn scratch_query<'a>(scratch: &'a Scratch, sql: &str) -> BigQueryQueryBuilder<'a, BigQueryDb> {
+    scratch
+        .db
+        .fluent()
         .query(sql.to_string())
-        .default_dataset(l.dataset.clone())
-        .label(RUN_LABEL, l.dataset.as_str())
+        .default_dataset(scratch.dataset.clone())
+        .label(RUN_LABEL, scratch.dataset.as_str())
 }
 
 #[tokio::test]
 async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
     with_scratch(
         "dml_counts_labels_and_dry_run_on_a_scratch_table",
-        async |l| {
-            let created = scratch_query(l, "CREATE TABLE t (id INT64, name STRING)")
+        async |scratch| {
+            let created = scratch_query(scratch, "CREATE TABLE t (id INT64, name STRING)")
                 .execute()
                 .await?;
             assert_eq!(
@@ -271,10 +305,12 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 Some(BigQueryStatementType::CreateTable)
             );
 
-            let inserted =
-                scratch_query(l, "INSERT t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')")
-                    .execute()
-                    .await?;
+            let inserted = scratch_query(
+                scratch,
+                "INSERT t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+            )
+            .execute()
+            .await?;
             assert_eq!(inserted.statement_type, Some(BigQueryStatementType::Insert));
             assert_eq!(inserted.num_dml_affected_rows, Some(3));
             assert_eq!(
@@ -286,46 +322,56 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 })
             );
 
-            let updated = scratch_query(l, "UPDATE t SET name = @name WHERE id <= @max")
+            let updated = scratch_query(scratch, "UPDATE t SET name = @name WHERE id <= @max")
                 .param("name", "z")
                 .param("max", 2)
                 .execute()
                 .await?;
             assert_eq!(updated.num_dml_affected_rows, Some(2));
-            assert_eq!(updated.dml_stats.map(|s| s.updated), Some(2));
+            assert_eq!(updated.dml_stats.map(|stats| stats.updated), Some(2));
 
-            let deleted = scratch_query(l, "DELETE t WHERE id = 3").execute().await?;
-            assert_eq!(deleted.dml_stats.map(|s| s.deleted), Some(1));
+            let deleted = scratch_query(scratch, "DELETE t WHERE id = 3")
+                .execute()
+                .await?;
+            assert_eq!(deleted.dml_stats.map(|stats| stats.deleted), Some(1));
 
             let job = deleted.job.ok_or("a DML statement runs as a job")?;
-            let details =
-                l.db.job_client()
-                    .get_job(bq::GetJobRequest {
-                        project_id: job.project_id.clone(),
-                        job_id: job.job_id.to_string(),
-                        location: job
-                            .location
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_default(),
-                    })
-                    .await
-                    .map_err(errors::BigQueryError::from)?
-                    .into_inner();
-            let labels = details.configuration.map(|c| c.labels).unwrap_or_default();
+            let details = scratch
+                .db
+                .job_client()
+                .get_job(bq::GetJobRequest {
+                    project_id: job.project_id.clone(),
+                    job_id: job.job_id.to_string(),
+                    location: job
+                        .location
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                })
+                .await
+                .map_err(errors::BigQueryError::from)?
+                .into_inner();
+            let labels = details
+                .configuration
+                .map(|configuration| configuration.labels)
+                .unwrap_or_default();
             assert_eq!(
                 labels.get(RUN_LABEL).map(String::as_str),
-                Some(l.dataset.as_str())
+                Some(scratch.dataset.as_str())
             );
 
-            let estimate = scratch_query(l, "SELECT id, name FROM t").dry_run().await?;
+            let estimate = scratch_query(scratch, "SELECT id, name FROM t")
+                .dry_run()
+                .await?;
             assert!(
-                estimate.total_bytes_processed.is_some_and(|b| b > 0),
+                estimate
+                    .total_bytes_processed
+                    .is_some_and(|bytes| bytes > 0),
                 "{estimate:?}"
             );
             let columns: Vec<String> = estimate
                 .schema
-                .map(|s| s.fields.into_iter().map(|f| f.name).collect())
+                .map(|schema| schema.fields.into_iter().map(|field| field.name).collect())
                 .unwrap_or_default();
             assert_eq!(columns, ["id", "name"]);
 
@@ -334,7 +380,7 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
                 id: i64,
                 name: String,
             }
-            let rows: Vec<Row> = scratch_query(l, "SELECT id, name FROM t ORDER BY id")
+            let rows: Vec<Row> = scratch_query(scratch, "SELECT id, name FROM t ORDER BY id")
                 .obj::<Row>()
                 .query()
                 .await?;
@@ -359,12 +405,12 @@ async fn dml_counts_labels_and_dry_run_on_a_scratch_table() -> TestResult {
 
 #[tokio::test]
 async fn injection_payloads_stay_data() -> TestResult {
-    with_scratch("injection_payloads_stay_data", async |l| {
-        scratch_query(l, "CREATE TABLE people (name STRING)")
+    with_scratch("injection_payloads_stay_data", async |scratch| {
+        scratch_query(scratch, "CREATE TABLE people (name STRING)")
             .execute()
             .await?;
         scratch_query(
-            l,
+            scratch,
             "INSERT people (name) VALUES ('Åsa'), ('Linnéa'), ('Olle')",
         )
         .execute()
@@ -372,7 +418,7 @@ async fn injection_payloads_stay_data() -> TestResult {
 
         #[derive(Deserialize, Debug, PartialEq)]
         struct Echo {
-            v: String,
+            value: String,
         }
         #[derive(Deserialize, Debug, PartialEq)]
         struct Person {
@@ -380,7 +426,7 @@ async fn injection_payloads_stay_data() -> TestResult {
         }
         #[derive(Deserialize, Debug, PartialEq)]
         struct Count {
-            n: i64,
+            people: i64,
         }
         for payload in [
             "x'; DROP TABLE people; --",
@@ -388,24 +434,31 @@ async fn injection_payloads_stay_data() -> TestResult {
             "Åsa' OR TRUE --",
             "\\'; DELETE people WHERE TRUE; --",
         ] {
-            let echoed: Vec<Echo> = scratch_query(l, "SELECT @v AS v")
-                .param("v", payload)
+            let echoed: Vec<Echo> = scratch_query(scratch, "SELECT @value AS value")
+                .param("value", payload)
                 .obj::<Echo>()
                 .query()
                 .await?;
-            assert_eq!(echoed, [Echo { v: payload.into() }], "{payload:?}");
-            let matched: Vec<Person> = scratch_query(l, "SELECT name FROM people WHERE name = @v")
-                .param("v", payload)
-                .obj::<Person>()
-                .query()
-                .await?;
+            assert_eq!(
+                echoed,
+                [Echo {
+                    value: payload.into()
+                }],
+                "{payload:?}"
+            );
+            let matched: Vec<Person> =
+                scratch_query(scratch, "SELECT name FROM people WHERE name = @value")
+                    .param("value", payload)
+                    .obj::<Person>()
+                    .query()
+                    .await?;
             assert_eq!(matched, [], "{payload:?}");
         }
-        let count: Vec<Count> = scratch_query(l, "SELECT COUNT(*) AS n FROM people")
+        let count: Vec<Count> = scratch_query(scratch, "SELECT COUNT(*) AS people FROM people")
             .obj::<Count>()
             .query()
             .await?;
-        assert_eq!(count, [Count { n: 3 }], "the table is intact");
+        assert_eq!(count, [Count { people: 3 }], "the table is intact");
         Ok(())
     })
     .await

@@ -1,6 +1,6 @@
-//! The write codec on synthetic 19-column rows shaped like the prototype's `t_wide`, with the
-//! four temporal columns in three forms: plain jiff fields, the crate's wrappers, and the
-//! BigQuery integers. One reused buffer, as the prototype's "reused buffer" arm.
+//! The write codec on synthetic 19-column rows, with the four temporal columns in three forms:
+//! plain jiff fields, the crate's wrappers, and the BigQuery integers. Every row is written into
+//! one reused buffer.
 
 use bigquery::*;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};

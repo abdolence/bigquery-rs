@@ -63,7 +63,12 @@ impl BigQueryError {
         let id = table
             .table_reference
             .as_ref()
-            .map(|r| format!("{}.{}.{}", r.project_id, r.dataset_id, r.table_id))
+            .map(|reference| {
+                format!(
+                    "{}.{}.{}",
+                    reference.project_id, reference.dataset_id, reference.table_id
+                )
+            })
             .unwrap_or_default();
         BigQueryError::invalid_parameters("table", format!("{id}: {what}"))
     }
@@ -571,10 +576,10 @@ pub struct BigQueryJobErrorEntry {
 }
 
 impl From<gcloud_sdk::error::Error> for BigQueryError {
-    fn from(e: gcloud_sdk::error::Error) -> Self {
+    fn from(error: gcloud_sdk::error::Error) -> Self {
         BigQueryError::SystemError(BigQuerySystemError::new(
-            BigQueryErrorPublicGenericDetails::new(format!("{:?}", e.kind())),
-            format!("GCloud system error: {e}"),
+            BigQueryErrorPublicGenericDetails::new(format!("{:?}", error.kind())),
+            format!("GCloud system error: {error}"),
         ))
     }
 }

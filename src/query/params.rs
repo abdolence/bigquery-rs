@@ -7,10 +7,10 @@
 //! type.
 
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-use crate::sql::SqlLiteral;
+use crate::sql::{dotted_path, SqlLiteral};
 use crate::types::civil;
 use crate::types::decimal::{
-    fmt_decimal_i256, parse_bignumeric, parse_numeric, BIGNUMERIC_SCALE, NUMERIC_SCALE, TAG_DECIMAL,
+    decimal_string, parse_bignumeric, parse_numeric, BIGNUMERIC_SCALE, NUMERIC_SCALE, TAG_DECIMAL,
 };
 use crate::types::error::CodecError;
 use crate::types::interval::TAG_INTERVAL;
@@ -49,14 +49,14 @@ impl ParamLabel<'_> {
     fn describe(self) -> String {
         match self {
             ParamLabel::Named(name) => name.to_string(),
-            ParamLabel::Positional(i) => format!("positional parameter {}", i + 1),
+            ParamLabel::Positional(index) => format!("positional parameter {}", index + 1),
         }
     }
 
     fn locate(self, err: CodecError) -> CodecError {
         match self {
             ParamLabel::Named(name) => err.at_field(name),
-            ParamLabel::Positional(i) => err.at_index(i),
+            ParamLabel::Positional(index) => err.at_index(index),
         }
     }
 
@@ -70,8 +70,8 @@ impl ParamLabel<'_> {
         let mut chars = name.chars();
         let valid = chars
             .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+            && chars.all(|character| character.is_ascii_alphanumeric() || character == '_');
         if valid {
             Ok(self)
         } else {
@@ -94,7 +94,7 @@ pub(crate) fn infer_param<V: Serialize + ?Sized>(
     let label = label.check()?;
     let node = value
         .serialize(CaptureSerializer)
-        .map_err(|e| label.locate(e).into_serialize())?;
+        .map_err(|error| label.locate(error).into_serialize())?;
     node.infer(label)
 }
 
@@ -107,50 +107,43 @@ pub(crate) fn literal_of<V: Serialize + ?Sized>(
     let label = ParamLabel::Named(field);
     let node = value
         .serialize(CaptureSerializer)
-        .map_err(|e| label.locate(e).into_serialize())?;
+        .map_err(|error| label.locate(error).into_serialize())?;
     if node == SerializedValue::Null {
         return Ok(None);
     }
-    let (ty, value) = node.infer_at(String::new()).map_err(|e| match e {
+    let (param_type, value) = node.infer_at(String::new()).map_err(|error| match error {
         InferError::Codec(err) => label.locate(err).into_serialize(),
-        InferError::Untyped { path, what } => {
-            let at = if path.is_empty() {
-                String::new()
-            } else {
-                format!(" at `{path}`")
-            };
-            BigQueryError::invalid_parameters(
-                field.to_string(),
-                format!("the type of {what}{at} cannot be inferred from its value"),
-            )
-        }
+        InferError::Untyped { path, what } => BigQueryError::invalid_parameters(
+            field.to_string(),
+            InferError::untyped_description(&path, what),
+        ),
     })?;
-    SqlLiteral::try_from((&ty, &value))
+    SqlLiteral::try_from((&param_type, &value))
         .map(Some)
-        .map_err(|e| label.locate(e).into_serialize())
+        .map_err(|error| label.locate(error).into_serialize())
 }
 
-/// Encodes `value` as a parameter of type `ty`. `None` is a NULL of that type.
+/// Encodes `value` as a parameter of type `param_type`. `None` is a NULL of that type.
 pub(crate) fn typed_param<V: Serialize + ?Sized>(
     label: ParamLabel,
-    ty: &BigQueryParamType,
+    param_type: &BigQueryParamType,
     value: &V,
 ) -> Result<QueryParameter, BigQueryError> {
     let label = label.check()?;
     let node = value
         .serialize(CaptureSerializer)
-        .map_err(|e| label.locate(e).into_serialize())?;
-    let mode = if ty.repeated {
+        .map_err(|error| label.locate(error).into_serialize())?;
+    let mode = if param_type.repeated {
         BigQueryFieldMode::Repeated
     } else {
         BigQueryFieldMode::Nullable
     };
     let parameter_value = node
-        .coerce_field(&ty.field_type, mode)
-        .map_err(|e| label.locate(e).into_serialize())?;
+        .coerce_field(&param_type.field_type, mode)
+        .map_err(|error| label.locate(error).into_serialize())?;
     Ok(QueryParameter {
         name: label.name(),
-        parameter_type: Some(ty.field_type.param_type(mode)),
+        parameter_type: Some(param_type.field_type.param_type(mode)),
         parameter_value: Some(parameter_value),
     })
 }
@@ -160,8 +153,11 @@ pub(crate) fn typed_param<V: Serialize + ?Sized>(
 pub(crate) fn struct_params<P: Serialize + ?Sized>(
     params: &P,
 ) -> Result<Vec<QueryParameter>, BigQueryError> {
-    let node = params.serialize(CaptureSerializer).map_err(|e| {
-        BigQueryError::invalid_parameters("params", format!("the parameters do not serialize: {e}"))
+    let node = params.serialize(CaptureSerializer).map_err(|error| {
+        BigQueryError::invalid_parameters(
+            "params",
+            format!("the parameters do not serialize: {error}"),
+        )
     })?;
     let SerializedValue::Struct(fields) = node else {
         return Err(BigQueryError::invalid_parameters(
@@ -177,10 +173,10 @@ pub(crate) fn struct_params<P: Serialize + ?Sized>(
 
 /// The `parameter_mode` that `params` need: `NAMED`, `POSITIONAL`, or empty for none.
 pub(crate) fn parameter_mode(params: &[QueryParameter]) -> BigQueryResult<&'static str> {
-    let named = params.iter().filter(|p| !p.name.is_empty()).count();
+    let named = params.iter().filter(|param| !param.name.is_empty()).count();
     match (named, params.len()) {
         (_, 0) => Ok(""),
-        (n, len) if n == len => Ok("NAMED"),
+        (named, total) if named == total => Ok("NAMED"),
         (0, _) => Ok("POSITIONAL"),
         _ => Err(BigQueryError::invalid_parameters(
             "query_parameters",
@@ -231,70 +227,70 @@ impl ser::Serializer for CaptureSerializer {
     type SerializeStruct = CapturedStruct;
     type SerializeStructVariant = Impossible<SerializedValue, CodecError>;
 
-    fn serialize_bool(self, v: bool) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Bool(v))
+    fn serialize_bool(self, value: bool) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Bool(value))
     }
 
-    fn serialize_i8(self, v: i8) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_i8(self, value: i8) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_i16(self, v: i16) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_i16(self, value: i16) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_i32(self, v: i32) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_i32(self, value: i32) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_i64(self, v: i64) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_i64(self, value: i64) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_i128(self, v: i128) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v))
+    fn serialize_i128(self, value: i128) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value))
     }
 
-    fn serialize_u8(self, v: u8) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_u8(self, value: u8) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_u16(self, v: u16) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_u16(self, value: u16) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_u32(self, v: u32) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_u32(self, value: u32) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_u64(self, v: u64) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Integer(v.into()))
+    fn serialize_u64(self, value: u64) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Integer(value.into()))
     }
 
-    fn serialize_u128(self, v: u128) -> Result<SerializedValue, CodecError> {
-        i128::try_from(v)
+    fn serialize_u128(self, value: u128) -> Result<SerializedValue, CodecError> {
+        i128::try_from(value)
             .map(SerializedValue::Integer)
-            .map_err(|_| CodecError::out_of_range(format!("{v} is above INT64")))
+            .map_err(|_| CodecError::out_of_range(format!("{value} is above INT64")))
     }
 
-    fn serialize_f32(self, v: f32) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Float(v.into()))
+    fn serialize_f32(self, value: f32) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Float(value.into()))
     }
 
-    fn serialize_f64(self, v: f64) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Float(v))
+    fn serialize_f64(self, value: f64) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Float(value))
     }
 
-    fn serialize_char(self, v: char) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::String(v.to_string()))
+    fn serialize_char(self, value: char) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::String(value.to_string()))
     }
 
-    fn serialize_str(self, v: &str) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::String(v.to_string()))
+    fn serialize_str(self, value: &str) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::String(value.to_string()))
     }
 
-    fn serialize_bytes(self, v: &[u8]) -> Result<SerializedValue, CodecError> {
-        Ok(SerializedValue::Bytes(v.to_vec()))
+    fn serialize_bytes(self, value: &[u8]) -> Result<SerializedValue, CodecError> {
+        Ok(SerializedValue::Bytes(value.to_vec()))
     }
 
     fn serialize_none(self) -> Result<SerializedValue, CodecError> {
@@ -432,11 +428,11 @@ struct CapturedSequence(Vec<SerializedValue>);
 
 impl CapturedSequence {
     fn push<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), CodecError> {
-        let i = self.0.len();
+        let index = self.0.len();
         self.0.push(
             value
                 .serialize(CaptureSerializer)
-                .map_err(|e| e.at_index(i))?,
+                .map_err(|error| error.at_index(index))?,
         );
         Ok(())
     }
@@ -507,7 +503,7 @@ impl ser::SerializeMap for CapturedMap {
         let key = self.key.take().unwrap_or_default();
         let node = value
             .serialize(CaptureSerializer)
-            .map_err(|e| e.at_field(&key))?;
+            .map_err(|error| error.at_field(&key))?;
         self.fields.push((key, node));
         Ok(())
     }
@@ -526,15 +522,15 @@ impl CapturedStruct {
     fn take_field(&mut self, name: &str) -> SerializedValue {
         self.fields
             .iter()
-            .position(|(n, _)| n == name)
-            .map(|i| self.fields.remove(i).1)
+            .position(|(field_name, _)| field_name == name)
+            .map(|index| self.fields.remove(index).1)
             .unwrap_or(SerializedValue::Null)
     }
 
     fn interval_part<T: TryFrom<i128>>(&mut self, name: &str) -> Result<T, CodecError> {
         match self.take_field(name) {
-            SerializedValue::Integer(v) => T::try_from(v).map_err(|_| {
-                CodecError::out_of_range(format!("INTERVAL {name} {v} is out of range"))
+            SerializedValue::Integer(value) => T::try_from(value).map_err(|_| {
+                CodecError::out_of_range(format!("INTERVAL {name} {value} is out of range"))
             }),
             other => Err(CodecError::type_mismatch(format!(
                 "INTERVAL {name} must be an integer, got {}",
@@ -556,7 +552,7 @@ impl ser::SerializeStruct for CapturedStruct {
     ) -> Result<(), CodecError> {
         let node = value
             .serialize(CaptureSerializer)
-            .map_err(|e| e.at_field(key))?;
+            .map_err(|error| error.at_field(key))?;
         self.fields.push((key.to_string(), node));
         Ok(())
     }
@@ -605,6 +601,15 @@ impl From<CodecError> for InferError {
 }
 
 impl InferError {
+    /// Why the value of kind `what` at the dotted `path` inside a parameter has no type.
+    fn untyped_description(path: &str, what: &str) -> String {
+        if path.is_empty() {
+            format!("the type of {what} cannot be inferred from its value")
+        } else {
+            format!("the type of {what} at `{path}` cannot be inferred from its value")
+        }
+    }
+
     fn at_field(self, name: &str) -> Self {
         match self {
             InferError::Codec(err) => InferError::Codec(err.at_field(name)),
@@ -612,19 +617,11 @@ impl InferError {
         }
     }
 
-    fn at_index(self, i: usize) -> Self {
+    fn at_index(self, index: usize) -> Self {
         match self {
-            InferError::Codec(err) => InferError::Codec(err.at_index(i)),
+            InferError::Codec(err) => InferError::Codec(err.at_index(index)),
             untyped => untyped,
         }
-    }
-}
-
-fn join_field(path: &str, name: &str) -> String {
-    if path.is_empty() {
-        name.to_string()
-    } else {
-        format!("{path}.{name}")
     }
 }
 
@@ -669,22 +666,15 @@ impl SerializedValue {
     fn infer(&self, label: ParamLabel) -> Result<QueryParameter, BigQueryError> {
         let label = label.check()?;
         let (parameter_type, parameter_value) =
-            self.infer_at(String::new()).map_err(|e| match e {
+            self.infer_at(String::new()).map_err(|error| match error {
                 InferError::Codec(err) => label.locate(err).into_serialize(),
-                InferError::Untyped { path, what } => {
-                    let at = if path.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" at `{path}`")
-                    };
-                    BigQueryError::invalid_parameters(
-                        label.describe(),
-                        format!(
-                        "the type of {what}{at} cannot be inferred from its value; declare it with \
-                         param_as"
+                InferError::Untyped { path, what } => BigQueryError::invalid_parameters(
+                    label.describe(),
+                    format!(
+                        "{}; declare it with param_as",
+                        InferError::untyped_description(&path, what)
                     ),
-                    )
-                }
+                ),
             })?;
         Ok(QueryParameter {
             name: label.name(),
@@ -697,18 +687,21 @@ impl SerializedValue {
         let scalar = |kind: FieldKind, text: String| Ok((kind.param_type(), text_value(text)));
         match self {
             SerializedValue::Null => Err(InferError::Untyped { path, what: "NULL" }),
-            SerializedValue::Bool(v) => scalar(FieldKind::Bool, v.to_string()),
-            SerializedValue::Integer(v) => scalar(FieldKind::Int64, int64_text(*v)?),
-            SerializedValue::Float(v) => scalar(FieldKind::Float64, float_text(*v)),
-            SerializedValue::String(v) => scalar(FieldKind::String, v.clone()),
-            SerializedValue::Bytes(v) => scalar(FieldKind::Bytes, base64_text(v)),
+            SerializedValue::Bool(value) => scalar(FieldKind::Bool, value.to_string()),
+            SerializedValue::Integer(value) => scalar(FieldKind::Int64, int64_text(*value)?),
+            SerializedValue::Float(value) => scalar(FieldKind::Float64, float_text(*value)),
+            SerializedValue::String(value) => scalar(FieldKind::String, value.clone()),
+            SerializedValue::Bytes(value) => scalar(FieldKind::Bytes, base64_text(value)),
             SerializedValue::Temporal { kind, value } => scalar(*kind, kind.temporal_text(*value)?),
             SerializedValue::Json(text) => scalar(FieldKind::Json, text.clone()),
             SerializedValue::Decimal(text) => match parse_numeric(text) {
-                Ok(v) => scalar(FieldKind::Numeric, decimal_text(v, NUMERIC_SCALE)),
+                Ok(value) => scalar(FieldKind::Numeric, decimal_string(value, NUMERIC_SCALE)),
                 Err(err) if err.kind() == BigQueryCodecErrorKind::OutOfRange => {
-                    let v = parse_bignumeric(text)?;
-                    scalar(FieldKind::BigNumeric, decimal_text(v, BIGNUMERIC_SCALE))
+                    let value = parse_bignumeric(text)?;
+                    scalar(
+                        FieldKind::BigNumeric,
+                        decimal_string(value, BIGNUMERIC_SCALE),
+                    )
                 }
                 Err(err) => Err(err.into()),
             },
@@ -732,11 +725,11 @@ impl SerializedValue {
                     }),
                 };
                 let element = match (bound_kind(start)?, bound_kind(end)?) {
-                    (Some(a), Some(b)) if a != b => {
+                    (Some(start_kind), Some(end_kind)) if start_kind != end_kind => {
                         return Err(CodecError::type_mismatch(format!(
                             "a RANGE from a {} to a {}",
-                            a.name(),
-                            b.name()
+                            start_kind.name(),
+                            end_kind.name()
                         ))
                         .into())
                     }
@@ -753,14 +746,14 @@ impl SerializedValue {
             SerializedValue::Sequence(items) => {
                 let mut element_type = None;
                 let mut values = Vec::with_capacity(items.len());
-                for (i, item) in items.iter().enumerate() {
+                for (index, item) in items.iter().enumerate() {
                     match item {
                         SerializedValue::Sequence(_) => {
                             return Err(CodecError::new(
                                 BigQueryCodecErrorKind::UnsupportedType,
                                 "an ARRAY of ARRAYs is not a BigQuery type",
                             )
-                            .at_index(i)
+                            .at_index(index)
                             .into())
                         }
                         SerializedValue::Null => {
@@ -768,17 +761,17 @@ impl SerializedValue {
                                 BigQueryCodecErrorKind::NullArrayElement,
                                 "an ARRAY parameter cannot hold NULL",
                             )
-                            .at_index(i)
+                            .at_index(index)
                             .into())
                         }
                         _ => {}
                     }
-                    let (ty, value) = item
-                        .infer_at(format!("{path}[{i}]"))
-                        .map_err(|e| e.at_index(i))?;
+                    let (param_type, value) = item
+                        .infer_at(format!("{path}[{index}]"))
+                        .map_err(|error| error.at_index(index))?;
                     match &element_type {
-                        None => element_type = Some(ty),
-                        Some(first) if *first != ty => {
+                        None => element_type = Some(param_type),
+                        Some(first) if *first != param_type => {
                             return Err(InferError::Untyped {
                                 path,
                                 what: "an ARRAY whose elements have different types",
@@ -806,12 +799,12 @@ impl SerializedValue {
                 let mut struct_types = Vec::with_capacity(fields.len());
                 let mut struct_values = std::collections::HashMap::with_capacity(fields.len());
                 for (name, field) in fields {
-                    let (ty, value) = field
-                        .infer_at(join_field(&path, name))
-                        .map_err(|e| e.at_field(name))?;
+                    let (param_type, value) = field
+                        .infer_at(dotted_path(&path, name))
+                        .map_err(|error| error.at_field(name))?;
                     struct_types.push(QueryParameterStructType {
                         name: name.clone(),
-                        r#type: Some(ty),
+                        r#type: Some(param_type),
                         ..Default::default()
                     });
                     struct_values.insert(name.clone(), value);
@@ -841,9 +834,9 @@ impl BigQueryFieldType {
                 r#type: FieldKind::Struct.name().to_string(),
                 struct_types: fields
                     .iter()
-                    .map(|f| QueryParameterStructType {
-                        name: f.name.clone(),
-                        r#type: Some(f.field_type.param_type(f.mode)),
+                    .map(|field| QueryParameterStructType {
+                        name: field.name.clone(),
+                        r#type: Some(field.field_type.param_type(field.mode)),
                         ..Default::default()
                     })
                     .collect(),
@@ -863,11 +856,11 @@ impl SerializedValue {
     /// since BigQuery has no NULL ARRAY.
     fn coerce_field(
         &self,
-        ty: &BigQueryFieldType,
+        param_type: &BigQueryFieldType,
         mode: BigQueryFieldMode,
     ) -> Result<QueryParameterValue, CodecError> {
         if mode != BigQueryFieldMode::Repeated {
-            return self.coerce(ty);
+            return self.coerce(param_type);
         }
         match self {
             SerializedValue::Null => Ok(QueryParameterValue::default()),
@@ -875,13 +868,15 @@ impl SerializedValue {
                 let array_values = items
                     .iter()
                     .enumerate()
-                    .map(|(i, item)| match item {
+                    .map(|(index, item)| match item {
                         SerializedValue::Null => Err(CodecError::new(
                             BigQueryCodecErrorKind::NullArrayElement,
                             "an ARRAY parameter cannot hold NULL",
                         )
-                        .at_index(i)),
-                        item => item.coerce(ty).map_err(|e| e.at_index(i)),
+                        .at_index(index)),
+                        item => item
+                            .coerce(param_type)
+                            .map_err(|error| error.at_index(index)),
                     })
                     .collect::<Result<_, _>>()?;
                 Ok(QueryParameterValue {
@@ -890,59 +885,60 @@ impl SerializedValue {
                 })
             }
             other => Err(CodecError::type_mismatch(format!(
-                "an ARRAY<{ty}> parameter takes a sequence, got {}",
+                "an ARRAY<{param_type}> parameter takes a sequence, got {}",
                 other.describe()
             ))),
         }
     }
 
-    fn coerce(&self, ty: &BigQueryFieldType) -> Result<QueryParameterValue, CodecError> {
+    fn coerce(&self, param_type: &BigQueryFieldType) -> Result<QueryParameterValue, CodecError> {
         use BigQueryFieldType as FieldType;
         let text = |t: String| Ok(text_value(t));
-        match (ty, self) {
+        match (param_type, self) {
             (_, SerializedValue::Null) => Ok(QueryParameterValue::default()),
-            (FieldType::Int64, SerializedValue::Integer(v)) => text(int64_text(*v)?),
-            (FieldType::Float64, SerializedValue::Float(v)) => text(float_text(*v)),
-            (FieldType::Numeric(_), _) => text(decimal_text(
+            (FieldType::Int64, SerializedValue::Integer(value)) => text(int64_text(*value)?),
+            (FieldType::Float64, SerializedValue::Float(value)) => text(float_text(*value)),
+            (FieldType::Numeric(_), _) => text(decimal_string(
                 self.declared_decimal(NUMERIC_SCALE)?,
                 NUMERIC_SCALE,
             )),
-            (FieldType::BigNumeric(_), _) => text(decimal_text(
+            (FieldType::BigNumeric(_), _) => text(decimal_string(
                 self.declared_decimal(BIGNUMERIC_SCALE)?,
                 BIGNUMERIC_SCALE,
             )),
-            (FieldType::Bool, SerializedValue::Bool(v)) => text(v.to_string()),
-            (FieldType::String { .. } | FieldType::Geography, SerializedValue::String(v)) => {
-                text(v.clone())
+            (FieldType::Bool, SerializedValue::Bool(value)) => text(value.to_string()),
+            (FieldType::String { .. } | FieldType::Geography, SerializedValue::String(value)) => {
+                text(value.clone())
             }
-            (FieldType::Bytes { .. }, SerializedValue::Bytes(v)) => text(base64_text(v)),
+            (FieldType::Bytes { .. }, SerializedValue::Bytes(value)) => text(base64_text(value)),
             (FieldType::Bytes { .. }, SerializedValue::Sequence(items)) => {
                 let bytes = items
                     .iter()
                     .enumerate()
-                    .map(|(i, item)| match item {
-                        SerializedValue::Integer(v) => u8::try_from(*v).map_err(|_| {
-                            CodecError::out_of_range(format!("{v} is not a byte")).at_index(i)
+                    .map(|(index, item)| match item {
+                        SerializedValue::Integer(value) => u8::try_from(*value).map_err(|_| {
+                            CodecError::out_of_range(format!("{value} is not a byte"))
+                                .at_index(index)
                         }),
                         other => Err(CodecError::type_mismatch(format!(
                             "BYTES takes bytes, got {}",
                             other.describe()
                         ))
-                        .at_index(i)),
+                        .at_index(index)),
                     })
                     .collect::<Result<Vec<u8>, _>>()?;
                 text(base64_text(&bytes))
             }
             (FieldType::Date | FieldType::Time | FieldType::DateTime | FieldType::Timestamp, _) => {
-                let kind = FieldKind::from(ty);
+                let kind = FieldKind::from(param_type);
                 text(kind.temporal_text(self.declared_temporal(kind)?)?)
             }
-            (FieldType::Json, SerializedValue::Json(v) | SerializedValue::String(v)) => {
-                text(v.clone())
+            (FieldType::Json, SerializedValue::Json(value) | SerializedValue::String(value)) => {
+                text(value.clone())
             }
-            (FieldType::Interval, SerializedValue::Interval(v)) => text(v.param_text()?),
-            (FieldType::Interval, SerializedValue::String(v)) => {
-                text(BigQueryInterval::parse_bq(v)?.param_text()?)
+            (FieldType::Interval, SerializedValue::Interval(value)) => text(value.param_text()?),
+            (FieldType::Interval, SerializedValue::String(value)) => {
+                text(BigQueryInterval::parse_bq(value)?.param_text()?)
             }
             (FieldType::Range(element), SerializedValue::Range { start, end }) => {
                 FieldKind::from(*element).range_value(start, end)
@@ -950,11 +946,11 @@ impl SerializedValue {
             (FieldType::Struct(fields), SerializedValue::Struct(entries)) => {
                 if let Some((name, _)) = entries
                     .iter()
-                    .find(|(name, _)| !fields.iter().any(|f| &f.name == name))
+                    .find(|(name, _)| !fields.iter().any(|field| &field.name == name))
                 {
                     return Err(CodecError::new(
                         BigQueryCodecErrorKind::UnknownField,
-                        format!("the declared {ty} has no field `{name}`"),
+                        format!("the declared {param_type} has no field `{name}`"),
                     )
                     .at_field(name));
                 }
@@ -966,7 +962,7 @@ impl SerializedValue {
                         .map_or(&SerializedValue::Null, |(_, node)| node);
                     let value = node
                         .coerce_field(&field.field_type, field.mode)
-                        .map_err(|e| e.at_field(&field.name))?;
+                        .map_err(|error| error.at_field(&field.name))?;
                     struct_values.insert(field.name.clone(), value);
                 }
                 Ok(QueryParameterValue {
@@ -974,8 +970,8 @@ impl SerializedValue {
                     ..Default::default()
                 })
             }
-            (ty, other) => Err(CodecError::type_mismatch(format!(
-                "a {ty} parameter takes no {}",
+            (param_type, other) => Err(CodecError::type_mismatch(format!(
+                "a {param_type} parameter takes no {}",
                 other.describe()
             ))),
         }
@@ -1029,10 +1025,10 @@ impl SerializedValue {
         }
         let micros = self
             .declared_temporal(element)
-            .map_err(|e| e.at_field(name))?;
+            .map_err(|error| error.at_field(name))?;
         let text = element
             .temporal_text(micros)
-            .map_err(|e| e.at_field(name))?;
+            .map_err(|error| error.at_field(name))?;
         Ok(Some(Box::new(text_value(text))))
     }
 
@@ -1046,14 +1042,14 @@ impl SerializedValue {
                 k.name(),
                 kind.name()
             ))),
-            SerializedValue::Integer(v) => i64::try_from(*v).map_err(|_| {
-                CodecError::out_of_range(format!("{v} is outside the {} range", kind.name()))
+            SerializedValue::Integer(value) => i64::try_from(*value).map_err(|_| {
+                CodecError::out_of_range(format!("{value} is outside the {} range", kind.name()))
             }),
-            SerializedValue::String(s) => match kind {
-                FieldKind::Date => civil::parse_date(s).map(i64::from),
-                FieldKind::Time => civil::parse_time(s),
-                FieldKind::DateTime => civil::parse_datetime(s),
-                _ => civil::parse_timestamp(s),
+            SerializedValue::String(text) => match kind {
+                FieldKind::Date => civil::parse_date(text).map(i64::from),
+                FieldKind::Time => civil::parse_time(text),
+                FieldKind::DateTime => civil::parse_datetime(text),
+                _ => civil::parse_timestamp(text),
             },
             other => Err(CodecError::type_mismatch(format!(
                 "a {} parameter takes no {}",
@@ -1066,19 +1062,19 @@ impl SerializedValue {
     /// The unscaled value at `scale` of a decimal given for a NUMERIC or BIGNUMERIC parameter: the
     /// text, a `BigQueryDecimal`, an integer, or an `f64` rounded at the scale.
     fn declared_decimal(&self, scale: u32) -> Result<arrow_buffer::i256, CodecError> {
-        let parse = |s: &str| {
+        let parse = |text: &str| {
             if scale == NUMERIC_SCALE {
-                parse_numeric(s)
+                parse_numeric(text)
             } else {
-                parse_bignumeric(s)
+                parse_bignumeric(text)
             }
         };
         match self {
-            SerializedValue::String(s) | SerializedValue::Decimal(s) => parse(s),
-            SerializedValue::Integer(v) => parse(&v.to_string()),
-            SerializedValue::Float(x) => {
-                let v = crate::types::decimal::decimal_from_f64(*x, scale)?;
-                parse(&decimal_text(v, scale))
+            SerializedValue::String(text) | SerializedValue::Decimal(text) => parse(text),
+            SerializedValue::Integer(value) => parse(&value.to_string()),
+            SerializedValue::Float(float) => {
+                let value = crate::types::decimal::decimal_from_f64(*float, scale)?;
+                parse(&decimal_string(value, scale))
             }
             other => Err(CodecError::type_mismatch(format!(
                 "a decimal parameter takes no {}",
@@ -1088,36 +1084,30 @@ impl SerializedValue {
     }
 }
 
-fn int64_text(v: i128) -> Result<String, CodecError> {
-    i64::try_from(v)
-        .map(|v| v.to_string())
-        .map_err(|_| CodecError::out_of_range(format!("{v} is outside INT64")))
+fn int64_text(value: i128) -> Result<String, CodecError> {
+    i64::try_from(value)
+        .map(|value| value.to_string())
+        .map_err(|_| CodecError::out_of_range(format!("{value} is outside INT64")))
 }
 
 /// The shortest text that parses back to the same `f64`, and BigQuery's names for the special
 /// values.
-fn float_text(x: f64) -> String {
-    if x.is_nan() {
+fn float_text(float: f64) -> String {
+    if float.is_nan() {
         "NaN".into()
-    } else if x == f64::INFINITY {
+    } else if float == f64::INFINITY {
         "Infinity".into()
-    } else if x == f64::NEG_INFINITY {
+    } else if float == f64::NEG_INFINITY {
         "-Infinity".into()
     } else {
         // `Debug` is the shortest round-trip form and switches to an exponent where `Display`
         // would print hundreds of digits.
-        format!("{x:?}")
+        format!("{float:?}")
     }
 }
 
 fn base64_text(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-fn decimal_text(v: arrow_buffer::i256, scale: u32) -> String {
-    let mut out = String::new();
-    fmt_decimal_i256(v, scale, &mut out);
-    out
 }
 
 impl BigQueryInterval {
@@ -1137,9 +1127,13 @@ impl BigQueryInterval {
 impl FieldKind {
     /// The parameter text of a temporal integer: `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, the two with a
     /// space for DATETIME, and with `+00:00` for TIMESTAMP, which BigQuery accepts.
-    fn temporal_text(self, v: i64) -> Result<String, CodecError> {
-        let outside =
-            || CodecError::out_of_range(format!("{v} is outside BigQuery's {} range", self.name()));
+    fn temporal_text(self, value: i64) -> Result<String, CodecError> {
+        let outside = || {
+            CodecError::out_of_range(format!(
+                "{value} is outside BigQuery's {} range",
+                self.name()
+            ))
+        };
         let mut out = String::new();
         let date_time = |micros: i64, out: &mut String| {
             // Every arm below checks the range before formatting, so the day count fits i32.
@@ -1151,29 +1145,29 @@ impl FieldKind {
         let datetime_end = (i64::from(civil::DATE_MAX_DAYS) + 1) * civil::MICROS_PER_DAY;
         match self {
             FieldKind::Date => {
-                let days = i32::try_from(v)
+                let days = i32::try_from(value)
                     .ok()
                     .filter(|d| (civil::DATE_MIN_DAYS..=civil::DATE_MAX_DAYS).contains(d))
                     .ok_or_else(outside)?;
                 civil::fmt_date(days, &mut out)?;
             }
             FieldKind::Time => {
-                if !(0..civil::MICROS_PER_DAY).contains(&v) {
+                if !(0..civil::MICROS_PER_DAY).contains(&value) {
                     return Err(outside());
                 }
-                civil::fmt_time(v, &mut out)?;
+                civil::fmt_time(value, &mut out)?;
             }
             FieldKind::DateTime => {
-                if !(datetime_min..datetime_end).contains(&v) {
+                if !(datetime_min..datetime_end).contains(&value) {
                     return Err(outside());
                 }
-                date_time(v, &mut out)?;
+                date_time(value, &mut out)?;
             }
             FieldKind::Timestamp => {
-                if !(civil::TIMESTAMP_MIN_MICROS..=civil::TIMESTAMP_MAX_MICROS).contains(&v) {
+                if !(civil::TIMESTAMP_MIN_MICROS..=civil::TIMESTAMP_MAX_MICROS).contains(&value) {
                     return Err(outside());
                 }
-                date_time(v, &mut out)?;
+                date_time(value, &mut out)?;
                 out.push_str("+00:00");
             }
             other => {
@@ -1191,8 +1185,9 @@ impl FieldKind {
 mod tests {
     use super::*;
     use crate::errors::BigQueryError;
+    use crate::types::testkit::field;
     use crate::{
-        BigQueryDate, BigQueryDecimal, BigQueryFieldSchema, BigQueryJson, BigQueryRange,
+        BigQueryDate, BigQueryDecimal, BigQueryFieldMode, BigQueryJson, BigQueryRange,
         BigQueryTimestamp,
     };
     use serde::Serialize;
@@ -1219,23 +1214,27 @@ mod tests {
         }
     }
 
-    fn param(name: &str, t: QueryParameterType, v: QueryParameterValue) -> QueryParameter {
+    fn param(
+        name: &str,
+        param_type: QueryParameterType,
+        value: QueryParameterValue,
+    ) -> QueryParameter {
         QueryParameter {
             name: name.into(),
-            parameter_type: Some(t),
-            parameter_value: Some(v),
+            parameter_type: Some(param_type),
+            parameter_value: Some(value),
         }
     }
 
     fn infer<V: Serialize + ?Sized>(value: &V) -> BigQueryResult<QueryParameter> {
-        infer_param(ParamLabel::Named("p"), value)
+        infer_param(ParamLabel::Named("value"), value)
     }
 
     fn typed<V: Serialize + ?Sized>(
-        t: impl Into<BigQueryParamType>,
+        param_type: impl Into<BigQueryParamType>,
         value: &V,
     ) -> BigQueryResult<QueryParameter> {
-        typed_param(ParamLabel::Named("p"), &t.into(), value)
+        typed_param(ParamLabel::Named("value"), &param_type.into(), value)
     }
 
     #[derive(Serialize)]
@@ -1247,39 +1246,43 @@ mod tests {
     fn scalars_infer_their_bigquery_types() -> BigQueryResult<()> {
         assert_eq!(
             infer(&41i32)?,
-            param("p", param_type("INT64"), param_value("41"))
+            param("value", param_type("INT64"), param_value("41"))
         );
         assert_eq!(
             infer(&(u64::MAX >> 1))?,
-            param("p", param_type("INT64"), param_value("9223372036854775807"))
+            param(
+                "value",
+                param_type("INT64"),
+                param_value("9223372036854775807")
+            )
         );
         assert_eq!(
             infer(&1.5f64)?,
-            param("p", param_type("FLOAT64"), param_value("1.5"))
+            param("value", param_type("FLOAT64"), param_value("1.5"))
         );
         assert_eq!(
             infer(&true)?,
-            param("p", param_type("BOOL"), param_value("true"))
+            param("value", param_type("BOOL"), param_value("true"))
         );
         assert_eq!(
             infer("Åsa")?,
-            param("p", param_type("STRING"), param_value("Åsa"))
+            param("value", param_type("STRING"), param_value("Åsa"))
         );
         assert_eq!(
             infer(&'x')?,
-            param("p", param_type("STRING"), param_value("x"))
+            param("value", param_type("STRING"), param_value("x"))
         );
         assert_eq!(
             infer(&Colour::Red)?,
-            param("p", param_type("STRING"), param_value("Red"))
+            param("value", param_type("STRING"), param_value("Red"))
         );
         assert_eq!(
             infer(&serde_bytes::ByteBuf::from(vec![0u8, 255]))?,
-            param("p", param_type("BYTES"), param_value("AP8="))
+            param("value", param_type("BYTES"), param_value("AP8="))
         );
         assert_eq!(
             infer(&Some(7i64))?,
-            param("p", param_type("INT64"), param_value("7"))
+            param("value", param_type("INT64"), param_value("7"))
         );
         Ok(())
     }
@@ -1289,7 +1292,7 @@ mod tests {
         match infer(&u64::MAX) {
             Err(BigQueryError::SerializeError(err)) => {
                 assert_eq!(err.kind, BigQueryCodecErrorKind::OutOfRange);
-                assert_eq!(err.path, "p");
+                assert_eq!(err.path, "value");
                 assert_eq!(err.row, None);
             }
             other => panic!("expected OutOfRange, got {other:?}"),
@@ -1298,69 +1301,73 @@ mod tests {
 
     #[test]
     fn float_text_round_trips_and_names_special_values() -> BigQueryResult<()> {
-        for x in [0.1, -0.0, 5e-324, 1e300, f64::MAX, 123_456.789] {
-            let text = infer(&x)?
+        for float in [0.1, -0.0, 5e-324, 1e300, f64::MAX, 123_456.789] {
+            let text = infer(&float)?
                 .parameter_value
-                .and_then(|v| v.value)
+                .and_then(|value| value.value)
                 .unwrap_or_default();
             let back: f64 = text.parse().expect("FLOAT64 text parses");
-            assert_eq!(back.to_bits(), x.to_bits(), "{x} as {text}");
+            assert_eq!(back.to_bits(), float.to_bits(), "{float} as {text}");
         }
         assert_eq!(
             infer(&f64::NAN)?,
-            param("p", param_type("FLOAT64"), param_value("NaN"))
+            param("value", param_type("FLOAT64"), param_value("NaN"))
         );
         assert_eq!(
             infer(&f64::INFINITY)?,
-            param("p", param_type("FLOAT64"), param_value("Infinity"))
+            param("value", param_type("FLOAT64"), param_value("Infinity"))
         );
         assert_eq!(
             infer(&f64::NEG_INFINITY)?,
-            param("p", param_type("FLOAT64"), param_value("-Infinity"))
+            param("value", param_type("FLOAT64"), param_value("-Infinity"))
         );
         Ok(())
     }
 
     #[test]
     fn wrappers_are_recognised_by_their_serde_names() -> BigQueryResult<()> {
-        let ts: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse().expect("valid");
+        let timestamp: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse().expect("valid");
         let date = jiff::civil::date(2024, 2, 29);
         assert_eq!(
-            infer(&BigQueryTimestamp(ts))?,
+            infer(&BigQueryTimestamp(timestamp))?,
             param(
-                "p",
+                "value",
                 param_type("TIMESTAMP"),
                 param_value("2026-10-04 12:34:56.123456+00:00")
             )
         );
         assert_eq!(
             infer(&BigQueryDate(date))?,
-            param("p", param_type("DATE"), param_value("2024-02-29"))
+            param("value", param_type("DATE"), param_value("2024-02-29"))
         );
         assert_eq!(
             infer(&crate::BigQueryTime(jiff::civil::time(4, 5, 6, 0)))?,
-            param("p", param_type("TIME"), param_value("04:05:06"))
+            param("value", param_type("TIME"), param_value("04:05:06"))
         );
         assert_eq!(
             infer(&crate::BigQueryDateTime(date.at(23, 59, 59, 999_999_000)))?,
             param(
-                "p",
+                "value",
                 param_type("DATETIME"),
                 param_value("2024-02-29 23:59:59.999999")
             )
         );
         assert_eq!(
             infer(&BigQueryJson(serde_json::json!({"stad": "Malmö"})))?,
-            param("p", param_type("JSON"), param_value(r#"{"stad":"Malmö"}"#))
+            param(
+                "value",
+                param_type("JSON"),
+                param_value(r#"{"stad":"Malmö"}"#)
+            )
         );
         assert_eq!(
             infer(&BigQueryDecimal("123.450"))?,
-            param("p", param_type("NUMERIC"), param_value("123.45"))
+            param("value", param_type("NUMERIC"), param_value("123.45"))
         );
         assert_eq!(
             infer(&BigQueryDecimal("0.00000000000000000000000000000000000001"))?,
             param(
-                "p",
+                "value",
                 param_type("BIGNUMERIC"),
                 param_value("0.00000000000000000000000000000000000001")
             )
@@ -1372,7 +1379,7 @@ mod tests {
                 nanos: 3_723_500_000_000,
             })?,
             param(
-                "p",
+                "value",
                 param_type("INTERVAL"),
                 param_value("1-2 -3 1:2:3.500000")
             )
@@ -1384,7 +1391,7 @@ mod tests {
         assert_eq!(
             infer(&range)?,
             param(
-                "p",
+                "value",
                 QueryParameterType {
                     r#type: "RANGE".into(),
                     range_element_type: Some(Box::new(param_type("DATE"))),
@@ -1404,11 +1411,11 @@ mod tests {
 
     #[test]
     fn plain_jiff_value_infers_string() -> BigQueryResult<()> {
-        let ts: jiff::Timestamp = "2026-10-04T12:34:56Z".parse().expect("valid");
+        let timestamp: jiff::Timestamp = "2026-10-04T12:34:56Z".parse().expect("valid");
         assert_eq!(
-            infer(&ts)?,
+            infer(&timestamp)?,
             param(
-                "p",
+                "value",
                 param_type("STRING"),
                 param_value("2026-10-04T12:34:56Z")
             )
@@ -1417,9 +1424,9 @@ mod tests {
     }
 
     #[derive(Serialize)]
-    struct Pair {
-        b: i64,
-        a: String,
+    struct Book {
+        pages: i64,
+        author: String,
     }
 
     #[test]
@@ -1427,7 +1434,7 @@ mod tests {
         assert_eq!(
             infer(&vec![1i64, 2, 3])?,
             param(
-                "p",
+                "value",
                 array_param_type(param_type("INT64")),
                 QueryParameterValue {
                     array_values: vec![param_value("1"), param_value("2"), param_value("3")],
@@ -1435,41 +1442,44 @@ mod tests {
                 }
             )
         );
-        let struct_ty = QueryParameterType {
+        let struct_type = QueryParameterType {
             r#type: "STRUCT".into(),
             struct_types: vec![
                 QueryParameterStructType {
-                    name: "b".into(),
+                    name: "pages".into(),
                     r#type: Some(param_type("INT64")),
                     ..Default::default()
                 },
                 QueryParameterStructType {
-                    name: "a".into(),
+                    name: "author".into(),
                     r#type: Some(param_type("STRING")),
                     ..Default::default()
                 },
             ],
             ..Default::default()
         };
-        let struct_val = QueryParameterValue {
+        let struct_value = QueryParameterValue {
             struct_values: [
-                ("b".to_string(), param_value("7")),
-                ("a".to_string(), param_value("z")),
+                ("pages".to_string(), param_value("7")),
+                ("author".to_string(), param_value("Ursula")),
             ]
             .into_iter()
             .collect(),
             ..Default::default()
         };
         assert_eq!(
-            infer(&Pair {
-                b: 7,
-                a: "z".into()
+            infer(&Book {
+                pages: 7,
+                author: "Ursula".into()
             })?,
-            param("p", struct_ty.clone(), struct_val.clone())
+            param("value", struct_type.clone(), struct_value.clone())
         );
         assert_eq!(
-            infer(&OrderedMap(vec![("b", 7.into()), ("a", "z".into())]))?,
-            param("p", struct_ty, struct_val)
+            infer(&OrderedMap(vec![
+                ("pages", 7.into()),
+                ("author", "Ursula".into())
+            ]))?,
+            param("value", struct_type, struct_value)
         );
         Ok(())
     }
@@ -1491,7 +1501,7 @@ mod tests {
     fn assert_points_at_param_as(result: BigQueryResult<QueryParameter>, what: &str) {
         match result {
             Err(BigQueryError::InvalidParametersError(err)) => {
-                assert_eq!(err.public.field, "p", "{what}");
+                assert_eq!(err.public.field, "value", "{what}");
             }
             other => panic!("{what}: expected InvalidParametersError, got {other:?}"),
         }
@@ -1502,24 +1512,24 @@ mod tests {
         assert_points_at_param_as(infer(&None::<i64>), "None");
         assert_points_at_param_as(infer(&Vec::<i64>::new()), "an empty array");
         assert_points_at_param_as(
-            infer(&vec![serde_json::json!(1), serde_json::json!("a")]),
+            infer(&vec![serde_json::json!(1), serde_json::json!("Ursula")]),
             "mixed elements",
         );
         assert_points_at_param_as(
-            infer(&serde_json::json!({"a": null})),
+            infer(&serde_json::json!({"author": null})),
             "a NULL struct field",
         );
     }
 
     #[test]
     fn param_as_takes_the_write_forms_of_the_declared_type() -> BigQueryResult<()> {
-        let ts: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse().expect("valid");
+        let timestamp: jiff::Timestamp = "2026-10-04T12:34:56.123456Z".parse().expect("valid");
         let expected = param(
-            "p",
+            "value",
             param_type("TIMESTAMP"),
             param_value("2026-10-04 12:34:56.123456+00:00"),
         );
-        assert_eq!(typed(BigQueryFieldType::Timestamp, &ts)?, expected);
+        assert_eq!(typed(BigQueryFieldType::Timestamp, &timestamp)?, expected);
         assert_eq!(
             typed(BigQueryFieldType::Timestamp, &1_791_117_296_123_456i64)?.parameter_type,
             expected.parameter_type
@@ -1533,30 +1543,30 @@ mod tests {
         );
         assert_eq!(
             typed(BigQueryFieldType::Date, "2024-02-29")?,
-            param("p", param_type("DATE"), param_value("2024-02-29"))
+            param("value", param_type("DATE"), param_value("2024-02-29"))
         );
         assert_eq!(
             typed(BigQueryFieldType::Numeric(None), &1.25f64)?,
-            param("p", param_type("NUMERIC"), param_value("1.25"))
+            param("value", param_type("NUMERIC"), param_value("1.25"))
         );
         assert_eq!(
             typed(BigQueryFieldType::Bytes { max_length: None }, &vec![1u8, 2])?,
-            param("p", param_type("BYTES"), param_value("AQI="))
+            param("value", param_type("BYTES"), param_value("AQI="))
         );
         assert_eq!(
             typed(BigQueryFieldType::Int64, &None::<i64>)?,
-            param("p", param_type("INT64"), QueryParameterValue::default())
+            param("value", param_type("INT64"), QueryParameterValue::default())
         );
         assert_eq!(
             typed(
                 BigQueryParamType::array_of(BigQueryFieldType::String { max_length: None }),
-                &["a", "b"]
+                &["fiction", "poetry"]
             )?,
             param(
-                "p",
+                "value",
                 array_param_type(param_type("STRING")),
                 QueryParameterValue {
-                    array_values: vec![param_value("a"), param_value("b")],
+                    array_values: vec![param_value("fiction"), param_value("poetry")],
                     ..Default::default()
                 }
             )
@@ -1566,33 +1576,43 @@ mod tests {
 
     #[test]
     fn param_as_struct_follows_the_declared_fields() -> BigQueryResult<()> {
-        let field = |name: &str, field_type| BigQueryFieldSchema {
-            name: name.into(),
-            field_type,
-            mode: crate::BigQueryFieldMode::Nullable,
-            description: None,
-            default_value_expression: None,
-        };
         let declared = BigQueryFieldType::Struct(vec![
-            field("a", BigQueryFieldType::String { max_length: None }),
-            field("b", BigQueryFieldType::Int64),
+            field(
+                "author",
+                BigQueryFieldType::String { max_length: None },
+                BigQueryFieldMode::Nullable,
+            ),
+            field(
+                "pages",
+                BigQueryFieldType::Int64,
+                BigQueryFieldMode::Nullable,
+            ),
         ]);
         let encoded = typed(
             declared.clone(),
-            &Pair {
-                b: 7,
-                a: "z".into(),
+            &Book {
+                pages: 7,
+                author: "Ursula".into(),
             },
         )?;
         let types: Vec<_> = encoded
             .parameter_type
-            .map(|t| t.struct_types.into_iter().map(|s| s.name).collect())
+            .map(|struct_type| {
+                struct_type
+                    .struct_types
+                    .into_iter()
+                    .map(|field| field.name)
+                    .collect()
+            })
             .unwrap_or_default();
-        assert_eq!(types, ["a", "b"]);
-        match typed(declared, &serde_json::json!({"a": "z", "c": 1})) {
+        assert_eq!(types, ["author", "pages"]);
+        match typed(
+            declared,
+            &serde_json::json!({"author": "Ursula", "isbn": 1}),
+        ) {
             Err(BigQueryError::SerializeError(err)) => {
                 assert_eq!(err.kind, BigQueryCodecErrorKind::UnknownField);
-                assert_eq!(err.path, "p.c");
+                assert_eq!(err.path, "value.isbn");
             }
             other => panic!("expected UnknownField, got {other:?}"),
         }
@@ -1619,7 +1639,7 @@ mod tests {
             match result {
                 Err(BigQueryError::SerializeError(err)) => {
                     assert_eq!(err.kind, BigQueryCodecErrorKind::TypeMismatch, "{what}");
-                    assert_eq!(err.path, "p", "{what}");
+                    assert_eq!(err.path, "value", "{what}");
                 }
                 other => panic!("{what}: expected TypeMismatch, got {other:?}"),
             }
@@ -1640,12 +1660,15 @@ mod tests {
 
     #[test]
     fn struct_params_send_each_top_level_field() -> BigQueryResult<()> {
-        let params = struct_params(&Filter { min: 10, name: "x" })?;
+        let params = struct_params(&Filter {
+            min: 10,
+            name: "Ursula",
+        })?;
         assert_eq!(
             params,
             [
                 param("min", param_type("INT64"), param_value("10")),
-                param("name", param_type("STRING"), param_value("x"))
+                param("name", param_type("STRING"), param_value("Ursula"))
             ]
         );
         match struct_params(&5i64) {
@@ -1669,7 +1692,7 @@ mod tests {
 
     #[test]
     fn named_and_positional_parameters_cannot_mix() -> BigQueryResult<()> {
-        let named = param("a", param_type("INT64"), param_value("1"));
+        let named = param("min_pages", param_type("INT64"), param_value("1"));
         let positional = param("", param_type("INT64"), param_value("1"));
         assert_eq!(parameter_mode(&[])?, "");
         assert_eq!(parameter_mode(std::slice::from_ref(&named))?, "NAMED");
@@ -1735,7 +1758,7 @@ mod tests {
                 }
                 Malformed::IntegerMapKey => {
                     let mut map = serializer.serialize_map(Some(1))?;
-                    map.serialize_entry(&271828i64, "v")?;
+                    map.serialize_entry(&271828i64, "price")?;
                     map.end()
                 }
                 Malformed::IntervalPart => {

@@ -1,6 +1,7 @@
 //! The plain dataset, table and job calls against the fake server: the requests they send and
 //! the typed values they return.
 
+use crate::db::fake::table::v2_field;
 use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::errors::BigQueryError;
 use crate::{BigQueryDataset, BigQueryDatasetSummary, BigQueryJob, BigQueryTable};
@@ -26,7 +27,7 @@ const CREATED_MS: i64 = 1_791_072_000_000;
 fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect()
 }
 
@@ -417,8 +418,18 @@ async fn the_dataset_listing_follows_page_tokens() {
             r#"ListDatasets acme-prod max_results=Some(1) page_token="p2""#,
         ]
     );
-    let names: Vec<_> = datasets.iter().map(|d| d.reference.to_string()).collect();
-    assert_eq!(names, ["acme-prod.shop", "acme-prod.warehouse"]);
+    let references: Vec<_> = datasets
+        .iter()
+        .map(|dataset| dataset.reference.clone())
+        .collect();
+    assert_eq!(
+        references,
+        [
+            BigQueryDatasetRef::new("acme-prod", SHOP).expect("a valid project"),
+            BigQueryDatasetRef::new("acme-prod", BigQueryDatasetId::from_static("warehouse"))
+                .expect("a valid project"),
+        ]
+    );
     assert_eq!(
         datasets[1].location,
         Some(BigQueryLocation::from_static("US"))
@@ -457,15 +468,6 @@ async fn a_failed_listing_page_ends_the_listing() {
     assert_eq!(logged.len(), 1);
 }
 
-fn field(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
-    v2::TableFieldSchema {
-        name: name.into(),
-        r#type: ty.into(),
-        mode: mode.into(),
-        ..Default::default()
-    }
-}
-
 #[tokio::test]
 async fn get_table_normalises_legacy_types_and_reads_views_too() {
     let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
@@ -488,9 +490,9 @@ async fn get_table_normalises_legacy_types_and_reads_views_too() {
             r#type: if view { "VIEW" } else { "TABLE" }.into(),
             schema: Some(v2::TableSchema {
                 fields: vec![
-                    field("id", "INTEGER", "REQUIRED"),
-                    field("total", "FLOAT", ""),
-                    field("placed_at", "TIMESTAMP", "NULLABLE"),
+                    v2_field("id", "INTEGER", "REQUIRED"),
+                    v2_field("total", "FLOAT", ""),
+                    v2_field("placed_at", "TIMESTAMP", "NULLABLE"),
                 ],
                 ..Default::default()
             }),
@@ -519,13 +521,18 @@ async fn get_table_normalises_legacy_types_and_reads_views_too() {
         .await
         .expect("the call succeeds");
     assert_eq!(fake.calls(), ["GetTable fake-project.shop.orders"]);
-    assert_eq!(table.reference.to_string(), "fake-project.shop.orders");
+    assert_eq!(
+        table.reference,
+        BigQueryDatasetRef::new("fake-project", SHOP)
+            .expect("a valid project")
+            .table(ORDERS)
+    );
     assert_eq!(table.table_type, Some(BigQueryTableType::Table));
     let columns: Vec<_> = table
         .schema
         .fields
         .iter()
-        .map(|f| (f.name.as_str(), f.field_type.clone(), f.mode))
+        .map(|field| (field.name.as_str(), field.field_type.clone(), field.mode))
         .collect();
     assert_eq!(
         columns,
@@ -627,7 +634,12 @@ async fn table_delete_and_listing_name_their_dataset() {
         ]
     );
     assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].reference.to_string(), "other.shop.order_totals");
+    assert_eq!(
+        tables[0].reference,
+        BigQueryDatasetRef::new("other", SHOP)
+            .expect("a valid project")
+            .table(BigQueryTableId::from_static("order_totals"))
+    );
     assert_eq!(
         tables[0].table_type,
         Some(BigQueryTableType::MaterializedView)
@@ -715,7 +727,10 @@ async fn a_failed_job_reads_as_a_job_and_deletes_in_its_location() {
     assert_eq!(job.statement_type, Some(BigQueryStatementType::Select));
     assert_eq!(job.total_bytes_billed, Some(0));
     assert_eq!(job.user_email.as_deref(), Some("me@example.com"));
-    assert_eq!(job.error.map(|e| e.reason).as_deref(), Some("invalidQuery"));
+    assert_eq!(
+        job.error.map(|error| error.reason).as_deref(),
+        Some("invalidQuery")
+    );
     assert_eq!(
         job.end_time,
         Some(jiff::Timestamp::from_millisecond(CREATED_MS + 20).expect("a timestamp"))

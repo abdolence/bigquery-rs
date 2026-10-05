@@ -29,7 +29,7 @@ const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
 
 /// `id, name`, with `ids` as the ids and `Åsa <id>` as the names.
 fn people(ids: &[i64]) -> RecordBatch {
-    let names: Vec<Option<String>> = ids.iter().map(|i| Some(format!("Åsa {i}"))).collect();
+    let names: Vec<Option<String>> = ids.iter().map(|id| Some(format!("Åsa {id}"))).collect();
     people_named(ids, names)
 }
 
@@ -73,7 +73,7 @@ async fn storage_read(mut call: FakeCall, table: &FakeReadTable) {
             let index: usize = request.read_stream[1..].parse().expect("s<n>");
             let batches: Vec<(Vec<u8>, i64)> = table.streams[index]
                 .iter()
-                .map(|b| (encode_ipc(b).1, b.num_rows() as i64))
+                .map(|batch| (encode_ipc(batch).1, batch.num_rows() as i64))
                 .collect();
             call.send_batches(&batches);
             call.finish();
@@ -150,18 +150,19 @@ async fn zero_rows_sent_as_an_empty_batch_message_are_an_empty_stream() -> BigQu
 async fn query_request_carries_the_routing_settings() -> BigQueryResult<()> {
     let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
         let request = call.query_request().await;
-        let q = request.query_request.unwrap_or_default();
+        let sent = request.query_request.unwrap_or_default();
         call.log(format!(
             "format={:?} legacy={:?} int64_timestamp={:?} timeout_ms={:?} location={:?} \
              job_creation_mode={} dry_run={} request_id_len={}",
-            q.query_results_format(),
-            q.use_legacy_sql,
-            q.format_options.map(|f| f.use_int64_timestamp),
-            q.timeout_ms,
-            q.location,
-            q.job_creation_mode,
-            q.dry_run,
-            q.request_id.len(),
+            sent.query_results_format(),
+            sent.use_legacy_sql,
+            sent.format_options
+                .map(|options| options.use_int64_timestamp),
+            sent.timeout_ms,
+            sent.location,
+            sent.job_creation_mode,
+            sent.dry_run,
+            sent.request_id.len(),
         ));
         call.reply(&inline_response(&people(&[1]), 1));
     })
@@ -182,23 +183,23 @@ async fn query_request_carries_the_routing_settings() -> BigQueryResult<()> {
 async fn builder_settings_reach_the_query_request() -> BigQueryResult<()> {
     let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
         let request = call.query_request().await;
-        let q = request.query_request.unwrap_or_default();
-        let mut labels: Vec<_> = q.labels.into_iter().collect();
+        let sent = request.query_request.unwrap_or_default();
+        let mut labels: Vec<_> = sent.labels.into_iter().collect();
         labels.sort();
         call.log(format!(
             "params={} mode={} location={} dataset={:?} labels={labels:?} max_bytes={:?} \
              cache={:?} timeout_ms={:?} job_timeout_ms={:?} request_id={} max_results={:?}",
-            q.query_parameters.len(),
-            q.parameter_mode,
-            q.location,
-            q.default_dataset
-                .map(|d| format!("{}.{}", d.project_id, d.dataset_id)),
-            q.maximum_bytes_billed,
-            q.use_query_cache,
-            q.timeout_ms,
-            q.job_timeout_ms,
-            q.request_id,
-            q.max_results,
+            sent.query_parameters.len(),
+            sent.parameter_mode,
+            sent.location,
+            sent.default_dataset
+                .map(|dataset| format!("{}.{}", dataset.project_id, dataset.dataset_id)),
+            sent.maximum_bytes_billed,
+            sent.use_query_cache,
+            sent.timeout_ms,
+            sent.job_timeout_ms,
+            sent.request_id,
+            sent.max_results,
         ));
         call.reply(&inline_response(&people(&[1]), 1));
     })
@@ -272,8 +273,12 @@ async fn retried_query_keeps_its_request_id_and_requires_a_job() -> BigQueryResu
         let attempts = attempts.clone();
         async move {
             let request = call.query_request().await;
-            let q = request.query_request.unwrap_or_default();
-            call.log(format!("{} {:?}", q.request_id, q.job_creation_mode()));
+            let sent = request.query_request.unwrap_or_default();
+            call.log(format!(
+                "{} {:?}",
+                sent.request_id,
+                sent.job_creation_mode()
+            ));
             if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 call.fail(Code::Unavailable, "backend went away");
             } else {
@@ -555,8 +560,8 @@ async fn polled_dml_reports_counts_from_the_job() -> BigQueryResult<()> {
 async fn required_job_creation_reaches_the_query_request() -> BigQueryResult<()> {
     let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
         let request = call.query_request().await;
-        let q = request.query_request.unwrap_or_default();
-        call.log(format!("job_creation_mode={:?}", q.job_creation_mode()));
+        let sent = request.query_request.unwrap_or_default();
+        call.log(format!("job_creation_mode={:?}", sent.job_creation_mode()));
         call.reply(&inline_response(&people(&[1]), 1));
     })
     .await;
@@ -689,8 +694,8 @@ async fn query_given_a_job_anyway_waits_for_it_and_reads_its_table() -> BigQuery
 async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
     let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
         let request = call.query_request().await;
-        let q = request.query_request.unwrap_or_default();
-        call.log(format!("job_creation_mode={:?}", q.job_creation_mode()));
+        let sent = request.query_request.unwrap_or_default();
+        call.log(format!("job_creation_mode={:?}", sent.job_creation_mode()));
         call.reply(&QueryResponse {
             query_id: "query-1".into(),
             job_complete: Some(true),
@@ -711,7 +716,7 @@ async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
         Some("query-1")
     );
     assert_eq!(outcome.num_dml_affected_rows, Some(1));
-    assert_eq!(outcome.dml_stats.map(|s| s.deleted), Some(1));
+    assert_eq!(outcome.dml_stats.map(|stats| stats.deleted), Some(1));
     assert_eq!(
         fake.calls(),
         ["Query DELETE t", "job_creation_mode=JobCreationOptional"]
@@ -1012,8 +1017,8 @@ async fn job_error_result_is_a_job_error() {
         Err(BigQueryError::JobError(err)) => {
             assert_eq!(err.public.code, "invalidQuery");
             assert_eq!(
-                err.job.map(|j| j.job_id.to_string()).as_deref(),
-                Some("job1")
+                err.job.map(|job| job.job_id),
+                Some(BigQueryJobId::new("job1").expect("a job ID"))
             );
             assert!(err.details.contains("boom"), "{}", err.details);
             assert_eq!(err.errors.len(), 1);
@@ -1027,7 +1032,10 @@ async fn job_error_result_is_a_job_error() {
 async fn dry_run_reports_bytes_and_schema() -> BigQueryResult<()> {
     let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
         let request = call.query_request().await;
-        let dry_run = request.query_request.map(|q| q.dry_run).unwrap_or_default();
+        let dry_run = request
+            .query_request
+            .map(|sent| sent.dry_run)
+            .unwrap_or_default();
         call.log(format!("dry_run={dry_run}"));
         call.reply(&QueryResponse {
             total_bytes_processed: Some(1234),
@@ -1048,10 +1056,11 @@ async fn dry_run_reports_bytes_and_schema() -> BigQueryResult<()> {
     assert_eq!(result.total_bytes_processed, Some(1234));
     let fields: Vec<(String, String)> = result
         .schema
-        .map(|s| {
-            s.fields
+        .map(|schema| {
+            schema
+                .fields
                 .into_iter()
-                .map(|f| (f.name, f.field_type.to_string()))
+                .map(|field| (field.name, field.field_type.to_string()))
                 .collect()
         })
         .unwrap_or_default();
@@ -1140,23 +1149,23 @@ async fn invalid_parameter_name_fails_before_sending() {
 
 #[derive(serde::Serialize)]
 struct Holder<'a> {
-    v: &'a str,
+    text: &'a str,
 }
 
 #[derive(serde::Serialize)]
 struct AllForms<'a> {
-    s: &'a str,
-    arr: Vec<&'a str>,
-    st: Holder<'a>,
-    j: crate::BigQueryJson<Holder<'a>>,
+    text: &'a str,
+    texts: Vec<&'a str>,
+    record: Holder<'a>,
+    document: crate::BigQueryJson<Holder<'a>>,
 }
 
 /// The payload as each of the four parameters carries it: the STRING text, the ARRAY
 /// element, the STRUCT field and the JSON document's field.
 fn carried_values(request: &PostQueryRequest) -> Vec<String> {
-    let q = request.query_request.clone().unwrap_or_default();
-    let value = |i: usize| {
-        q.query_parameters[i]
+    let sent = request.query_request.clone().unwrap_or_default();
+    let value = |index: usize| {
+        sent.query_parameters[index]
             .parameter_value
             .clone()
             .unwrap_or_default()
@@ -1166,11 +1175,11 @@ fn carried_values(request: &PostQueryRequest) -> Vec<String> {
     vec![
         value(0).value.unwrap_or_default(),
         value(1).array_values[0].value.clone().unwrap_or_default(),
-        value(2).struct_values["v"]
+        value(2).struct_values["text"]
             .value
             .clone()
             .unwrap_or_default(),
-        json["v"].as_str().unwrap_or_default().to_string(),
+        json["text"].as_str().unwrap_or_default().to_string(),
     ]
 }
 
@@ -1193,22 +1202,22 @@ async fn sql_text_is_sent_as_given_and_values_only_as_parameters() -> BigQueryRe
     })
     .await;
     let holder = BigQueryFieldType::Struct(vec![BigQueryFieldSchema {
-        name: "v".into(),
+        name: "text".into(),
         field_type: BigQueryFieldType::String { max_length: None },
         mode: BigQueryFieldMode::Nullable,
         description: None,
         default_value_expression: None,
     }]);
-    let named = "SELECT @s, @arr, @st.v, JSON_VALUE(@j, '$.v') -- @s ?";
-    let positional = "SELECT ?, ?, ?.v, JSON_VALUE(?, '$.v') /* ? */";
+    let named = "SELECT @text, @texts, @record.text, JSON_VALUE(@document, '$.text') -- @text ?";
+    let positional = "SELECT ?, ?, ?.text, JSON_VALUE(?, '$.text') /* ? */";
     let corpus = crate::sql::tests::injection_corpus();
     for payload in &corpus {
-        let p = payload.as_str();
+        let payload = payload.as_str();
         let all = AllForms {
-            s: p,
-            arr: vec![p],
-            st: Holder { v: p },
-            j: crate::BigQueryJson(Holder { v: p }),
+            text: payload,
+            texts: vec![payload],
+            record: Holder { text: payload },
+            document: crate::BigQueryJson(Holder { text: payload }),
         };
         let forms = [
             (
@@ -1217,10 +1226,10 @@ async fn sql_text_is_sent_as_given_and_values_only_as_parameters() -> BigQueryRe
                 fake.db
                     .fluent()
                     .query(named)
-                    .param("s", all.s)
-                    .param("arr", &all.arr)
-                    .param("st", &all.st)
-                    .param("j", &all.j),
+                    .param("text", all.text)
+                    .param("texts", &all.texts)
+                    .param("record", &all.record)
+                    .param("document", &all.document),
             ),
             (
                 "param_as",
@@ -1228,14 +1237,18 @@ async fn sql_text_is_sent_as_given_and_values_only_as_parameters() -> BigQueryRe
                 fake.db
                     .fluent()
                     .query(named)
-                    .param_as("s", BigQueryFieldType::String { max_length: None }, all.s)
                     .param_as(
-                        "arr",
-                        BigQueryParamType::array_of(BigQueryFieldType::String { max_length: None }),
-                        &all.arr,
+                        "text",
+                        BigQueryFieldType::String { max_length: None },
+                        all.text,
                     )
-                    .param_as("st", holder.clone(), &all.st)
-                    .param_as("j", BigQueryFieldType::Json, &all.j),
+                    .param_as(
+                        "texts",
+                        BigQueryParamType::array_of(BigQueryFieldType::String { max_length: None }),
+                        &all.texts,
+                    )
+                    .param_as("record", holder.clone(), &all.record)
+                    .param_as("document", BigQueryFieldType::Json, &all.document),
             ),
             ("params", named, fake.db.fluent().query(named).params(&all)),
             (
@@ -1244,10 +1257,10 @@ async fn sql_text_is_sent_as_given_and_values_only_as_parameters() -> BigQueryRe
                 fake.db
                     .fluent()
                     .query(positional)
-                    .positional_param(all.s)
-                    .positional_param(&all.arr)
-                    .positional_param(&all.st)
-                    .positional_param(&all.j),
+                    .positional_param(all.text)
+                    .positional_param(&all.texts)
+                    .positional_param(&all.record)
+                    .positional_param(&all.document),
             ),
             (
                 "positional_param_as",
@@ -1255,13 +1268,13 @@ async fn sql_text_is_sent_as_given_and_values_only_as_parameters() -> BigQueryRe
                 fake.db
                     .fluent()
                     .query(positional)
-                    .positional_param_as(BigQueryFieldType::String { max_length: None }, all.s)
+                    .positional_param_as(BigQueryFieldType::String { max_length: None }, all.text)
                     .positional_param_as(
                         BigQueryParamType::array_of(BigQueryFieldType::String { max_length: None }),
-                        &all.arr,
+                        &all.texts,
                     )
-                    .positional_param_as(holder.clone(), &all.st)
-                    .positional_param_as(BigQueryFieldType::Json, &all.j),
+                    .positional_param_as(holder.clone(), &all.record)
+                    .positional_param_as(BigQueryFieldType::Json, &all.document),
             ),
         ];
         for (form, sql, builder) in forms {
@@ -1271,11 +1284,15 @@ async fn sql_text_is_sent_as_given_and_values_only_as_parameters() -> BigQueryRe
                 .expect("not poisoned")
                 .pop()
                 .expect("one request per call");
-            let what = format!("{form} with {:?}", &p[..p.len().min(40)]);
-            let q = request.query_request.clone().unwrap_or_default();
-            assert_eq!(q.query.as_bytes(), sql.as_bytes(), "{what}: the SQL text");
-            assert_eq!(q.query_parameters.len(), 4, "{what}");
-            assert_eq!(carried_values(&request), [p; 4], "{what}: the values");
+            let what = format!("{form} with {:?}", &payload[..payload.len().min(40)]);
+            let sent = request.query_request.clone().unwrap_or_default();
+            assert_eq!(
+                sent.query.as_bytes(),
+                sql.as_bytes(),
+                "{what}: the SQL text"
+            );
+            assert_eq!(sent.query_parameters.len(), 4, "{what}");
+            assert_eq!(carried_values(&request), [payload; 4], "{what}: the values");
         }
     }
     Ok(())

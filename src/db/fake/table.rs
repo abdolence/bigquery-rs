@@ -2,8 +2,19 @@
 
 use super::FakeCall;
 use gcloud_sdk::google::cloud::bigquery::v2::{
-    GetTableRequest, InsertTableRequest, ListRowAccessPoliciesRequest, UpdateOrPatchTableRequest,
+    GetTableRequest, InsertTableRequest, ListRowAccessPoliciesRequest, TableFieldSchema,
+    UpdateOrPatchTableRequest,
 };
+
+/// A v2 column as `GetTable` returns it, with BigQuery's type and mode names.
+pub(crate) fn v2_field(name: &str, field_type: &str, mode: &str) -> TableFieldSchema {
+    TableFieldSchema {
+        name: name.into(),
+        r#type: field_type.into(),
+        mode: mode.into(),
+        ..Default::default()
+    }
+}
 
 impl FakeCall {
     /// Reads a `GetTable` request and logs it as `GetTable ds.t`.

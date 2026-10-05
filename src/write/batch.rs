@@ -243,7 +243,7 @@ impl Batcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::encoder::tests::field;
+    use crate::types::testkit::field;
     use crate::{BigQueryFieldMode, BigQueryFieldType, BigQueryTableSchema};
     use gcloud_sdk::prost::Message;
     use proptest::prelude::*;

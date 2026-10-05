@@ -28,79 +28,99 @@ impl BigQueryInterval {
     /// BigQuery's canonical text, `[-]Y-M [-]D [-]H:M:S[.ffffff]`, the one form Storage Write
     /// was seen to accept. Sub-microsecond nanoseconds are not printed.
     pub(crate) fn write_bq(&self, out: &mut String) {
-        let ms = if self.months < 0 { "-" } else { "" };
-        let m = self.months.unsigned_abs();
-        let _ = write!(out, "{ms}{}-{} {} ", m / 12, m % 12, self.days);
-        let ts = if self.nanos < 0 { "-" } else { "" };
-        let us = self.nanos.unsigned_abs() / 1000;
-        let secs = us / 1_000_000;
-        let _ = write!(out, "{ts}{}:{}:{}", secs / 3600, secs / 60 % 60, secs % 60);
-        if !us.is_multiple_of(1_000_000) {
-            let _ = write!(out, ".{:06}", us % 1_000_000);
+        let month_sign = if self.months < 0 { "-" } else { "" };
+        let months = self.months.unsigned_abs();
+        let _ = write!(
+            out,
+            "{month_sign}{}-{} {} ",
+            months / 12,
+            months % 12,
+            self.days
+        );
+        let time_sign = if self.nanos < 0 { "-" } else { "" };
+        let micros = self.nanos.unsigned_abs() / 1000;
+        let seconds = micros / 1_000_000;
+        let _ = write!(
+            out,
+            "{time_sign}{}:{}:{}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        );
+        if !micros.is_multiple_of(1_000_000) {
+            let _ = write!(out, ".{:06}", micros % 1_000_000);
         }
     }
 
     /// Parses the canonical text. A time part that does not fit `i64` nanoseconds is
     /// `OutOfRange`: Storage Read could not send it back.
-    pub(crate) fn parse_bq(s: &str) -> Result<BigQueryInterval, CodecError> {
-        let bad = || {
+    pub(crate) fn parse_bq(text: &str) -> Result<BigQueryInterval, CodecError> {
+        let invalid = || {
             CodecError::new(
                 BigQueryCodecErrorKind::InvalidText,
-                format!("invalid INTERVAL `{s}`, expected [-]Y-M [-]D [-]H:M:S[.ffffff]"),
+                format!("invalid INTERVAL `{text}`, expected [-]Y-M [-]D [-]H:M:S[.ffffff]"),
             )
         };
-        let mut parts = s.split_ascii_whitespace();
-        let (ym, d, hms) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-            (Some(a), Some(b), Some(c), None) => (a, b, c),
-            _ => return Err(bad()),
-        };
-        let unsigned = |p: &str| -> Result<i64, CodecError> {
-            if p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit()) {
-                return Err(bad());
+        let mut parts = text.split_ascii_whitespace();
+        let (year_month, day_part, time_part) =
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(year_month), Some(day_part), Some(time_part), None) => {
+                    (year_month, day_part, time_part)
+                }
+                _ => return Err(invalid()),
+            };
+        let unsigned = |part: &str| -> Result<i64, CodecError> {
+            if part.is_empty() || !part.bytes().all(|digit| digit.is_ascii_digit()) {
+                return Err(invalid());
             }
-            p.parse::<i64>()
-                .map_err(|_| CodecError::out_of_range(format!("INTERVAL `{s}` is out of range")))
+            part.parse::<i64>()
+                .map_err(|_| CodecError::out_of_range(format!("INTERVAL `{text}` is out of range")))
         };
-        let (year_sign, ym) = split_sign(ym);
-        let (y, mo) = ym.split_once('-').ok_or_else(bad)?;
-        let months = unsigned(y)?
+        let (year_sign, year_month) = split_sign(year_month);
+        let (years, month_part) = year_month.split_once('-').ok_or_else(invalid)?;
+        let months = unsigned(years)?
             .checked_mul(12)
-            .and_then(|m| m.checked_add(unsigned(mo).ok()?))
-            .map(|m| year_sign * m);
-        let (day_sign, d) = split_sign(d);
-        let days = day_sign * unsigned(d)?;
-        let (time_sign, hms) = split_sign(hms);
-        let mut it = hms.splitn(3, ':');
-        let (h, mi, sec) = match (it.next(), it.next(), it.next()) {
-            (Some(h), Some(m), Some(s)) => (h, m, s),
-            _ => return Err(bad()),
+            .and_then(|months| months.checked_add(unsigned(month_part).ok()?))
+            .map(|months| year_sign * months);
+        let (day_sign, day_part) = split_sign(day_part);
+        let days = day_sign * unsigned(day_part)?;
+        let (time_sign, time_part) = split_sign(time_part);
+        let mut pieces = time_part.splitn(3, ':');
+        let (hours, minutes, seconds) = match (pieces.next(), pieces.next(), pieces.next()) {
+            (Some(hours), Some(minutes), Some(seconds)) => (hours, minutes, seconds),
+            _ => return Err(invalid()),
         };
-        let (sec, frac) = sec.split_once('.').unwrap_or((sec, ""));
-        if frac.len() > 6 || (!frac.is_empty() && !frac.bytes().all(|c| c.is_ascii_digit())) {
-            return Err(bad());
+        let (seconds, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+        if fraction.len() > 6
+            || (!fraction.is_empty() && !fraction.bytes().all(|digit| digit.is_ascii_digit()))
+        {
+            return Err(invalid());
         }
-        let frac_micros = if frac.is_empty() {
+        let fraction_micros = if fraction.is_empty() {
             0
         } else {
-            unsigned(frac)? * 10i64.pow(6 - frac.len() as u32)
+            unsigned(fraction)? * 10i64.pow(6 - fraction.len() as u32)
         };
-        let (h, mi, sec) = (unsigned(h)?, unsigned(mi)?, unsigned(sec)?);
+        let (hours, minutes, seconds) = (unsigned(hours)?, unsigned(minutes)?, unsigned(seconds)?);
         let too_long = || {
             CodecError::out_of_range(format!(
-                "INTERVAL `{s}`: the time part does not fit in i64 nanoseconds"
+                "INTERVAL `{text}`: the time part does not fit in i64 nanoseconds"
             ))
         };
-        let nanos = h
+        let nanos = hours
             .checked_mul(3600)
-            .and_then(|x| x.checked_add(mi.checked_mul(60)?))
-            .and_then(|x| x.checked_add(sec))
-            .and_then(|x| x.checked_mul(1_000_000))
-            .and_then(|us| us.checked_add(frac_micros))
-            .and_then(|us| us.checked_mul(1000))
+            .and_then(|total| total.checked_add(minutes.checked_mul(60)?))
+            .and_then(|total| total.checked_add(seconds))
+            .and_then(|total| total.checked_mul(1_000_000))
+            .and_then(|micros| micros.checked_add(fraction_micros))
+            .and_then(|micros| micros.checked_mul(1000))
             .ok_or_else(too_long)?;
-        let narrow = |v: Option<i64>| {
-            v.and_then(|v| i32::try_from(v).ok())
-                .ok_or_else(|| CodecError::out_of_range(format!("INTERVAL `{s}` is out of range")))
+        let narrow = |value: Option<i64>| {
+            value
+                .and_then(|value| i32::try_from(value).ok())
+                .ok_or_else(|| {
+                    CodecError::out_of_range(format!("INTERVAL `{text}` is out of range"))
+                })
         };
         Ok(BigQueryInterval {
             months: narrow(months)?,
@@ -122,27 +142,27 @@ fn split_sign(part: &str) -> (i64, &str) {
 impl TryFrom<BigQueryInterval> for jiff::Span {
     type Error = BigQueryError;
 
-    fn try_from(iv: BigQueryInterval) -> Result<Self, Self::Error> {
+    fn try_from(interval: BigQueryInterval) -> Result<Self, Self::Error> {
         let signs = [
-            i64::from(iv.months).signum(),
-            i64::from(iv.days).signum(),
-            iv.nanos.signum(),
+            i64::from(interval.months).signum(),
+            i64::from(interval.days).signum(),
+            interval.nanos.signum(),
         ];
         if signs.contains(&1) && signs.contains(&-1) {
             return Err(CodecError::out_of_range(format!(
-                "{iv:?} has parts of both signs, which a jiff::Span cannot hold"
+                "{interval:?} has parts of both signs, which a jiff::Span cannot hold"
             ))
             .into_deserialize());
         }
         let beyond = |err: jiff::Error| {
-            CodecError::out_of_range(format!("{iv:?} does not fit a jiff::Span: {err}"))
+            CodecError::out_of_range(format!("{interval:?} does not fit a jiff::Span: {err}"))
                 .into_deserialize()
         };
         jiff::Span::new()
-            .try_months(iv.months)
-            .and_then(|span| span.try_days(iv.days))
-            .and_then(|span| span.try_seconds(iv.nanos / NANOS_PER_SECOND))
-            .and_then(|span| span.try_nanoseconds(iv.nanos % NANOS_PER_SECOND))
+            .try_months(interval.months)
+            .and_then(|span| span.try_days(interval.days))
+            .and_then(|span| span.try_seconds(interval.nanos / NANOS_PER_SECOND))
+            .and_then(|span| span.try_nanoseconds(interval.nanos % NANOS_PER_SECOND))
             .map_err(beyond)
     }
 }
@@ -176,53 +196,47 @@ impl TryFrom<jiff::Span> for BigQueryInterval {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn bq_text(iv: &BigQueryInterval) -> String {
-        let mut out = String::new();
-        iv.write_bq(&mut out);
-        out
-    }
-
-    fn kind<T: std::fmt::Debug>(result: Result<T, CodecError>) -> BigQueryCodecErrorKind {
-        match result.map_err(CodecError::into_serialize) {
-            Err(BigQueryError::SerializeError(err)) => err.kind,
-            other => panic!("expected a codec error, got {other:?}"),
-        }
-    }
+    use crate::types::testkit::{error_kind, written};
 
     #[test]
     fn interval_canonical_string_round_trips() {
-        let iv = BigQueryInterval {
+        let interval = BigQueryInterval {
             months: 14,
             days: 3,
             nanos: (4 * 3600 + 5 * 60 + 6) * 1_000_000_000 + 789_000,
         };
-        assert_eq!(bq_text(&iv), "1-2 3 4:5:6.000789");
+        assert_eq!(
+            written(|text| interval.write_bq(text)),
+            "1-2 3 4:5:6.000789"
+        );
         assert_eq!(
             BigQueryInterval::parse_bq("1-2 3 4:5:6.000789").ok(),
-            Some(iv)
+            Some(interval)
         );
         let mixed = BigQueryInterval {
             months: -14,
             days: 3,
             nanos: -6_000_000_000,
         };
-        assert_eq!(bq_text(&mixed), "-1-2 3 -0:0:6");
+        assert_eq!(written(|text| mixed.write_bq(text)), "-1-2 3 -0:0:6");
         assert_eq!(
             BigQueryInterval::parse_bq("-1-2 3 -0:0:6").ok(),
             Some(mixed)
         );
-        assert_eq!(bq_text(&BigQueryInterval::default()), "0-0 0 0:0:0");
+        assert_eq!(
+            written(|text| BigQueryInterval::default().write_bq(text)),
+            "0-0 0 0:0:0"
+        );
         assert_eq!(
             BigQueryInterval::parse_bq("0-0 0 0:0:0").ok(),
             Some(BigQueryInterval::default())
         );
         assert_eq!(
-            kind(BigQueryInterval::parse_bq("1-2 3")),
+            error_kind(BigQueryInterval::parse_bq("1-2 3")),
             BigQueryCodecErrorKind::InvalidText
         );
         assert_eq!(
-            kind(BigQueryInterval::parse_bq("1-2 3 4:5:6.0000001")),
+            error_kind(BigQueryInterval::parse_bq("1-2 3 4:5:6.0000001")),
             BigQueryCodecErrorKind::InvalidText
         );
     }
@@ -230,7 +244,7 @@ mod tests {
     #[test]
     fn interval_time_part_beyond_i64_nanos_is_an_error() {
         assert_eq!(
-            kind(BigQueryInterval::parse_bq("0-0 0 87840000:0:0")),
+            error_kind(BigQueryInterval::parse_bq("0-0 0 87840000:0:0")),
             BigQueryCodecErrorKind::OutOfRange
         );
         let max = BigQueryInterval {
@@ -238,20 +252,23 @@ mod tests {
             days: 0,
             nanos: 9_223_372_036_854_775_000,
         };
-        assert_eq!(BigQueryInterval::parse_bq(&bq_text(&max)).ok(), Some(max));
+        assert_eq!(
+            BigQueryInterval::parse_bq(&written(|text| max.write_bq(text))).ok(),
+            Some(max)
+        );
     }
 
     #[test]
     fn interval_converts_to_span_only_with_one_sign() {
-        let iv = BigQueryInterval {
+        let interval = BigQueryInterval {
             months: 14,
             days: 3,
             nanos: 3_600_000_001_000,
         };
-        let span = jiff::Span::try_from(iv).expect("valid test input");
+        let span = jiff::Span::try_from(interval).expect("valid test input");
         assert_eq!(span.get_months(), 14);
         assert_eq!(span.get_days(), 3);
-        assert_eq!(BigQueryInterval::try_from(span).ok(), Some(iv));
+        assert_eq!(BigQueryInterval::try_from(span).ok(), Some(interval));
 
         let negative = BigQueryInterval {
             months: -1,
@@ -302,16 +319,16 @@ mod tests {
 
     #[test]
     fn interval_serde_form_is_a_struct_of_three_integers() {
-        let iv = BigQueryInterval {
+        let interval = BigQueryInterval {
             months: 1,
             days: -2,
             nanos: 3,
         };
-        let json = serde_json::to_string(&iv).expect("valid test input");
+        let json = serde_json::to_string(&interval).expect("valid test input");
         assert_eq!(json, r#"{"months":1,"days":-2,"nanos":3}"#);
         assert_eq!(
             serde_json::from_str::<BigQueryInterval>(&json).expect("valid test input"),
-            iv
+            interval
         );
     }
 }

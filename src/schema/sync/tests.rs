@@ -2,12 +2,11 @@
 //! precondition, and what it refuses to send.
 
 use crate::db::fake::query::job_reference;
+use crate::db::fake::table::v2_field;
 use crate::db::fake::{FakeBigQuery, FakeCall};
+use crate::db::fake::{ORDERS, SHOP};
 use crate::errors::BigQueryError;
-use crate::{
-    BigQueryDatasetId, BigQueryDroppedData, BigQueryRecreateMethod, BigQueryRefusal,
-    BigQueryTableId, BigQueryTableRef,
-};
+use crate::{BigQueryDroppedData, BigQueryRecreateMethod, BigQueryRefusal};
 use gcloud_sdk::google::cloud::bigquery::v2::{
     self as v2, ListRowAccessPoliciesResponse, QueryResponse, RowAccessPolicy,
     RowAccessPolicyReference,
@@ -17,20 +16,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-fn orders() -> BigQueryTableRef {
-    BigQueryDatasetId::from_static("shop").table(BigQueryTableId::from_static("orders"))
-}
-
-fn v2_field(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
-    v2::TableFieldSchema {
-        name: name.into(),
-        r#type: ty.into(),
-        mode: mode.into(),
-        ..Default::default()
-    }
-}
-
-/// `id INTEGER REQUIRED, name STRING, n INTEGER, x STRING`, label `old: x`, 5 rows, etag `e0`.
+/// `id INTEGER REQUIRED, name STRING, quantity INTEGER, note STRING`, label `owner: billing`, 5
+/// rows, etag `e0`.
 fn live_table() -> v2::Table {
     v2::Table {
         etag: "e0".into(),
@@ -44,12 +31,12 @@ fn live_table() -> v2::Table {
             fields: vec![
                 v2_field("id", "INTEGER", "REQUIRED"),
                 v2_field("name", "STRING", "NULLABLE"),
-                v2_field("n", "INTEGER", "NULLABLE"),
-                v2_field("x", "STRING", "NULLABLE"),
+                v2_field("quantity", "INTEGER", "NULLABLE"),
+                v2_field("note", "STRING", "NULLABLE"),
             ],
             ..Default::default()
         }),
-        labels: HashMap::from([("old".to_string(), "x".to_string())]),
+        labels: HashMap::from([("owner".to_string(), "billing".to_string())]),
         num_rows: Some(5),
         num_bytes: Some(160),
         ..Default::default()
@@ -74,9 +61,9 @@ impl Scenario {
 
     /// The table a write returns: its body under a fresh etag.
     fn written(&self, body: Option<v2::Table>) -> v2::Table {
-        let n = self.etags.fetch_add(1, Ordering::SeqCst);
+        let etag_number = self.etags.fetch_add(1, Ordering::SeqCst);
         v2::Table {
-            etag: format!("e{n}"),
+            etag: format!("e{etag_number}"),
             ..body.unwrap_or_default()
         }
     }
@@ -150,13 +137,13 @@ async fn sync_writes_in_fixed_order_with_the_read_etag_as_precondition() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| {
-            c.fields([
-                c.field("id").int64().required(),
-                c.field("name2").string().renamed_from("name"),
-                c.field("n").numeric(),
-                c.field("c").string().default_value("'z'"),
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("name2").string().renamed_from("name"),
+                columns.field("quantity").numeric(),
+                columns.field("status").string().default_value("'new'"),
             ])
         })
         .allow_widening()
@@ -172,14 +159,16 @@ async fn sync_writes_in_fixed_order_with_the_read_etag_as_precondition() {
             "PatchTable if-match=e1".into(),
             "UpdateTable if-match=e2".into(),
             format!("Query ALTER TABLE {TABLE_SQL} RENAME COLUMN `name` TO `name2`"),
-            format!("Query ALTER TABLE {TABLE_SQL} ALTER COLUMN `n` SET DATA TYPE NUMERIC"),
-            format!("Query ALTER TABLE {TABLE_SQL} DROP COLUMN `x`"),
+            format!("Query ALTER TABLE {TABLE_SQL} ALTER COLUMN `quantity` SET DATA TYPE NUMERIC"),
+            format!("Query ALTER TABLE {TABLE_SQL} DROP COLUMN `note`"),
         ]
     );
     assert_eq!(report.applied.len(), 5, "{report}");
     assert_eq!(
         report.dropped_data,
-        [BigQueryDroppedData::Column { column: "x".into() }]
+        [BigQueryDroppedData::Column {
+            column: "note".into()
+        }]
     );
 }
 
@@ -192,13 +181,13 @@ async fn a_stale_etag_is_a_conflict_and_stops_the_sync() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| {
-            c.fields([
-                c.field("id").int64().required(),
-                c.field("name").string(),
-                c.field("n").int64(),
-                c.field("new").string(),
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("name").string(),
+                columns.field("quantity").int64(),
+                columns.field("new").string(),
             ])
         })
         .prune_undeclared()
@@ -231,13 +220,13 @@ async fn an_impossible_change_without_an_opt_in_writes_nothing() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| {
-            c.fields([
-                c.field("id").int64().required(),
-                c.field("name").string(),
-                c.field("n").string(),
-                c.field("added").string(),
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("name").string(),
+                columns.field("quantity").string(),
+                columns.field("added").string(),
             ])
         })
         .sync()
@@ -253,8 +242,13 @@ async fn recreate_if_empty_refuses_a_table_with_rows() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| c.fields([c.field("id").int64().required(), c.field("n").string()]))
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("quantity").string(),
+            ])
+        })
         .recreate_if_empty()
         .sync()
         .await;
@@ -274,8 +268,13 @@ async fn recreate_if_empty_replaces_an_empty_table_and_lists_its_policies() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| c.fields([c.field("id").int64().required(), c.field("n").string()]))
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("quantity").string(),
+            ])
+        })
         .prune_undeclared()
         .recreate_if_empty()
         .sync()
@@ -288,7 +287,7 @@ async fn recreate_if_empty_replaces_an_empty_table_and_lists_its_policies() {
             "ListRowAccessPolicies shop.orders".into(),
             format!(
                 "Query CREATE OR REPLACE TABLE {TABLE_SQL} (\n  `id` INT64 NOT NULL,\n  \
-                 `n` STRING\n)"
+                 `quantity` STRING\n)"
             ),
         ]
     );
@@ -305,8 +304,13 @@ async fn a_dangerous_partitioning_change_snapshots_then_drops_and_creates() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| c.fields([c.field("id").int64().required(), c.field("day").date()]))
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("day").date(),
+            ])
+        })
         .partition_by_day("day")
         .prune_undeclared()
         .dangerously_recreate_with_data_loss()
@@ -356,8 +360,8 @@ async fn a_missing_table_is_created_with_insert_table() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| c.fields([c.field("id").int64().required()]))
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| columns.fields([columns.field("id").int64().required()]))
         .description("Orders")
         .sync()
         .await
@@ -377,13 +381,13 @@ async fn plan_only_reads() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| {
-            c.fields([
-                c.field("id").int64().required(),
-                c.field("name").string(),
-                c.field("n").int64(),
-                c.field("new").string(),
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("name").string(),
+                columns.field("quantity").int64(),
+                columns.field("new").string(),
             ])
         })
         .prune_undeclared()
@@ -401,12 +405,12 @@ async fn withheld_changes_are_reported_and_not_sent() {
         .db
         .fluent()
         .schema()
-        .table(orders())
-        .columns(|c| {
-            c.fields([
-                c.field("id").int64().required(),
-                c.field("name").string(),
-                c.field("n").numeric(),
+        .table(SHOP.table(ORDERS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("id").int64().required(),
+                columns.field("name").string(),
+                columns.field("quantity").numeric(),
             ])
         })
         .sync()
@@ -417,25 +421,32 @@ async fn withheld_changes_are_reported_and_not_sent() {
     assert_eq!(
         report.withheld.len(),
         3,
-        "widen n, drop x, remove label old: {report}"
+        "widen quantity, drop note, remove label owner: {report}"
     );
 }
 
 #[tokio::test]
 async fn an_invalid_declaration_is_refused_before_any_request() {
     let fake = start(Scenario::new(Some(live_table()))).await;
-    for columns in [vec!["a.b"], vec![""], vec!["a\u{0}b"], vec!["dup", "DUP"]] {
+    for names in [
+        vec!["order.total"],
+        vec![""],
+        vec!["note\u{0}text"],
+        vec!["status", "STATUS"],
+    ] {
         let result = fake
             .db
             .fluent()
             .schema()
-            .table(orders())
-            .columns(|c| c.fields(columns.iter().map(|name| c.field(*name).string())))
+            .table(SHOP.table(ORDERS))
+            .columns(|columns| {
+                columns.fields(names.iter().map(|name| columns.field(*name).string()))
+            })
             .sync()
             .await;
         assert!(
             matches!(result, Err(BigQueryError::InvalidParametersError(_))),
-            "{columns:?}: {result:?}"
+            "{names:?}: {result:?}"
         );
     }
     assert!(fake.calls().is_empty(), "{:?}", fake.calls());

@@ -14,171 +14,192 @@ pub(crate) const TAG_DECIMAL: &str = "BigQueryDecimal";
 
 /// Writes the magnitude `digits` with the point `scale` digits from the right and trailing
 /// fractional zeros removed.
-fn place_point(neg: bool, digits: &[u8], scale: usize, out: &mut String) {
-    if neg {
+fn place_point(negative: bool, digits: &[u8], scale: usize, out: &mut String) {
+    if negative {
         out.push('-');
     }
-    let (int, frac) = if digits.len() > scale {
+    let (integer_digits, fraction_digits) = if digits.len() > scale {
         digits.split_at(digits.len() - scale)
     } else {
         (&b"0"[..], digits)
     };
-    int.iter().for_each(|&c| out.push(char::from(c)));
-    let pad = scale - frac.len();
-    let mut f = frac;
-    while let [rest @ .., b'0'] = f {
-        f = rest;
+    integer_digits
+        .iter()
+        .for_each(|&digit| out.push(char::from(digit)));
+    let padding = scale - fraction_digits.len();
+    let mut trimmed = fraction_digits;
+    while let [rest @ .., b'0'] = trimmed {
+        trimmed = rest;
     }
-    if !f.is_empty() {
+    if !trimmed.is_empty() {
         out.push('.');
-        (0..pad).for_each(|_| out.push('0'));
-        f.iter().for_each(|&c| out.push(char::from(c)));
+        (0..padding).for_each(|_| out.push('0'));
+        trimmed
+            .iter()
+            .for_each(|&digit| out.push(char::from(digit)));
     }
 }
 
 /// The canonical text of an unscaled value at `scale`: no exponent, no trailing fractional
 /// zeros, and `0` for zero.
-pub(crate) fn fmt_decimal_i128(v: i128, scale: u32, out: &mut String) {
-    if v == 0 {
+pub(crate) fn fmt_decimal_i128(unscaled: i128, scale: u32, out: &mut String) {
+    if unscaled == 0 {
         out.push('0');
         return;
     }
-    let mut buf = [0u8; 40];
-    let mut i = buf.len();
-    let mut m = v.unsigned_abs();
-    while m > 0 {
-        i -= 1;
-        buf[i] = b'0' + (m % 10) as u8;
-        m /= 10;
+    let mut buffer = [0u8; 40];
+    let mut index = buffer.len();
+    let mut remaining = unscaled.unsigned_abs();
+    while remaining > 0 {
+        index -= 1;
+        buffer[index] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
     }
-    place_point(v < 0, &buf[i..], scale as usize, out);
+    place_point(unscaled < 0, &buffer[index..], scale as usize, out);
 }
 
 /// [`fmt_decimal_i128`] for the full `i256` range.
-pub(crate) fn fmt_decimal_i256(v: i256, scale: u32, out: &mut String) {
-    if let Some(small) = v.to_i128() {
+pub(crate) fn fmt_decimal_i256(unscaled: i256, scale: u32, out: &mut String) {
+    if let Some(small) = unscaled.to_i128() {
         return fmt_decimal_i128(small, scale, out);
     }
-    let s = v.to_string();
-    let (neg, mag) = match s.strip_prefix('-') {
-        Some(m) => (true, m),
-        None => (false, s.as_str()),
+    let text = unscaled.to_string();
+    let (negative, magnitude) = match text.strip_prefix('-') {
+        Some(magnitude) => (true, magnitude),
+        None => (false, text.as_str()),
     };
-    place_point(neg, mag.as_bytes(), scale as usize, out);
+    place_point(negative, magnitude.as_bytes(), scale as usize, out);
+}
+
+/// [`fmt_decimal_i256`] into a new `String`.
+pub(crate) fn decimal_string(unscaled: i256, scale: u32) -> String {
+    let mut text = String::new();
+    fmt_decimal_i256(unscaled, scale, &mut text);
+    text
 }
 
 /// Plain decimal text (`-123.45`, no exponent) as an unscaled integer at `scale`. More
 /// fractional digits than `scale` is `OutOfRange`, never a rounding.
-fn parse_decimal(s: &str, scale: u32) -> Result<i256, CodecError> {
-    let bad = || {
+fn parse_decimal(text: &str, scale: u32) -> Result<i256, CodecError> {
+    let invalid = || {
         CodecError::new(
             BigQueryCodecErrorKind::InvalidText,
-            format!("invalid decimal `{s}`, expected plain decimal text such as -123.45"),
+            format!("invalid decimal `{text}`, expected plain decimal text such as -123.45"),
         )
     };
-    let (neg, body) = match s.as_bytes().first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
+    let (negative, body) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
     };
-    let (int, frac) = body.split_once('.').unwrap_or((body, ""));
-    if int.is_empty() && frac.is_empty() {
-        return Err(bad());
+    let (integer_digits, fraction_digits) = body.split_once('.').unwrap_or((body, ""));
+    if integer_digits.is_empty() && fraction_digits.is_empty() {
+        return Err(invalid());
     }
-    if !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
-        return Err(bad());
+    if !integer_digits
+        .bytes()
+        .chain(fraction_digits.bytes())
+        .all(|digit| digit.is_ascii_digit())
+    {
+        return Err(invalid());
     }
-    if frac.len() > scale as usize {
+    if fraction_digits.len() > scale as usize {
         return Err(CodecError::out_of_range(format!(
-            "decimal `{s}` has more than {scale} fractional digits"
+            "decimal `{text}` has more than {scale} fractional digits"
         )));
     }
     let ten = i256::from_i128(10);
-    let mut acc = i256::ZERO;
-    let pad = scale as usize - frac.len();
-    for c in int
+    let mut accumulated = i256::ZERO;
+    let padding = scale as usize - fraction_digits.len();
+    for digit in integer_digits
         .bytes()
-        .chain(frac.bytes())
-        .chain(std::iter::repeat_n(b'0', pad))
+        .chain(fraction_digits.bytes())
+        .chain(std::iter::repeat_n(b'0', padding))
     {
-        let d = i256::from_i128(i128::from(c - b'0'));
+        let digit = i256::from_i128(i128::from(digit - b'0'));
         // Accumulated as a negative number so that i256::MIN is reachable.
-        acc = acc
+        accumulated = accumulated
             .checked_mul(ten)
-            .and_then(|a| a.checked_sub(d))
-            .ok_or_else(|| CodecError::out_of_range(format!("decimal `{s}` is out of range")))?;
+            .and_then(|accumulated| accumulated.checked_sub(digit))
+            .ok_or_else(|| CodecError::out_of_range(format!("decimal `{text}` is out of range")))?;
     }
-    if neg {
-        Ok(acc)
+    if negative {
+        Ok(accumulated)
     } else {
-        acc.checked_neg()
-            .ok_or_else(|| CodecError::out_of_range(format!("decimal `{s}` is out of range")))
+        accumulated
+            .checked_neg()
+            .ok_or_else(|| CodecError::out_of_range(format!("decimal `{text}` is out of range")))
     }
 }
 
 /// NUMERIC text as its unscaled value at scale 9, within 29 integer digits.
-pub(crate) fn parse_numeric(s: &str) -> Result<i256, CodecError> {
-    let v = parse_decimal(s, NUMERIC_SCALE)?;
-    let lim = i256::from_i128(10i128.pow(38));
-    if v >= lim || v <= lim.wrapping_neg() {
+pub(crate) fn parse_numeric(text: &str) -> Result<i256, CodecError> {
+    numeric_in_range(parse_decimal(text, NUMERIC_SCALE)?)
+}
+
+/// `unscaled` at scale 9 when it is within NUMERIC's 29 integer digits, `OutOfRange` otherwise.
+pub(crate) fn numeric_in_range(unscaled: i256) -> Result<i256, CodecError> {
+    let limit = i256::from_i128(10i128.pow(38));
+    if unscaled >= limit || unscaled <= limit.wrapping_neg() {
         return Err(CodecError::out_of_range(format!(
-            "NUMERIC `{s}` has more than 29 integer digits"
+            "NUMERIC {} has more than 29 integer digits",
+            decimal_string(unscaled, NUMERIC_SCALE)
         )));
     }
-    Ok(v)
+    Ok(unscaled)
 }
 
 /// BIGNUMERIC text as its unscaled value at scale 38, within the `i256` range.
-pub(crate) fn parse_bignumeric(s: &str) -> Result<i256, CodecError> {
-    parse_decimal(s, BIGNUMERIC_SCALE)
+pub(crate) fn parse_bignumeric(text: &str) -> Result<i256, CodecError> {
+    parse_decimal(text, BIGNUMERIC_SCALE)
 }
 
-/// The decimal nearest to `x`, rounded at `scale`; `OutOfRange` for NaN and infinities.
-pub(crate) fn decimal_from_f64(x: f64, scale: u32) -> Result<i256, CodecError> {
-    if !x.is_finite() {
+/// The decimal nearest to `float`, rounded at `scale`; `OutOfRange` for NaN and infinities.
+pub(crate) fn decimal_from_f64(float: f64, scale: u32) -> Result<i256, CodecError> {
+    if !float.is_finite() {
         return Err(CodecError::out_of_range(format!(
-            "{x} has no NUMERIC or BIGNUMERIC value"
+            "{float} has no NUMERIC or BIGNUMERIC value"
         )));
     }
-    let mut s = format!("{x:.*}", scale as usize);
-    if s.contains('.') {
-        while s.ends_with('0') {
-            s.pop();
+    let mut text = format!("{float:.*}", scale as usize);
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
         }
-        if s.ends_with('.') {
-            s.pop();
+        if text.ends_with('.') {
+            text.pop();
         }
     }
-    parse_decimal(&s, scale)
+    parse_decimal(&text, scale)
 }
 
 /// NUMERIC and BIGNUMERIC Storage Write bytes, as Google's `BigDecimalByteStringEncoder` writes
 /// them: the unscaled value in minimal little-endian two's complement. The value is
-/// `buf[..len]`.
-pub(crate) fn decimal_le_bytes(v: i256) -> ([u8; 32], usize) {
-    let le = v.to_le_bytes();
-    let mut len = 32;
-    while len > 1 {
-        let top = le[len - 1];
-        let next_sign = le[len - 2] & 0x80;
+/// the array's first `length` bytes, for the returned `(array, length)`.
+pub(crate) fn decimal_le_bytes(unscaled: i256) -> ([u8; 32], usize) {
+    let little_endian = unscaled.to_le_bytes();
+    let mut length = 32;
+    while length > 1 {
+        let top = little_endian[length - 1];
+        let next_sign = little_endian[length - 2] & 0x80;
         if (top == 0x00 && next_sign == 0) || (top == 0xff && next_sign != 0) {
-            len -= 1;
+            length -= 1;
         } else {
             break;
         }
     }
-    (le, len)
+    (little_endian, length)
 }
 
 /// The inverse of [`decimal_le_bytes`]: little-endian two's complement of up to 32 bytes,
 /// sign-extended. Bytes beyond 32 are ignored. The tests read written bytes back with it.
 #[cfg(test)]
 pub(crate) fn decimal_from_le_bytes(bytes: &[u8]) -> i256 {
-    let negative = bytes.last().is_some_and(|b| b & 0x80 != 0);
-    let mut buf = if negative { [0xff; 32] } else { [0; 32] };
-    let n = bytes.len().min(32);
-    buf[..n].copy_from_slice(&bytes[..n]);
-    i256::from_le_bytes(buf)
+    let negative = bytes.last().is_some_and(|byte| byte & 0x80 != 0);
+    let mut buffer = if negative { [0xff; 32] } else { [0; 32] };
+    let length = bytes.len().min(32);
+    buffer[..length].copy_from_slice(&bytes[..length]);
+    i256::from_le_bytes(buffer)
 }
 
 /// A NUMERIC or BIGNUMERIC value held in any decimal type that round-trips through its
@@ -229,12 +250,15 @@ where
         f.write_str("decimal text")
     }
 
-    fn visit_newtype_struct<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_str(self)
+    fn visit_newtype_struct<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_str(self)
     }
 
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        v.parse().map(BigQueryDecimal).map_err(E::custom)
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+        text.parse().map(BigQueryDecimal).map_err(E::custom)
     }
 }
 
@@ -296,19 +320,7 @@ pub mod serialize_as_optional_decimal {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn written<F: Fn(&mut String)>(f: F) -> String {
-        let mut out = String::new();
-        f(&mut out);
-        out
-    }
-
-    fn kind<T: std::fmt::Debug>(result: Result<T, CodecError>) -> BigQueryCodecErrorKind {
-        match result.map_err(CodecError::into_serialize) {
-            Err(crate::errors::BigQueryError::SerializeError(err)) => err.kind,
-            other => panic!("expected a codec error, got {other:?}"),
-        }
-    }
+    use crate::types::testkit::{error_kind, written};
 
     const I256_MAX_AT_38: &str =
         "578960446186580977117854925043439539266.34992332820282019728792003956564819967";
@@ -318,22 +330,28 @@ mod tests {
     #[test]
     fn decimals_format_trimmed_and_parse_at_scale() {
         assert_eq!(
-            written(|o| fmt_decimal_i128(123_450_000_000, 9, o)),
+            written(|text| fmt_decimal_i128(123_450_000_000, 9, text)),
             "123.45"
         );
-        assert_eq!(written(|o| fmt_decimal_i128(-1, 9, o)), "-0.000000001");
-        assert_eq!(written(|o| fmt_decimal_i128(0, 9, o)), "0");
-        assert_eq!(written(|o| fmt_decimal_i128(5_000_000_000, 9, o)), "5");
         assert_eq!(
-            written(|o| fmt_decimal_i128(i128::pow(10, 38) - 1, 9, o)),
+            written(|text| fmt_decimal_i128(-1, 9, text)),
+            "-0.000000001"
+        );
+        assert_eq!(written(|text| fmt_decimal_i128(0, 9, text)), "0");
+        assert_eq!(
+            written(|text| fmt_decimal_i128(5_000_000_000, 9, text)),
+            "5"
+        );
+        assert_eq!(
+            written(|text| fmt_decimal_i128(i128::pow(10, 38) - 1, 9, text)),
             "99999999999999999999999999999.999999999"
         );
         assert_eq!(
-            written(|o| fmt_decimal_i256(i256::MAX, 38, o)),
+            written(|text| fmt_decimal_i256(i256::MAX, 38, text)),
             I256_MAX_AT_38
         );
         assert_eq!(
-            written(|o| fmt_decimal_i256(i256::MIN, 38, o)),
+            written(|text| fmt_decimal_i256(i256::MIN, 38, text)),
             I256_MIN_AT_38
         );
 
@@ -351,12 +369,12 @@ mod tests {
         );
         assert_eq!(parse_numeric(".5").ok(), Some(i256::from_i128(500_000_000)));
         assert_eq!(
-            kind(parse_numeric("0.0000000001")),
+            error_kind(parse_numeric("0.0000000001")),
             BigQueryCodecErrorKind::OutOfRange,
             "more digits than the scale"
         );
         assert_eq!(
-            kind(parse_numeric("100000000000000000000000000000")),
+            error_kind(parse_numeric("100000000000000000000000000000")),
             BigQueryCodecErrorKind::OutOfRange,
             "30 integer digits"
         );
@@ -365,18 +383,21 @@ mod tests {
             Some(i256::from_i128(i128::pow(10, 38) - 1))
         );
         assert_eq!(
-            kind(parse_numeric("1e5")),
+            error_kind(parse_numeric("1e5")),
             BigQueryCodecErrorKind::InvalidText
         );
-        assert_eq!(kind(parse_numeric("")), BigQueryCodecErrorKind::InvalidText);
         assert_eq!(
-            kind(parse_numeric("-")),
+            error_kind(parse_numeric("")),
+            BigQueryCodecErrorKind::InvalidText
+        );
+        assert_eq!(
+            error_kind(parse_numeric("-")),
             BigQueryCodecErrorKind::InvalidText
         );
         assert_eq!(parse_bignumeric(I256_MIN_AT_38).ok(), Some(i256::MIN));
         assert_eq!(parse_bignumeric(I256_MAX_AT_38).ok(), Some(i256::MAX));
         assert_eq!(
-            kind(parse_bignumeric(
+            error_kind(parse_bignumeric(
                 "578960446186580977117854925043439539266.34992332820282019728792003956564819968"
             )),
             BigQueryCodecErrorKind::OutOfRange
@@ -395,36 +416,36 @@ mod tests {
             Some(i256::from_i128(123_456_789))
         );
         assert_eq!(
-            kind(decimal_from_f64(f64::NAN, 9)),
+            error_kind(decimal_from_f64(f64::NAN, 9)),
             BigQueryCodecErrorKind::OutOfRange
         );
         assert_eq!(
-            kind(decimal_from_f64(f64::INFINITY, 9)),
+            error_kind(decimal_from_f64(f64::INFINITY, 9)),
             BigQueryCodecErrorKind::OutOfRange
         );
     }
 
     #[test]
     fn decimal_wire_bytes_are_minimal_twos_complement() {
-        let b = |v: i256| {
-            let (buf, n) = decimal_le_bytes(v);
-            buf[..n].to_vec()
+        let wire_bytes = |unscaled: i256| {
+            let (little_endian, length) = decimal_le_bytes(unscaled);
+            little_endian[..length].to_vec()
         };
-        assert_eq!(b(i256::from_i128(0)), vec![0]);
-        assert_eq!(b(i256::from_i128(127)), vec![127]);
-        assert_eq!(b(i256::from_i128(128)), vec![128, 0]);
-        assert_eq!(b(i256::from_i128(-1)), vec![0xff]);
-        assert_eq!(b(i256::from_i128(-129)), vec![0x7f, 0xff]);
+        assert_eq!(wire_bytes(i256::from_i128(0)), vec![0]);
+        assert_eq!(wire_bytes(i256::from_i128(127)), vec![127]);
+        assert_eq!(wire_bytes(i256::from_i128(128)), vec![128, 0]);
+        assert_eq!(wire_bytes(i256::from_i128(-1)), vec![0xff]);
+        assert_eq!(wire_bytes(i256::from_i128(-129)), vec![0x7f, 0xff]);
         assert_eq!(
-            b(i256::from_i128(123_456_789_000)),
+            wire_bytes(i256::from_i128(123_456_789_000)),
             vec![0x08, 0x1a, 0x99, 0xbe, 0x1c]
         );
-        assert_eq!(b(i256::MAX).len(), 32);
-        for v in [0, 127, 128, -1, -129, 123_456_789_000, i128::MIN, i128::MAX] {
-            let v = i256::from_i128(v);
-            assert_eq!(decimal_from_le_bytes(&b(v)), v);
+        assert_eq!(wire_bytes(i256::MAX).len(), 32);
+        for unscaled in [0, 127, 128, -1, -129, 123_456_789_000, i128::MIN, i128::MAX] {
+            let unscaled = i256::from_i128(unscaled);
+            assert_eq!(decimal_from_le_bytes(&wire_bytes(unscaled)), unscaled);
         }
-        assert_eq!(decimal_from_le_bytes(&b(i256::MIN)), i256::MIN);
+        assert_eq!(decimal_from_le_bytes(&wire_bytes(i256::MIN)), i256::MIN);
     }
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]

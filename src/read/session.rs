@@ -143,8 +143,8 @@ impl BigQueryDb {
             read_session: Some(ReadSession {
                 table: params.table.table_path(project_id),
                 data_format: DataFormat::Arrow.into(),
-                table_modifiers: params.snapshot_time.map(|t| TableModifiers {
-                    snapshot_time: Some(proto_timestamp(t)),
+                table_modifiers: params.snapshot_time.map(|instant| TableModifiers {
+                    snapshot_time: Some(proto_timestamp(instant)),
                 }),
                 read_options: Some(TableReadOptions {
                     selected_fields,
@@ -212,8 +212,8 @@ impl From<BigQueryReadCompression> for CompressionCodec {
     }
 }
 
-fn proto_timestamp(t: BigQueryInstant) -> gcloud_sdk::prost_types::Timestamp {
-    let (mut seconds, mut nanos) = (t.as_second(), t.subsec_nanosecond());
+fn proto_timestamp(instant: BigQueryInstant) -> gcloud_sdk::prost_types::Timestamp {
+    let (mut seconds, mut nanos) = (instant.as_second(), instant.subsec_nanosecond());
     // protobuf's nanos are never negative; jiff's take the sign of the timestamp.
     if nanos < 0 {
         seconds -= 1;

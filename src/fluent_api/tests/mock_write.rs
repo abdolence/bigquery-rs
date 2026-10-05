@@ -3,16 +3,15 @@
 use crate::fluent_api::tests::mockdb::MockDatabase;
 use crate::fluent_api::BigQueryExprBuilder;
 use crate::{
-    BigQueryChange, BigQueryChangeSequenceNumber, BigQueryChangeType, BigQueryDatasetId,
-    BigQueryDatasetRef, BigQueryInsertParams, BigQueryResult, BigQueryStreamingWriteOptions,
-    BigQueryTableId, BigQueryWriteMode, BigQueryWriteSummary, BigQueryWriteSupport,
+    BigQueryChange, BigQueryChangeSequenceNumber, BigQueryChangeType, BigQueryDatasetRef,
+    BigQueryInsertParams, BigQueryResult, BigQueryStreamingWriteOptions, BigQueryWriteMode,
+    BigQueryWriteSummary, BigQueryWriteSupport,
 };
 use async_trait::async_trait;
 use serde::Serialize;
 use std::cell::RefCell;
 
-const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+use crate::db::fake::{ORDERS, SHOP};
 
 /// One insert as the mock saw it: rows as JSON, and for CDC each change's type and sequence.
 #[derive(Debug, Clone, PartialEq)]

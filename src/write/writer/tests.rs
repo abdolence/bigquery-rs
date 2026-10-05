@@ -5,10 +5,7 @@ use crate::db::fake::write::{
 use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::BigQueryWriteStreamName;
-use crate::{
-    BigQueryDatasetId, BigQueryStreamingWriteOptions, BigQueryTableId, BigQueryWriteMode,
-    BigQueryWriteResponse,
-};
+use crate::{BigQueryStreamingWriteOptions, BigQueryWriteMode, BigQueryWriteResponse};
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::table_field_schema::{Mode, Type};
@@ -23,8 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+use crate::db::fake::{ORDERS, SHOP};
 
 #[derive(Serialize)]
 struct Row {
@@ -52,9 +48,9 @@ async fn within<F: Future>(future: F) -> F::Output {
         .expect("the writer answers in time")
 }
 
-/// The log lines of connection `c`.
-fn on_connection(calls: &[String], c: usize) -> Vec<String> {
-    let prefix = format!("c{c} ");
+/// The log lines of connection `connection`.
+fn on_connection(calls: &[String], connection: usize) -> Vec<String> {
+    let prefix = format!("c{connection} ");
     calls
         .iter()
         .filter(|line| line.starts_with(&prefix))
@@ -111,17 +107,17 @@ async fn default_mode_resends_unacked_batches_after_reconnect() {
             let Some(mut call) = call.answer_unary(schema(&[])).await else {
                 return;
             };
-            let c = connections.fetch_add(1, Ordering::SeqCst);
-            let mut n = 0;
+            let connection = connections.fetch_add(1, Ordering::SeqCst);
+            let mut requests_seen = 0;
             while let Some(request) = call.next_request::<AppendRowsRequest>().await {
-                call.log(describe(c, &request));
-                if c == 0 && n == 1 {
+                call.log(describe(connection, &request));
+                if connection == 0 && requests_seen == 1 {
                     // The second batch's answer is lost with the connection.
                     call.drop_connection().await;
                     return;
                 }
                 call.send(&ack(None));
-                n += 1;
+                requests_seen += 1;
             }
             call.finish();
         }
@@ -146,9 +142,10 @@ async fn default_mode_resends_unacked_batches_after_reconnect() {
     let responses = collect(responses).await;
     let indexes: Vec<u64> = responses
         .iter()
-        .map(|r| {
-            r.as_ref()
-                .map(|r| r.batch_index)
+        .map(|response| {
+            response
+                .as_ref()
+                .map(|acknowledged| acknowledged.batch_index)
                 .expect("every batch is written")
         })
         .collect();
@@ -181,11 +178,11 @@ async fn committed_mode_counts_offset_already_exists_as_written() {
             let Some(mut call) = call.answer_unary(schema(&[])).await else {
                 return;
             };
-            let c = connections.fetch_add(1, Ordering::SeqCst);
+            let connection = connections.fetch_add(1, Ordering::SeqCst);
             while let Some(request) = call.next_request::<AppendRowsRequest>().await {
-                call.log(describe(c, &request));
+                call.log(describe(connection, &request));
                 let answer = end.answer(&request);
-                if c == 0 && request.offset == Some(1) {
+                if connection == 0 && request.offset == Some(1) {
                     // Written, but the answer is lost with the connection.
                     call.drop_connection().await;
                     return;
@@ -217,7 +214,11 @@ async fn committed_mode_counts_offset_already_exists_as_written() {
     let offsets: Vec<Option<i64>> = collect(responses)
         .await
         .into_iter()
-        .map(|r| r.map(|r| r.offset).expect("every batch is written"))
+        .map(|response| {
+            response
+                .map(|acknowledged| acknowledged.offset)
+                .expect("every batch is written")
+        })
         .collect();
     assert_eq!(offsets, [Some(0), Some(1), Some(2)]);
     let calls = fake.calls();
@@ -626,9 +627,9 @@ async fn relaxed_mode_reconnects() {
             let Some(mut call) = call.answer_unary(schema).await else {
                 return;
             };
-            let c = connections.fetch_add(1, Ordering::SeqCst);
+            let connection = connections.fetch_add(1, Ordering::SeqCst);
             while let Some(request) = call.next_request::<AppendRowsRequest>().await {
-                call.log(describe(c, &request));
+                call.log(describe(connection, &request));
                 call.send(&ack(None));
             }
             call.finish();

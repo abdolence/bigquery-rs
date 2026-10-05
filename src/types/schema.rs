@@ -186,7 +186,7 @@ fn storage_type(value: i32) -> Result<StorageType, CodecError> {
         Ok(StorageType::Unspecified) | Err(_) => Err(CodecError::unsupported(format!(
             "Storage API column type {value} is not supported"
         ))),
-        Ok(ty) => Ok(ty),
+        Ok(storage_type) => Ok(storage_type),
     }
 }
 
@@ -586,28 +586,13 @@ impl Display for BigQueryFieldType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fake::table::v2_field;
+    use crate::db::fake::write::column;
     use crate::errors::BigQueryCodecErrorKind;
+    use crate::types::testkit::field;
     use arrow_schema::{DataType, Field, Fields, IntervalUnit, Schema, TimeUnit};
     use std::collections::HashMap;
     use storage::table_field_schema::{Mode as StorageMode, Type as StorageType};
-
-    fn v2_field(name: &str, ty: &str, mode: &str) -> v2::TableFieldSchema {
-        v2::TableFieldSchema {
-            name: name.to_string(),
-            r#type: ty.to_string(),
-            mode: mode.to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn storage_field(name: &str, ty: StorageType, mode: StorageMode) -> storage::TableFieldSchema {
-        storage::TableFieldSchema {
-            name: name.to_string(),
-            r#type: ty.into(),
-            mode: mode.into(),
-            ..Default::default()
-        }
-    }
 
     fn v2_schema(fields: Vec<v2::TableFieldSchema>) -> BigQueryResult<BigQueryTableSchema> {
         BigQueryTableSchema::try_from(&v2::TableSchema {
@@ -620,20 +605,6 @@ mod tests {
         fields: Vec<storage::TableFieldSchema>,
     ) -> BigQueryResult<BigQueryTableSchema> {
         BigQueryTableSchema::try_from(&storage::TableSchema { fields })
-    }
-
-    fn field(
-        name: &str,
-        field_type: BigQueryFieldType,
-        mode: BigQueryFieldMode,
-    ) -> BigQueryFieldSchema {
-        BigQueryFieldSchema {
-            name: name.to_string(),
-            field_type,
-            mode,
-            description: None,
-            default_value_expression: None,
-        }
     }
 
     fn unsupported(result: BigQueryResult<BigQueryTableSchema>) -> String {
@@ -721,25 +692,29 @@ mod tests {
         ];
         for (legacy, standard, storage_type, expected) in pairs {
             let want = BigQueryTableSchema {
-                fields: vec![field("c", expected.clone(), BigQueryFieldMode::Required)],
+                fields: vec![field(
+                    "order_id",
+                    expected.clone(),
+                    BigQueryFieldMode::Required,
+                )],
             };
             assert_eq!(
-                v2_schema(vec![v2_field("c", legacy, "REQUIRED")])
+                v2_schema(vec![v2_field("order_id", legacy, "REQUIRED")])
                     .ok()
                     .as_ref(),
                 Some(&want),
                 "{legacy}"
             );
             assert_eq!(
-                v2_schema(vec![v2_field("c", standard, "required")])
+                v2_schema(vec![v2_field("order_id", standard, "required")])
                     .ok()
                     .as_ref(),
                 Some(&want),
                 "{standard}"
             );
             assert_eq!(
-                storage_schema(vec![storage_field(
-                    "c",
+                storage_schema(vec![column(
+                    "order_id",
                     storage_type,
                     StorageMode::Required
                 )])
@@ -750,19 +725,20 @@ mod tests {
             );
         }
 
-        let mut legacy_record = v2_field("rec", "RECORD", "REPEATED");
-        legacy_record.fields = vec![v2_field("a", "INTEGER", "NULLABLE")];
-        let mut storage_struct = storage_field("rec", StorageType::Struct, StorageMode::Repeated);
-        storage_struct.fields = vec![storage_field(
-            "a",
+        let mut legacy_record = v2_field("line_items", "RECORD", "REPEATED");
+        legacy_record.fields = vec![v2_field("quantity", "INTEGER", "NULLABLE")];
+        let mut storage_struct = column("line_items", StorageType::Struct, StorageMode::Repeated);
+        storage_struct.fields = vec![column(
+            "quantity",
             StorageType::Int64,
             StorageMode::Nullable,
         )];
-        let mut legacy_range = v2_field("r", "RANGE", "NULLABLE");
+        let mut legacy_range = v2_field("shipping_window", "RANGE", "NULLABLE");
         legacy_range.range_element_type = Some(v2::table_field_schema::FieldElementType {
             r#type: "DATETIME".to_string(),
         });
-        let mut storage_range = storage_field("r", StorageType::Range, StorageMode::Nullable);
+        let mut storage_range =
+            column("shipping_window", StorageType::Range, StorageMode::Nullable);
         storage_range.range_element_type = Some(storage::table_field_schema::FieldElementType {
             r#type: StorageType::Datetime.into(),
         });
@@ -773,7 +749,7 @@ mod tests {
         assert_eq!(
             from_v2.fields[0].field_type,
             BigQueryFieldType::Struct(vec![field(
-                "a",
+                "quantity",
                 BigQueryFieldType::Int64,
                 BigQueryFieldMode::Nullable
             )])
@@ -783,11 +759,11 @@ mod tests {
             BigQueryFieldType::Range(BigQueryRangeElementType::DateTime)
         );
 
-        let mut described = v2_field("s", "STRING", "NULLABLE");
+        let mut described = v2_field("details", "STRING", "NULLABLE");
         described.description = Some("a note".to_string());
         described.default_value_expression = Some("'x'".to_string());
         described.max_length = 10;
-        let mut storage_described = storage_field("s", StorageType::String, StorageMode::Nullable);
+        let mut storage_described = column("details", StorageType::String, StorageMode::Nullable);
         storage_described.description = "a note".to_string();
         storage_described.default_value_expression = "'x'".to_string();
         storage_described.max_length = 10;
@@ -815,11 +791,23 @@ mod tests {
     fn standard_names_go_out_to_v2_and_read_back_equal() {
         let schema = BigQueryTableSchema {
             fields: vec![
-                field("i", BigQueryFieldType::Int64, BigQueryFieldMode::Required),
-                field("f", BigQueryFieldType::Float64, BigQueryFieldMode::Nullable),
-                field("b", BigQueryFieldType::Bool, BigQueryFieldMode::Repeated),
                 field(
-                    "n",
+                    "order_id",
+                    BigQueryFieldType::Int64,
+                    BigQueryFieldMode::Required,
+                ),
+                field(
+                    "price",
+                    BigQueryFieldType::Float64,
+                    BigQueryFieldMode::Nullable,
+                ),
+                field(
+                    "in_stock",
+                    BigQueryFieldType::Bool,
+                    BigQueryFieldMode::Repeated,
+                ),
+                field(
+                    "total",
                     BigQueryFieldType::Numeric(Some(BigQueryDecimalParams {
                         precision: 10,
                         scale: 2,
@@ -827,14 +815,14 @@ mod tests {
                     BigQueryFieldMode::Nullable,
                 ),
                 field(
-                    "r",
+                    "shipping_window",
                     BigQueryFieldType::Range(BigQueryRangeElementType::Timestamp),
                     BigQueryFieldMode::Nullable,
                 ),
                 field(
-                    "s",
+                    "details",
                     BigQueryFieldType::Struct(vec![field(
-                        "x",
+                        "attributes",
                         BigQueryFieldType::Json,
                         BigQueryFieldMode::Nullable,
                     )]),
@@ -843,7 +831,11 @@ mod tests {
             ],
         };
         let v2 = v2::TableSchema::from(&schema);
-        let names: Vec<&str> = v2.fields.iter().map(|f| f.r#type.as_str()).collect();
+        let names: Vec<&str> = v2
+            .fields
+            .iter()
+            .map(|field| field.r#type.as_str())
+            .collect();
         assert_eq!(
             names,
             ["INT64", "FLOAT64", "BOOL", "NUMERIC", "RANGE", "STRUCT"]
@@ -854,7 +846,7 @@ mod tests {
             v2.fields[4]
                 .range_element_type
                 .as_ref()
-                .map(|e| e.r#type.as_str()),
+                .map(|element| element.r#type.as_str()),
             Some("TIMESTAMP")
         );
         assert_eq!(BigQueryTableSchema::try_from(&v2).ok(), Some(schema));
@@ -862,77 +854,87 @@ mod tests {
 
     #[test]
     fn empty_mode_is_nullable() {
-        let schema = v2_schema(vec![v2_field("c", "INT64", "")]).expect("valid test input");
+        let schema = v2_schema(vec![v2_field("order_id", "INT64", "")]).expect("valid test input");
         assert_eq!(schema.fields[0].mode, BigQueryFieldMode::Nullable);
-        let schema = storage_schema(vec![storage_field(
-            "c",
+        let schema = storage_schema(vec![column(
+            "order_id",
             StorageType::Int64,
             StorageMode::Unspecified,
         )])
         .expect("valid test input");
         assert_eq!(schema.fields[0].mode, BigQueryFieldMode::Nullable);
         assert_eq!(
-            unsupported(v2_schema(vec![v2_field("c", "INT64", "OPTIONAL")])),
-            "c"
+            unsupported(v2_schema(vec![v2_field("order_id", "INT64", "OPTIONAL")])),
+            "order_id"
         );
     }
 
     #[test]
     fn unknown_type_name_is_unsupported() {
         assert_eq!(
-            unsupported(v2_schema(vec![v2_field("c", "INT", "NULLABLE")])),
-            "c"
+            unsupported(v2_schema(vec![v2_field("order_id", "INT", "NULLABLE")])),
+            "order_id"
         );
-        let mut nested = v2_field("rec", "RECORD", "NULLABLE");
-        nested.fields = vec![v2_field("x", "VARCHAR", "NULLABLE")];
-        assert_eq!(unsupported(v2_schema(vec![nested])), "rec.x");
+        let mut nested = v2_field("line_items", "RECORD", "NULLABLE");
+        nested.fields = vec![v2_field("attributes", "VARCHAR", "NULLABLE")];
         assert_eq!(
-            unsupported(storage_schema(vec![storage_field(
-                "c",
+            unsupported(v2_schema(vec![nested])),
+            "line_items.attributes"
+        );
+        assert_eq!(
+            unsupported(storage_schema(vec![column(
+                "order_id",
                 StorageType::Unspecified,
                 StorageMode::Nullable
             )])),
-            "c"
+            "order_id"
         );
-        let mut no_element = v2_field("r", "RANGE", "NULLABLE");
+        let mut no_element = v2_field("shipping_window", "RANGE", "NULLABLE");
         no_element.range_element_type = None;
-        assert_eq!(unsupported(v2_schema(vec![no_element])), "r");
-        let mut bad_element = v2_field("r", "RANGE", "NULLABLE");
+        assert_eq!(unsupported(v2_schema(vec![no_element])), "shipping_window");
+        let mut bad_element = v2_field("shipping_window", "RANGE", "NULLABLE");
         bad_element.range_element_type = Some(v2::table_field_schema::FieldElementType {
             r#type: "INT64".to_string(),
         });
-        assert_eq!(unsupported(v2_schema(vec![bad_element])), "r");
+        assert_eq!(unsupported(v2_schema(vec![bad_element])), "shipping_window");
     }
 
     #[test]
     fn numeric_precision_without_scale_equals_scale_zero() {
-        let mut p10 = v2_field("n", "NUMERIC", "NULLABLE");
-        p10.precision = 10;
-        let mut p10s0 = p10.clone();
-        p10s0.scale = 0;
-        let mut storage_p10 = storage_field("n", StorageType::Numeric, StorageMode::Nullable);
-        storage_p10.precision = 10;
+        let mut precision_only = v2_field("total", "NUMERIC", "NULLABLE");
+        precision_only.precision = 10;
+        let mut precision_and_scale_zero = precision_only.clone();
+        precision_and_scale_zero.scale = 0;
+        let mut storage_precision_only =
+            column("total", StorageType::Numeric, StorageMode::Nullable);
+        storage_precision_only.precision = 10;
         let want = BigQueryFieldType::Numeric(Some(BigQueryDecimalParams {
             precision: 10,
             scale: 0,
         }));
         assert_eq!(
-            v2_schema(vec![p10]).expect("valid test input").fields[0].field_type,
+            v2_schema(vec![precision_only])
+                .expect("valid test input")
+                .fields[0]
+                .field_type,
             want
         );
         assert_eq!(
-            v2_schema(vec![p10s0]).expect("valid test input").fields[0].field_type,
+            v2_schema(vec![precision_and_scale_zero])
+                .expect("valid test input")
+                .fields[0]
+                .field_type,
             want
         );
         assert_eq!(
-            storage_schema(vec![storage_p10])
+            storage_schema(vec![storage_precision_only])
                 .expect("valid test input")
                 .fields[0]
                 .field_type,
             want
         );
 
-        let mut no_precision = v2_field("n", "BIGNUMERIC", "NULLABLE");
+        let mut no_precision = v2_field("total", "BIGNUMERIC", "NULLABLE");
         no_precision.scale = 5;
         assert_eq!(
             v2_schema(vec![no_precision])
@@ -942,7 +944,7 @@ mod tests {
             BigQueryFieldType::BigNumeric(None),
             "precision 0 is unset whatever the scale"
         );
-        let mut max_on_int = v2_field("i", "INT64", "NULLABLE");
+        let mut max_on_int = v2_field("order_id", "INT64", "NULLABLE");
         max_on_int.max_length = 10;
         assert_eq!(
             v2_schema(vec![max_on_int])
@@ -956,13 +958,13 @@ mod tests {
 
     #[test]
     fn timestamp_picosecond_precision_is_unsupported() {
-        let mut pico = v2_field("t", "TIMESTAMP", "NULLABLE");
+        let mut pico = v2_field("placed_at", "TIMESTAMP", "NULLABLE");
         pico.timestamp_precision = Some(12);
-        assert_eq!(unsupported(v2_schema(vec![pico])), "t");
-        let mut storage_pico = storage_field("t", StorageType::Timestamp, StorageMode::Nullable);
+        assert_eq!(unsupported(v2_schema(vec![pico])), "placed_at");
+        let mut storage_pico = column("placed_at", StorageType::Timestamp, StorageMode::Nullable);
         storage_pico.timestamp_precision = Some(12);
-        assert_eq!(unsupported(storage_schema(vec![storage_pico])), "t");
-        let mut micro = v2_field("t", "TIMESTAMP", "NULLABLE");
+        assert_eq!(unsupported(storage_schema(vec![storage_pico])), "placed_at");
+        let mut micro = v2_field("placed_at", "TIMESTAMP", "NULLABLE");
         micro.timestamp_precision = Some(6);
         assert_eq!(
             v2_schema(vec![micro]).expect("valid test input").fields[0].field_type,
@@ -1021,49 +1023,54 @@ mod tests {
             ),
             (
                 BigQueryFieldType::Struct(vec![
-                    field("a", BigQueryFieldType::Int64, BigQueryFieldMode::Required),
                     field(
-                        "b",
+                        "quantity",
+                        BigQueryFieldType::Int64,
+                        BigQueryFieldMode::Required,
+                    ),
+                    field(
+                        "tags",
                         BigQueryFieldType::String { max_length: None },
                         BigQueryFieldMode::Repeated,
                     ),
                 ]),
-                "STRUCT<a INT64, b ARRAY<STRING>>",
+                "STRUCT<quantity INT64, tags ARRAY<STRING>>",
             ),
         ];
-        for (ty, text) in cases {
-            assert_eq!(ty.to_string(), text);
+        for (field_type, text) in cases {
+            assert_eq!(field_type.to_string(), text);
         }
     }
 
     #[test]
     fn arrow_schema_normalises_to_the_same_vocabulary() {
-        let ext =
+        let extension =
             |name: &str| HashMap::from([("ARROW:extension:name".to_string(), name.to_string())]);
-        let range_meta = HashMap::from([("google:sqlType".to_string(), "range".to_string())]);
-        let ts = DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
+        let range_metadata = HashMap::from([("google:sqlType".to_string(), "range".to_string())]);
+        let timestamp_type = DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
         let schema = Schema::new(vec![
-            Field::new("i", DataType::Int64, false),
-            Field::new("j", DataType::Utf8, true).with_metadata(ext("google:sqlType:json")),
+            Field::new("order_id", DataType::Int64, false),
+            Field::new("attributes", DataType::Utf8, true)
+                .with_metadata(extension("google:sqlType:json")),
             Field::new_list("tags", Field::new("item", DataType::Utf8, true), false)
-                .with_metadata(ext("google:sqlType:geography")),
+                .with_metadata(extension("google:sqlType:geography")),
             Field::new(
-                "r",
+                "shipping_window",
                 DataType::Struct(Fields::from(vec![
-                    Field::new("start", ts.clone(), true),
-                    Field::new("end", ts, true),
+                    Field::new("start", timestamp_type.clone(), true),
+                    Field::new("end", timestamp_type, true),
                 ])),
                 true,
             )
-            .with_metadata(range_meta),
+            .with_metadata(range_metadata),
             Field::new(
-                "s",
+                "details",
                 DataType::Struct(Fields::from(vec![Field::new(
-                    "iv",
+                    "lead_time",
                     DataType::Interval(IntervalUnit::MonthDayNano),
                     true,
                 )
-                .with_metadata(ext("google:sqlType:interval"))])),
+                .with_metadata(extension("google:sqlType:interval"))])),
                 true,
             ),
         ]);
@@ -1072,22 +1079,30 @@ mod tests {
             got,
             BigQueryTableSchema {
                 fields: vec![
-                    field("i", BigQueryFieldType::Int64, BigQueryFieldMode::Required),
-                    field("j", BigQueryFieldType::Json, BigQueryFieldMode::Nullable),
+                    field(
+                        "order_id",
+                        BigQueryFieldType::Int64,
+                        BigQueryFieldMode::Required
+                    ),
+                    field(
+                        "attributes",
+                        BigQueryFieldType::Json,
+                        BigQueryFieldMode::Nullable
+                    ),
                     field(
                         "tags",
                         BigQueryFieldType::Geography,
                         BigQueryFieldMode::Repeated
                     ),
                     field(
-                        "r",
+                        "shipping_window",
                         BigQueryFieldType::Range(BigQueryRangeElementType::Timestamp),
                         BigQueryFieldMode::Nullable
                     ),
                     field(
-                        "s",
+                        "details",
                         BigQueryFieldType::Struct(vec![field(
-                            "iv",
+                            "lead_time",
                             BigQueryFieldType::Interval,
                             BigQueryFieldMode::Nullable
                         )]),
@@ -1096,7 +1111,7 @@ mod tests {
                 ]
             }
         );
-        let bad = Schema::new(vec![Field::new("h", DataType::Float16, true)]);
-        assert_eq!(unsupported(BigQueryTableSchema::from_arrow(&bad)), "h");
+        let bad = Schema::new(vec![Field::new("weight", DataType::Float16, true)]);
+        assert_eq!(unsupported(BigQueryTableSchema::from_arrow(&bad)), "weight");
     }
 }

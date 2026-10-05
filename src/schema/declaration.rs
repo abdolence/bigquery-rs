@@ -3,6 +3,7 @@
 
 use crate::db::proto::millis;
 use crate::errors::BigQueryError;
+use crate::sql::{column_segment_violation, dotted_path};
 use crate::BigQueryInstant;
 use crate::BigQueryLabels;
 use crate::{
@@ -474,16 +475,12 @@ impl BigQueryTableDeclaration {
 }
 
 /// Why `name` cannot be a column or field name here, if it cannot: the diff splits paths on
-/// `.`, and an empty name or a control character cannot be quoted into DDL unambiguously.
-fn column_name_violation(name: &str) -> Option<&'static str> {
-    if name.is_empty() {
-        Some("is empty")
-    } else if name.contains('.') {
-        Some("contains `.`; declare a nested field inside `record(..)`")
-    } else if name.chars().any(char::is_control) {
-        Some("contains a control character")
+/// `.`, so a name is one column path segment without one.
+fn column_name_violation(name: &str) -> Option<String> {
+    if name.contains('.') {
+        Some("contains `.`; declare a nested field inside `record(..)`".into())
     } else {
-        None
+        column_segment_violation(name)
     }
 }
 
@@ -503,11 +500,7 @@ impl DeclaredColumn {
         let mut seen = HashSet::new();
         let mut out = Vec::with_capacity(columns.len());
         for column in columns {
-            let at = if path.is_empty() {
-                column.name.clone()
-            } else {
-                format!("{path}.{}", column.name)
-            };
+            let at = dotted_path(path, &column.name);
             check_name("columns", &column.name)?;
             if !seen.insert(column.name.to_ascii_lowercase()) {
                 return Err(BigQueryError::invalid_parameters(
@@ -628,9 +621,9 @@ impl TryFrom<BigQueryTableDeclarationDraft> for BigQueryTableDeclaration {
             partitioning: draft.partitioning,
             partition_expiration: draft
                 .partition_expiration
-                .map(|d| {
-                    millis::<i64>("partition_expiration", d)
-                        .map(|ms| Duration::from_millis(ms.unsigned_abs()))
+                .map(|duration| {
+                    millis::<i64>("partition_expiration", duration)
+                        .map(|millis| Duration::from_millis(millis.unsigned_abs()))
                 })
                 .transpose()?,
             clustering: draft.clustering,
@@ -638,9 +631,9 @@ impl TryFrom<BigQueryTableDeclarationDraft> for BigQueryTableDeclaration {
             labels: draft.labels,
             expiration: draft
                 .expiration
-                .map(|t| {
-                    BigQueryInstant::from_millisecond(t.as_millisecond()).map_err(|err| {
-                        BigQueryError::invalid_parameters("expiration", format!("{t}: {err}"))
+                .map(|instant| {
+                    BigQueryInstant::from_millisecond(instant.as_millisecond()).map_err(|err| {
+                        BigQueryError::invalid_parameters("expiration", format!("{instant}: {err}"))
                     })
                 })
                 .transpose()?,

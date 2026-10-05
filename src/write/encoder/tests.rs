@@ -3,6 +3,7 @@ use crate::errors::{BigQueryError, BigQuerySerializationError};
 use crate::types::civil;
 use crate::types::decimal;
 use crate::types::temporal::TAG_DATE;
+use crate::types::testkit::field;
 use crate::write::descriptor::{CHANGE_SEQUENCE_NUMBER_COLUMN, CHANGE_TYPE_COLUMN};
 use crate::{
     BigQueryDate, BigQueryDecimal, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType,
@@ -14,20 +15,6 @@ use gcloud_sdk::prost_types::field_descriptor_proto::{Label, Type as ProtoType};
 use gcloud_sdk::prost_types::{FileDescriptorProto, FileDescriptorSet};
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
 use serde::Serialize;
-
-pub(crate) fn field(
-    name: &str,
-    field_type: BigQueryFieldType,
-    mode: BigQueryFieldMode,
-) -> BigQueryFieldSchema {
-    BigQueryFieldSchema {
-        name: name.into(),
-        field_type,
-        mode,
-        description: None,
-        default_value_expression: None,
-    }
-}
 
 fn nullable(name: &str, field_type: BigQueryFieldType) -> BigQueryFieldSchema {
     field(name, field_type, BigQueryFieldMode::Nullable)
@@ -41,38 +28,41 @@ fn schema() -> BigQueryTableSchema {
     use BigQueryFieldType as FieldType;
     BigQueryTableSchema {
         fields: vec![
-            field("i", FieldType::Int64, Required),
-            nullable("f", FieldType::Float64),
-            nullable("b", FieldType::Bool),
-            nullable("s", STRING),
-            nullable("y", BYTES),
-            nullable("d", FieldType::Date),
-            nullable("t", FieldType::Time),
-            nullable("dt", FieldType::DateTime),
-            nullable("ts", FieldType::Timestamp),
-            nullable("num", FieldType::Numeric(None)),
-            nullable("big", FieldType::BigNumeric(None)),
-            nullable("geo", FieldType::Geography),
-            nullable("js", FieldType::Json),
-            nullable("iv", FieldType::Interval),
-            nullable("rng", FieldType::Range(BigQueryRangeElementType::Date)),
+            field("quantity", FieldType::Int64, Required),
+            nullable("price", FieldType::Float64),
+            nullable("in_stock", FieldType::Bool),
+            nullable("name", STRING),
+            nullable("payload", BYTES),
+            nullable("order_date", FieldType::Date),
+            nullable("pickup_time", FieldType::Time),
+            nullable("placed_local", FieldType::DateTime),
+            nullable("placed_at", FieldType::Timestamp),
+            nullable("total", FieldType::Numeric(None)),
+            nullable("big_total", FieldType::BigNumeric(None)),
+            nullable("location", FieldType::Geography),
+            nullable("attributes", FieldType::Json),
+            nullable("lead_time", FieldType::Interval),
             nullable(
-                "rec",
+                "booking_window",
+                FieldType::Range(BigQueryRangeElementType::Date),
+            ),
+            nullable(
+                "line_item",
                 FieldType::Struct(vec![
-                    nullable("a", FieldType::Int64),
+                    nullable("count", FieldType::Int64),
                     field("tags", STRING, Repeated),
                     nullable(
                         "inner",
-                        FieldType::Struct(vec![nullable("x", FieldType::Date)]),
+                        FieldType::Struct(vec![nullable("delivered_on", FieldType::Date)]),
                     ),
                 ]),
             ),
-            field("arr", FieldType::Int64, Repeated),
+            field("lot_numbers", FieldType::Int64, Repeated),
             field(
-                "recs",
+                "measurements",
                 FieldType::Struct(vec![
-                    nullable("k", STRING),
-                    nullable("v", FieldType::Float64),
+                    nullable("unit", STRING),
+                    nullable("amount", FieldType::Float64),
                 ]),
                 Repeated,
             ),
@@ -126,130 +116,137 @@ fn encode_error<T: Serialize + ?Sized>(
 fn get(message: &DynamicMessage, name: &str) -> Option<Value> {
     message
         .has_field_by_name(name)
-        .then(|| message.get_field_by_name(name).map(|v| v.into_owned()))
+        .then(|| {
+            message
+                .get_field_by_name(name)
+                .map(|value| value.into_owned())
+        })
         .flatten()
 }
 
 fn i64_of(message: &DynamicMessage, name: &str) -> Option<i64> {
-    get(message, name).and_then(|v| v.as_i64())
+    get(message, name).and_then(|value| value.as_i64())
 }
 
 fn i32_of(message: &DynamicMessage, name: &str) -> Option<i32> {
-    get(message, name).and_then(|v| v.as_i32())
+    get(message, name).and_then(|value| value.as_i32())
 }
 
-fn str_of(message: &DynamicMessage, name: &str) -> Option<String> {
-    get(message, name).and_then(|v| v.as_str().map(str::to_string))
+fn text_of(message: &DynamicMessage, name: &str) -> Option<String> {
+    get(message, name).and_then(|value| value.as_str().map(str::to_string))
 }
 
 fn bytes_of(message: &DynamicMessage, name: &str) -> Option<Vec<u8>> {
-    get(message, name).and_then(|v| v.as_bytes().map(|b| b.to_vec()))
+    get(message, name).and_then(|value| value.as_bytes().map(|bytes| bytes.to_vec()))
 }
 
-fn msg_of(message: &DynamicMessage, name: &str) -> Option<DynamicMessage> {
-    get(message, name).and_then(|v| v.as_message().cloned())
+fn message_of(message: &DynamicMessage, name: &str) -> Option<DynamicMessage> {
+    get(message, name).and_then(|value| value.as_message().cloned())
 }
 
 fn list_of(message: &DynamicMessage, name: &str) -> Vec<Value> {
     get(message, name)
-        .and_then(|v| v.as_list().map(<[Value]>::to_vec))
+        .and_then(|value| value.as_list().map(<[Value]>::to_vec))
         .unwrap_or_default()
 }
 
-fn le(v: i256) -> Vec<u8> {
-    let (bytes, n) = decimal::decimal_le_bytes(v);
-    bytes[..n].to_vec()
+fn le_bytes(value: i256) -> Vec<u8> {
+    let (bytes, length) = decimal::decimal_le_bytes(value);
+    bytes[..length].to_vec()
 }
 
 #[derive(Serialize, Clone)]
 struct Inner {
-    x: Option<jiff::civil::Date>,
+    delivered_on: Option<jiff::civil::Date>,
 }
 
 #[derive(Serialize, Clone)]
-struct Rec {
-    a: Option<i64>,
+struct LineItem {
+    count: Option<i64>,
     tags: Vec<String>,
     inner: Option<Inner>,
 }
 
 #[derive(Serialize, Clone)]
-struct Kv {
-    k: Option<String>,
-    v: Option<f64>,
+struct Measurement {
+    unit: Option<String>,
+    amount: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
 struct Row {
-    i: i64,
-    f: Option<f64>,
-    b: Option<bool>,
-    s: Option<String>,
+    quantity: i64,
+    price: Option<f64>,
+    in_stock: Option<bool>,
+    name: Option<String>,
     #[serde(with = "serde_bytes")]
-    y: Vec<u8>,
-    d: Option<jiff::civil::Date>,
-    t: Option<jiff::civil::Time>,
-    dt: Option<jiff::civil::DateTime>,
-    ts: Option<jiff::Timestamp>,
-    num: Option<String>,
-    big: Option<String>,
-    geo: Option<String>,
-    js: Option<BigQueryJson<serde_json::Value>>,
-    iv: Option<BigQueryInterval>,
-    rng: Option<BigQueryRange<jiff::civil::Date>>,
-    rec: Option<Rec>,
-    arr: Vec<i64>,
-    recs: Vec<Kv>,
+    payload: Vec<u8>,
+    order_date: Option<jiff::civil::Date>,
+    pickup_time: Option<jiff::civil::Time>,
+    placed_local: Option<jiff::civil::DateTime>,
+    placed_at: Option<jiff::Timestamp>,
+    total: Option<String>,
+    big_total: Option<String>,
+    location: Option<String>,
+    attributes: Option<BigQueryJson<serde_json::Value>>,
+    lead_time: Option<BigQueryInterval>,
+    booking_window: Option<BigQueryRange<jiff::civil::Date>>,
+    line_item: Option<LineItem>,
+    lot_numbers: Vec<i64>,
+    measurements: Vec<Measurement>,
 }
 
-fn date(s: &str) -> jiff::civil::Date {
-    s.parse().expect("a valid date")
+fn date(text: &str) -> jiff::civil::Date {
+    text.parse().expect("a valid date")
 }
 
 fn full_row() -> Row {
     Row {
-        i: i64::MIN,
-        f: Some(f64::NAN),
-        b: Some(true),
-        s: Some("héllo 世界 🦀".into()),
-        y: vec![0, 255],
-        d: Some(date("0001-01-01")),
-        t: Some("23:59:59.999999".parse().expect("a valid time")),
-        dt: Some(
+        quantity: i64::MIN,
+        price: Some(f64::NAN),
+        in_stock: Some(true),
+        name: Some("héllo 世界 🦀".into()),
+        payload: vec![0, 255],
+        order_date: Some(date("0001-01-01")),
+        pickup_time: Some("23:59:59.999999".parse().expect("a valid time")),
+        placed_local: Some(
             "2024-02-29T12:34:56.789012"
                 .parse()
                 .expect("a valid datetime"),
         ),
-        ts: Some("1969-07-20T20:17:40.5Z".parse().expect("a valid timestamp")),
-        num: Some("-99999999999999999999999999999.999999999".into()),
-        big: Some(
+        placed_at: Some("1969-07-20T20:17:40.5Z".parse().expect("a valid timestamp")),
+        total: Some("-99999999999999999999999999999.999999999".into()),
+        big_total: Some(
             "578960446186580977117854925043439539266.34992332820282019728792003956564819967".into(),
         ),
-        geo: Some("POINT(1 2)".into()),
-        js: Some(BigQueryJson(serde_json::json!({"a": 1}))),
-        iv: Some(BigQueryInterval {
+        location: Some("POINT(1 2)".into()),
+        attributes: Some(BigQueryJson(serde_json::json!({"count": 1}))),
+        lead_time: Some(BigQueryInterval {
             months: -14,
             days: 3,
             nanos: 14_706_000_789_000,
         }),
-        rng: Some(BigQueryRange {
+        booking_window: Some(BigQueryRange {
             start: None,
             end: Some(date("2024-01-01")),
         }),
-        rec: Some(Rec {
-            a: Some(7),
-            tags: vec!["x".into(), "y".into()],
+        line_item: Some(LineItem {
+            count: Some(7),
+            tags: vec!["gift".into(), "fragile".into()],
             inner: Some(Inner {
-                x: Some(date("2024-02-29")),
+                delivered_on: Some(date("2024-02-29")),
             }),
         }),
-        arr: vec![1, -2, 3],
-        recs: vec![
-            Kv {
-                k: Some("a".into()),
-                v: Some(1.0),
+        lot_numbers: vec![1, -2, 3],
+        measurements: vec![
+            Measurement {
+                unit: Some("kg".into()),
+                amount: Some(1.0),
             },
-            Kv { k: None, v: None },
+            Measurement {
+                unit: None,
+                amount: None,
+            },
         ],
     }
 }
@@ -257,21 +254,32 @@ fn full_row() -> Row {
 #[test]
 fn descriptor_follows_the_table_schema() {
     let plan = plan();
-    let d = plan.descriptor();
-    assert_eq!(d.name(), "row");
-    let by = |n: &str| {
-        d.field
+    let descriptor = plan.descriptor();
+    assert_eq!(descriptor.name(), "row");
+    let by = |name: &str| {
+        descriptor
+            .field
             .iter()
-            .find(|x| x.name() == n)
+            .find(|candidate| candidate.name() == name)
             .cloned()
-            .unwrap_or_else(|| panic!("no field {n}"))
+            .unwrap_or_else(|| panic!("no field {name}"))
     };
     assert_eq!(
-        (by("i").number(), by("i").label(), by("i").r#type()),
+        (
+            by("quantity").number(),
+            by("quantity").label(),
+            by("quantity").r#type()
+        ),
         (1, Label::Required, ProtoType::Int64)
     );
     assert_eq!(
-        [by("d"), by("t"), by("dt"), by("ts")].map(|f| f.r#type()),
+        [
+            by("order_date"),
+            by("pickup_time"),
+            by("placed_local"),
+            by("placed_at")
+        ]
+        .map(|field| field.r#type()),
         [
             ProtoType::Int32,
             ProtoType::Int64,
@@ -280,7 +288,15 @@ fn descriptor_follows_the_table_schema() {
         ]
     );
     assert_eq!(
-        [by("num"), by("big"), by("iv"), by("js"), by("geo"), by("y")].map(|f| f.r#type()),
+        [
+            by("total"),
+            by("big_total"),
+            by("lead_time"),
+            by("attributes"),
+            by("location"),
+            by("payload")
+        ]
+        .map(|field| field.r#type()),
         [
             ProtoType::Bytes,
             ProtoType::Bytes,
@@ -291,54 +307,67 @@ fn descriptor_follows_the_table_schema() {
         ]
     );
     assert_eq!(
-        (by("f").r#type(), by("b").r#type(), by("f").label()),
+        (
+            by("price").r#type(),
+            by("in_stock").r#type(),
+            by("price").label()
+        ),
         (ProtoType::Double, ProtoType::Bool, Label::Optional)
     );
     assert_eq!(
-        (by("arr").label(), by("recs").label(), by("recs").number()),
+        (
+            by("lot_numbers").label(),
+            by("measurements").label(),
+            by("measurements").number()
+        ),
         (Label::Repeated, Label::Repeated, 18)
     );
     let nested = |type_name: &str| {
-        d.nested_type
+        descriptor
+            .nested_type
             .iter()
-            .find(|n| n.name() == type_name)
+            .find(|name| name.name() == type_name)
             .cloned()
             .unwrap_or_else(|| panic!("no nested type {type_name}"))
     };
-    let names = |m: &gcloud_sdk::prost_types::DescriptorProto| {
-        m.field
+    let names = |message: &gcloud_sdk::prost_types::DescriptorProto| {
+        message
+            .field
             .iter()
-            .map(|f| (f.name().to_string(), f.r#type()))
+            .map(|field| (field.name().to_string(), field.r#type()))
             .collect::<Vec<_>>()
     };
-    let rec = nested(by("rec").type_name());
+    let line_item = nested(by("line_item").type_name());
     assert_eq!(
-        names(&rec),
+        names(&line_item),
         [
-            ("a".to_string(), ProtoType::Int64),
+            ("count".to_string(), ProtoType::Int64),
             ("tags".to_string(), ProtoType::String),
             ("inner".to_string(), ProtoType::Message)
         ]
     );
-    let inner_type = rec
+    let inner_type = line_item
         .field
         .iter()
-        .find(|f| f.name() == "inner")
-        .map(|f| f.type_name().to_string())
+        .find(|field| field.name() == "inner")
+        .map(|field| field.type_name().to_string())
         .unwrap_or_default();
     assert_eq!(
         names(&nested(&inner_type)),
-        [("x".to_string(), ProtoType::Int32)]
+        [("delivered_on".to_string(), ProtoType::Int32)]
     );
     assert_eq!(
-        names(&nested(by("rng").type_name())),
+        names(&nested(by("booking_window").type_name())),
         [
             ("start".to_string(), ProtoType::Int32),
             ("end".to_string(), ProtoType::Int32)
         ]
     );
     // Every nested type sits flat in the root, which prost-reflect resolves.
-    assert!(d.nested_type.iter().all(|n| n.nested_type.is_empty()));
+    assert!(descriptor
+        .nested_type
+        .iter()
+        .all(|name| name.nested_type.is_empty()));
     message_descriptor(&plan);
 }
 
@@ -346,75 +375,92 @@ fn descriptor_follows_the_table_schema() {
 fn every_type_encodes_to_its_accepted_wire_form() {
     let plan = plan();
     let got = decoded(&plan, &full_row());
-    assert_eq!(i64_of(&got, "i"), Some(i64::MIN));
-    assert!(get(&got, "f")
-        .and_then(|v| v.as_f64())
+    assert_eq!(i64_of(&got, "quantity"), Some(i64::MIN));
+    assert!(get(&got, "price")
+        .and_then(|value| value.as_f64())
         .is_some_and(f64::is_nan));
-    assert_eq!(get(&got, "b").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(str_of(&got, "s").as_deref(), Some("héllo 世界 🦀"));
-    assert_eq!(bytes_of(&got, "y"), Some(vec![0, 255]));
-    assert_eq!(i32_of(&got, "d"), Some(civil::DATE_MIN_DAYS));
-    assert_eq!(i64_of(&got, "t"), Some(civil::pack_time(86_399_999_999)));
-    let dt = civil::parse_datetime("2024-02-29T12:34:56.789012").expect("valid");
-    assert_eq!(i64_of(&got, "dt"), Some(civil::pack_datetime(dt)));
     assert_eq!(
-        i64_of(&got, "ts"),
+        get(&got, "in_stock").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert_eq!(text_of(&got, "name").as_deref(), Some("héllo 世界 🦀"));
+    assert_eq!(bytes_of(&got, "payload"), Some(vec![0, 255]));
+    assert_eq!(i32_of(&got, "order_date"), Some(civil::DATE_MIN_DAYS));
+    assert_eq!(
+        i64_of(&got, "pickup_time"),
+        Some(civil::pack_time(86_399_999_999))
+    );
+    let local_micros = civil::parse_datetime("2024-02-29T12:34:56.789012").expect("valid");
+    assert_eq!(
+        i64_of(&got, "placed_local"),
+        Some(civil::pack_datetime(local_micros))
+    );
+    assert_eq!(
+        i64_of(&got, "placed_at"),
         Some(civil::parse_timestamp("1969-07-20T20:17:40.5Z").expect("valid"))
     );
     assert_eq!(
-        bytes_of(&got, "num"),
-        Some(le(decimal::parse_numeric(
-            "-99999999999999999999999999999.999999999"
-        )
-        .expect("valid")))
+        bytes_of(&got, "total"),
+        Some(le_bytes(
+            decimal::parse_numeric("-99999999999999999999999999999.999999999").expect("valid")
+        ))
     );
-    assert_eq!(bytes_of(&got, "big"), Some(le(i256::MAX)));
-    assert_eq!(str_of(&got, "geo").as_deref(), Some("POINT(1 2)"));
-    assert_eq!(str_of(&got, "js").as_deref(), Some(r#"{"a":1}"#));
-    assert_eq!(str_of(&got, "iv").as_deref(), Some("-1-2 3 4:5:6.000789"));
-    let rng = msg_of(&got, "rng").expect("rng is set");
+    assert_eq!(bytes_of(&got, "big_total"), Some(le_bytes(i256::MAX)));
+    assert_eq!(text_of(&got, "location").as_deref(), Some("POINT(1 2)"));
+    assert_eq!(
+        text_of(&got, "attributes").as_deref(),
+        Some(r#"{"count":1}"#)
+    );
+    assert_eq!(
+        text_of(&got, "lead_time").as_deref(),
+        Some("-1-2 3 4:5:6.000789")
+    );
+    let rng = message_of(&got, "booking_window").expect("rng is set");
     assert_eq!(
         (i32_of(&rng, "start"), i32_of(&rng, "end")),
         (None, Some(19723))
     );
-    let rec = msg_of(&got, "rec").expect("rec is set");
-    assert_eq!(i64_of(&rec, "a"), Some(7));
+    let line_item = message_of(&got, "line_item").expect("line_item is set");
+    assert_eq!(i64_of(&line_item, "count"), Some(7));
     assert_eq!(
-        list_of(&rec, "tags"),
-        [Value::String("x".into()), Value::String("y".into())]
+        list_of(&line_item, "tags"),
+        [
+            Value::String("gift".into()),
+            Value::String("fragile".into())
+        ]
     );
-    let inner = msg_of(&rec, "inner").expect("inner is set");
-    assert_eq!(i32_of(&inner, "x"), Some(19782));
+    let inner = message_of(&line_item, "inner").expect("inner is set");
+    assert_eq!(i32_of(&inner, "delivered_on"), Some(19782));
     assert_eq!(
-        list_of(&got, "arr"),
+        list_of(&got, "lot_numbers"),
         [Value::I64(1), Value::I64(-2), Value::I64(3)]
     );
-    let recs = list_of(&got, "recs");
-    assert_eq!(recs.len(), 2);
-    let first = recs[0].as_message().expect("a message");
+    let measurements = list_of(&got, "measurements");
+    assert_eq!(measurements.len(), 2);
+    let first = measurements[0].as_message().expect("a message");
     assert_eq!(
         (
-            str_of(first, "k").as_deref(),
-            get(first, "v").and_then(|v| v.as_f64())
+            text_of(first, "unit").as_deref(),
+            get(first, "amount").and_then(|value| value.as_f64())
         ),
-        (Some("a"), Some(1.0))
+        (Some("kg"), Some(1.0))
     );
-    let second = recs[1].as_message().expect("a message");
-    assert_eq!((get(second, "k"), get(second, "v")), (None, None));
+    let second = measurements[1].as_message().expect("a message");
+    assert_eq!((get(second, "unit"), get(second, "amount")), (None, None));
 }
 
 #[test]
 fn repeated_scalars_are_packed() {
     #[derive(Serialize)]
-    struct A {
-        i: i64,
-        arr: Vec<i64>,
+    struct LotNumbers {
+        quantity: i64,
+        lot_numbers: Vec<i64>,
     }
     let bytes = encode(
         &plan(),
-        &A {
-            i: 1,
-            arr: vec![1, 2, 3],
+        &LotNumbers {
+            quantity: 1,
+            lot_numbers: vec![1, 2, 3],
         },
     )
     .expect("encodes");
@@ -425,44 +471,48 @@ fn repeated_scalars_are_packed() {
 #[test]
 fn none_is_absent_and_a_required_none_is_an_error_naming_the_field() {
     #[derive(Serialize)]
-    struct N {
-        i: Option<i64>,
-        s: Option<String>,
-        rec: Option<Rec>,
+    struct Optional {
+        quantity: Option<i64>,
+        name: Option<String>,
+        line_item: Option<LineItem>,
     }
     let plan = plan();
     let got = decoded(
         &plan,
-        &N {
-            i: Some(1),
-            s: None,
-            rec: None,
+        &Optional {
+            quantity: Some(1),
+            name: None,
+            line_item: None,
         },
     );
     assert_eq!(
-        (i64_of(&got, "i"), get(&got, "s"), get(&got, "rec")),
+        (
+            i64_of(&got, "quantity"),
+            get(&got, "name"),
+            get(&got, "line_item")
+        ),
         (Some(1), None, None)
     );
-    let e = encode_error(
+    let error = encode_error(
         &plan,
-        &N {
-            i: None,
-            s: None,
-            rec: None,
+        &Optional {
+            quantity: None,
+            name: None,
+            line_item: None,
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::NullForRequired, "i")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::NullForRequired, "quantity")
     );
     #[derive(Serialize)]
     struct Missing {
-        s: String,
+        name: String,
     }
-    let e = encode_error(&plan, &Missing { s: "x".into() });
+    let error = encode_error(&plan, &Missing { name: "Ada".into() });
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::MissingRequiredField, "i")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::MissingRequiredField, "quantity")
     );
 }
 
@@ -471,30 +521,30 @@ fn errors_name_the_field_path() {
     let plan = plan();
     #[derive(Serialize)]
     struct BadTag {
-        i: i64,
-        rec: BadRec,
+        quantity: i64,
+        line_item: BadLineItem,
     }
     #[derive(Serialize)]
-    struct BadRec {
+    struct BadLineItem {
         tags: (String, i64),
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &BadTag {
-            i: 1,
-            rec: BadRec {
-                tags: ("a".into(), 5),
+            quantity: 1,
+            line_item: BadLineItem {
+                tags: ("gift".into(), 5),
             },
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "rec.tags[1]")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "line_item.tags[1]")
     );
     #[derive(Serialize)]
     struct Unknown {
-        i: i64,
-        rec: UnknownInner,
+        quantity: i64,
+        line_item: UnknownInner,
     }
     #[derive(Serialize)]
     struct UnknownInner {
@@ -502,53 +552,56 @@ fn errors_name_the_field_path() {
     }
     #[derive(Serialize)]
     struct UnknownLeaf {
-        z: i64,
+        discount: i64,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &Unknown {
-            i: 1,
-            rec: UnknownInner {
-                inner: UnknownLeaf { z: 2 },
+            quantity: 1,
+            line_item: UnknownInner {
+                inner: UnknownLeaf { discount: 2 },
             },
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::UnknownField, "rec.inner.z")
+        (error.kind, error.path.as_str()),
+        (
+            BigQueryCodecErrorKind::UnknownField,
+            "line_item.inner.discount"
+        )
     );
     #[derive(Serialize)]
-    struct BadKv {
-        v: &'static str,
+    struct BadMeasurement {
+        amount: &'static str,
     }
     #[derive(Serialize)]
-    struct BadRecs {
-        i: i64,
-        recs: Vec<BadKv>,
+    struct BadMeasurements {
+        quantity: i64,
+        measurements: Vec<BadMeasurement>,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan,
-        &BadRecs {
-            i: 1,
-            recs: vec![BadKv { v: "x" }],
+        &BadMeasurements {
+            quantity: 1,
+            measurements: vec![BadMeasurement { amount: "heavy" }],
         },
     );
-    assert_eq!(e.path, "recs[0].v");
+    assert_eq!(error.path, "measurements[0].amount");
     #[derive(Serialize)]
     struct BadDate {
-        i: i64,
-        d: &'static str,
+        quantity: i64,
+        order_date: &'static str,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &BadDate {
-            i: 1,
-            d: "2023-02-29",
+            quantity: 1,
+            order_date: "2023-02-29",
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::InvalidText, "d")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::InvalidText, "order_date")
     );
 }
 
@@ -556,58 +609,64 @@ fn errors_name_the_field_path() {
 fn integer_forms_of_temporal_types_match_the_read_side() {
     #[derive(Serialize)]
     struct Ints {
-        i: i64,
-        d: i32,
-        t: i64,
-        dt: i64,
-        ts: i64,
+        quantity: i64,
+        order_date: i32,
+        pickup_time: i64,
+        placed_local: i64,
+        placed_at: i64,
     }
-    let dt = civil::parse_datetime("2024-02-29T12:34:56.789012").expect("valid");
+    let local_micros = civil::parse_datetime("2024-02-29T12:34:56.789012").expect("valid");
     let got = decoded(
         &plan(),
         &Ints {
-            i: 0,
-            d: 19782,
-            t: 45_296_000_000,
-            dt,
-            ts: civil::TIMESTAMP_MAX_MICROS,
+            quantity: 0,
+            order_date: 19782,
+            pickup_time: 45_296_000_000,
+            placed_local: local_micros,
+            placed_at: civil::TIMESTAMP_MAX_MICROS,
         },
     );
-    assert_eq!(i32_of(&got, "d"), Some(19782));
-    assert_eq!(i64_of(&got, "t"), Some(civil::pack_time(45_296_000_000)));
-    assert_eq!(i64_of(&got, "dt"), Some(civil::pack_datetime(dt)));
-    assert_eq!(i64_of(&got, "ts"), Some(civil::TIMESTAMP_MAX_MICROS));
+    assert_eq!(i32_of(&got, "order_date"), Some(19782));
+    assert_eq!(
+        i64_of(&got, "pickup_time"),
+        Some(civil::pack_time(45_296_000_000))
+    );
+    assert_eq!(
+        i64_of(&got, "placed_local"),
+        Some(civil::pack_datetime(local_micros))
+    );
+    assert_eq!(i64_of(&got, "placed_at"), Some(civil::TIMESTAMP_MAX_MICROS));
     #[derive(Serialize)]
     struct OutOfDay {
-        i: i64,
-        t: i64,
+        quantity: i64,
+        pickup_time: i64,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan(),
         &OutOfDay {
-            i: 0,
-            t: civil::MICROS_PER_DAY,
+            quantity: 0,
+            pickup_time: civil::MICROS_PER_DAY,
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::OutOfRange, "t")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::OutOfRange, "pickup_time")
     );
     #[derive(Serialize)]
     struct PastMax {
-        i: i64,
-        ts: i64,
+        quantity: i64,
+        placed_at: i64,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan(),
         &PastMax {
-            i: 0,
-            ts: civil::TIMESTAMP_MAX_MICROS + 1,
+            quantity: 0,
+            placed_at: civil::TIMESTAMP_MAX_MICROS + 1,
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::OutOfRange, "ts")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::OutOfRange, "placed_at")
     );
 }
 
@@ -626,77 +685,80 @@ fn wrappers_and_alternate_forms() {
         Red,
     }
     #[derive(Serialize)]
-    struct W {
-        i: u8,
-        num: BigQueryDecimal<Cents>,
-        big: f64,
-        ts: &'static str,
-        dt: &'static str,
-        iv: &'static str,
-        js: &'static str,
-        s: Color,
-        y: [u8; 2],
-        arr: std::collections::VecDeque<i32>,
-        rec: std::collections::BTreeMap<String, i64>,
+    struct Wrappers {
+        quantity: u8,
+        total: BigQueryDecimal<Cents>,
+        big_total: f64,
+        placed_at: &'static str,
+        placed_local: &'static str,
+        lead_time: &'static str,
+        attributes: &'static str,
+        name: Color,
+        payload: [u8; 2],
+        lot_numbers: std::collections::VecDeque<i32>,
+        line_item: std::collections::BTreeMap<String, i64>,
     }
-    let row = W {
-        i: 3,
-        num: BigQueryDecimal(Cents(12345)),
-        big: 0.5,
-        ts: "9999-12-31 23:59:59.999999+00:00",
-        dt: "2024-02-29 12:34:56",
-        iv: "1-2 3 4:5:6",
-        js: r#"{"k":[1,2]}"#,
-        s: Color::Red,
-        y: *b"ab",
-        arr: [4, 5].into(),
-        rec: [("a".to_string(), 9)].into(),
+    let row = Wrappers {
+        quantity: 3,
+        total: BigQueryDecimal(Cents(12345)),
+        big_total: 0.5,
+        placed_at: "9999-12-31 23:59:59.999999+00:00",
+        placed_local: "2024-02-29 12:34:56",
+        lead_time: "1-2 3 4:5:6",
+        attributes: r#"{"unit":[1,2]}"#,
+        name: Color::Red,
+        payload: *b"ab",
+        lot_numbers: [4, 5].into(),
+        line_item: [("count".to_string(), 9)].into(),
     };
     let got = decoded(&plan(), &row);
-    assert_eq!(i64_of(&got, "i"), Some(3));
+    assert_eq!(i64_of(&got, "quantity"), Some(3));
     assert_eq!(
-        bytes_of(&got, "num"),
-        Some(le(i256::from_i128(123_450_000_000)))
+        bytes_of(&got, "total"),
+        Some(le_bytes(i256::from_i128(123_450_000_000)))
     );
     assert_eq!(
-        bytes_of(&got, "big"),
-        Some(le(i256::from_i128(5 * 10i128.pow(37))))
+        bytes_of(&got, "big_total"),
+        Some(le_bytes(i256::from_i128(5 * 10i128.pow(37))))
     );
-    assert_eq!(i64_of(&got, "ts"), Some(civil::TIMESTAMP_MAX_MICROS));
+    assert_eq!(i64_of(&got, "placed_at"), Some(civil::TIMESTAMP_MAX_MICROS));
     assert_eq!(
-        i64_of(&got, "dt"),
+        i64_of(&got, "placed_local"),
         Some(civil::pack_datetime(
             civil::parse_datetime("2024-02-29T12:34:56").expect("valid")
         ))
     );
-    assert_eq!(str_of(&got, "iv").as_deref(), Some("1-2 3 4:5:6"));
-    assert_eq!(str_of(&got, "js").as_deref(), Some(r#"{"k":[1,2]}"#));
-    assert_eq!(str_of(&got, "s").as_deref(), Some("red"));
-    assert_eq!(bytes_of(&got, "y"), Some(b"ab".to_vec()));
-    assert_eq!(list_of(&got, "arr"), [Value::I64(4), Value::I64(5)]);
-    let rec = msg_of(&got, "rec").expect("rec is set");
-    assert_eq!(i64_of(&rec, "a"), Some(9));
+    assert_eq!(text_of(&got, "lead_time").as_deref(), Some("1-2 3 4:5:6"));
+    assert_eq!(
+        text_of(&got, "attributes").as_deref(),
+        Some(r#"{"unit":[1,2]}"#)
+    );
+    assert_eq!(text_of(&got, "name").as_deref(), Some("red"));
+    assert_eq!(bytes_of(&got, "payload"), Some(b"ab".to_vec()));
+    assert_eq!(list_of(&got, "lot_numbers"), [Value::I64(4), Value::I64(5)]);
+    let line_item = message_of(&got, "line_item").expect("line_item is set");
+    assert_eq!(i64_of(&line_item, "count"), Some(9));
     #[derive(Serialize)]
     struct WholeNumeric {
-        i: i64,
-        num: i64,
-        big: i64,
+        quantity: i64,
+        total: i64,
+        big_total: i64,
     }
     let got = decoded(
         &plan(),
         &WholeNumeric {
-            i: 0,
-            num: -7,
-            big: 2,
+            quantity: 0,
+            total: -7,
+            big_total: 2,
         },
     );
     assert_eq!(
-        bytes_of(&got, "num"),
-        Some(le(i256::from_i128(-7_000_000_000)))
+        bytes_of(&got, "total"),
+        Some(le_bytes(i256::from_i128(-7_000_000_000)))
     );
     assert_eq!(
-        bytes_of(&got, "big"),
-        Some(le(
+        bytes_of(&got, "big_total"),
+        Some(le_bytes(
             i256::from_i128(2 * 10i128.pow(19)).wrapping_mul(i256::from_i128(10i128.pow(19)))
         ))
     );
@@ -707,83 +769,87 @@ fn skipped_reordered_and_flattened_fields() {
     #[derive(Serialize)]
     struct Sparse {
         #[serde(skip_serializing_if = "Option::is_none")]
-        s: Option<String>,
-        i: i64,
+        name: Option<String>,
+        quantity: i64,
     }
     #[derive(Serialize)]
     struct Flat {
-        i: i64,
+        quantity: i64,
         #[serde(flatten)]
         rest: FlatRest,
     }
     #[derive(Serialize)]
     struct FlatRest {
-        s: String,
-        b: bool,
+        name: String,
+        in_stock: bool,
     }
     let plan = plan();
     let descriptor = message_descriptor(&plan);
-    let mut e = Encoder::new(plan.clone());
+    let mut encoder = Encoder::new(plan.clone());
     let rows = [
         Sparse {
-            s: Some("a".into()),
-            i: 1,
+            name: Some("Ada".into()),
+            quantity: 1,
         },
-        Sparse { s: None, i: 2 },
         Sparse {
-            s: Some("c".into()),
-            i: 3,
+            name: None,
+            quantity: 2,
+        },
+        Sparse {
+            name: Some("Grace".into()),
+            quantity: 3,
         },
     ];
     for (k, row) in rows.iter().enumerate() {
         let mut out = Vec::new();
-        e.encode(row, &mut out).expect("encodes");
+        encoder.encode(row, &mut out).expect("encodes");
         let got = DynamicMessage::decode(descriptor.clone(), out.as_slice()).expect("decodes");
         assert_eq!(
-            (i64_of(&got, "i"), str_of(&got, "s").is_some()),
+            (i64_of(&got, "quantity"), text_of(&got, "name").is_some()),
             (Some(k as i64 + 1), k != 1)
         );
     }
     let mut out = Vec::new();
-    e.encode(
-        &Flat {
-            i: 9,
-            rest: FlatRest {
-                s: "z".into(),
-                b: false,
+    encoder
+        .encode(
+            &Flat {
+                quantity: 9,
+                rest: FlatRest {
+                    name: "Linus".into(),
+                    in_stock: false,
+                },
             },
-        },
-        &mut out,
-    )
-    .expect("encodes");
+            &mut out,
+        )
+        .expect("encodes");
     let got = DynamicMessage::decode(descriptor, out.as_slice()).expect("decodes");
     assert_eq!(
         (
-            i64_of(&got, "i"),
-            str_of(&got, "s").as_deref(),
-            get(&got, "b").and_then(|v| v.as_bool())
+            i64_of(&got, "quantity"),
+            text_of(&got, "name").as_deref(),
+            get(&got, "in_stock").and_then(|value| value.as_bool())
         ),
-        (Some(9), Some("z"), Some(false))
+        (Some(9), Some("Linus"), Some(false))
     );
 }
 
 #[test]
 fn a_null_array_element_is_an_error() {
     #[derive(Serialize)]
-    struct A {
-        i: i64,
-        arr: Vec<Option<i64>>,
+    struct WithNullElement {
+        quantity: i64,
+        lot_numbers: Vec<Option<i64>>,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan(),
-        &A {
-            i: 1,
-            arr: vec![Some(1), None],
+        &WithNullElement {
+            quantity: 1,
+            lot_numbers: vec![Some(1), None],
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::NullArrayElement, "arr[1]")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::NullArrayElement, "lot_numbers[1]")
     );
 }
 
@@ -791,106 +857,127 @@ fn a_null_array_element_is_an_error() {
 fn nested_lengths_over_127_bytes_are_backpatched() {
     let plan = plan();
     let mut long = full_row();
-    if let Some(rec) = long.rec.as_mut() {
-        rec.tags = vec!["x".repeat(200), "y".repeat(20_000)];
+    if let Some(line_item) = long.line_item.as_mut() {
+        line_item.tags = vec!["gift".repeat(200), "fragile ".repeat(2_500)];
     }
-    long.recs = (0..300)
-        .map(|i| Kv {
-            k: Some(format!("k{i}")),
-            v: Some(f64::from(i)),
+    long.measurements = (0..300)
+        .map(|index| Measurement {
+            unit: Some(format!("k{index}")),
+            amount: Some(f64::from(index)),
         })
         .collect();
-    long.arr = (0..100).map(|i| i * 1_000_000_007).collect();
+    long.lot_numbers = (0..100).map(|index| index * 1_000_000_007).collect();
     let got = decoded(&plan, &long);
-    let rec = msg_of(&got, "rec").expect("rec is set");
-    let tags = list_of(&rec, "tags");
+    let line_item = message_of(&got, "line_item").expect("line_item is set");
+    let tags = list_of(&line_item, "tags");
     assert_eq!(tags[1].as_str().map(str::len), Some(20_000));
     assert_eq!(
-        msg_of(&rec, "inner").and_then(|m| i32_of(&m, "x")),
+        message_of(&line_item, "inner").and_then(|message| i32_of(&message, "delivered_on")),
         Some(19782)
     );
-    let recs = list_of(&got, "recs");
-    assert_eq!(recs.len(), 300);
+    let measurements = list_of(&got, "measurements");
+    assert_eq!(measurements.len(), 300);
     assert_eq!(
-        recs[299]
+        measurements[299]
             .as_message()
-            .and_then(|m| str_of(m, "k"))
+            .and_then(|message| text_of(message, "unit"))
             .as_deref(),
         Some("k299")
     );
-    assert_eq!(list_of(&got, "arr").len(), 100);
-    assert_eq!(str_of(&got, "geo").as_deref(), Some("POINT(1 2)"));
+    assert_eq!(list_of(&got, "lot_numbers").len(), 100);
+    assert_eq!(text_of(&got, "location").as_deref(), Some("POINT(1 2)"));
 }
 
 #[test]
 fn float64_rejects_integers() {
     #[derive(Serialize)]
-    struct A {
-        i: i64,
-        f: i64,
+    struct IntegerPrice {
+        quantity: i64,
+        price: i64,
     }
-    let e = encode_error(&plan(), &A { i: 1, f: 2 });
+    let error = encode_error(
+        &plan(),
+        &IntegerPrice {
+            quantity: 1,
+            price: 2,
+        },
+    );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "f")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "price")
     );
     #[derive(Serialize)]
-    struct B {
-        i: i64,
-        f: f32,
+    struct NarrowPrice {
+        quantity: i64,
+        price: f32,
     }
-    let got = decoded(&plan(), &B { i: 1, f: 0.5 });
-    assert_eq!(get(&got, "f").and_then(|v| v.as_f64()), Some(0.5));
+    let got = decoded(
+        &plan(),
+        &NarrowPrice {
+            quantity: 1,
+            price: 0.5,
+        },
+    );
+    assert_eq!(
+        get(&got, "price").and_then(|value| value.as_f64()),
+        Some(0.5)
+    );
 }
 
 #[test]
 fn bytes_rejects_strings() {
     #[derive(Serialize)]
-    struct A {
-        i: i64,
-        y: &'static str,
+    struct TextPayload {
+        quantity: i64,
+        payload: &'static str,
     }
-    let e = encode_error(&plan(), &A { i: 1, y: "AQI=" });
+    let error = encode_error(
+        &plan(),
+        &TextPayload {
+            quantity: 1,
+            payload: "AQI=",
+        },
+    );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "y")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "payload")
     );
 }
 
 #[test]
 fn string_rejects_bytes() {
     #[derive(Serialize)]
-    struct A {
-        i: i64,
+    struct ByteBufName {
+        quantity: i64,
         #[serde(with = "serde_bytes")]
-        s: Vec<u8>,
+        name: Vec<u8>,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan(),
-        &A {
-            i: 1,
-            s: b"ok".to_vec(),
+        &ByteBufName {
+            quantity: 1,
+            name: b"ok".to_vec(),
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "s")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "name")
     );
     #[derive(Serialize)]
-    struct B {
-        i: i64,
-        s: Vec<u8>,
+    struct BytesName {
+        quantity: i64,
+        name: Vec<u8>,
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan(),
-        &B {
-            i: 1,
-            s: b"ok".to_vec(),
+        &BytesName {
+            quantity: 1,
+            name: b"ok".to_vec(),
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "s")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "name")
     );
 }
 
@@ -898,124 +985,130 @@ fn string_rejects_bytes() {
 fn date_before_year_one_is_out_of_range() {
     #[derive(Serialize)]
     struct Jiff {
-        i: i64,
-        d: jiff::civil::Date,
+        quantity: i64,
+        order_date: jiff::civil::Date,
     }
     #[derive(Serialize)]
     struct Wrapped {
-        i: i64,
-        d: BigQueryDate,
+        quantity: i64,
+        order_date: BigQueryDate,
     }
     #[derive(Serialize)]
     struct Days {
-        i: i64,
-        d: i32,
+        quantity: i64,
+        order_date: i32,
     }
     #[derive(Serialize)]
     struct Text {
-        i: i64,
-        d: &'static str,
+        quantity: i64,
+        order_date: &'static str,
     }
     #[derive(Serialize)]
     struct Local {
-        i: i64,
-        dt: jiff::civil::DateTime,
+        quantity: i64,
+        placed_local: jiff::civil::DateTime,
     }
     let plan = plan();
     for year in [0, -1, -9999] {
-        let d = jiff::civil::date(year, 12, 31);
-        let e = encode_error(&plan, &Jiff { i: 0, d });
-        assert_eq!(
-            (e.kind, e.path.as_str()),
-            (BigQueryCodecErrorKind::OutOfRange, "d"),
-            "{d}"
+        let date = jiff::civil::date(year, 12, 31);
+        let error = encode_error(
+            &plan,
+            &Jiff {
+                quantity: 0,
+                order_date: date,
+            },
         );
-        let e = encode_error(
+        assert_eq!(
+            (error.kind, error.path.as_str()),
+            (BigQueryCodecErrorKind::OutOfRange, "order_date"),
+            "{date}"
+        );
+        let error = encode_error(
             &plan,
             &Wrapped {
-                i: 0,
-                d: BigQueryDate(d),
+                quantity: 0,
+                order_date: BigQueryDate(date),
             },
         );
         assert_eq!(
-            (e.kind, e.path.as_str()),
-            (BigQueryCodecErrorKind::OutOfRange, "d"),
-            "{d}"
+            (error.kind, error.path.as_str()),
+            (BigQueryCodecErrorKind::OutOfRange, "order_date"),
+            "{date}"
         );
-        let e = encode_error(
+        let error = encode_error(
             &plan,
             &Local {
-                i: 0,
-                dt: d.at(1, 2, 3, 0),
+                quantity: 0,
+                placed_local: date.at(1, 2, 3, 0),
             },
         );
         assert_eq!(
-            (e.kind, e.path.as_str()),
-            (BigQueryCodecErrorKind::OutOfRange, "dt"),
-            "{d}"
+            (error.kind, error.path.as_str()),
+            (BigQueryCodecErrorKind::OutOfRange, "placed_local"),
+            "{date}"
         );
     }
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &Days {
-            i: 0,
-            d: civil::DATE_MIN_DAYS - 1,
+            quantity: 0,
+            order_date: civil::DATE_MIN_DAYS - 1,
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::OutOfRange, "d")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::OutOfRange, "order_date")
     );
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &Text {
-            i: 0,
-            d: "0000-12-31",
+            quantity: 0,
+            order_date: "0000-12-31",
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::OutOfRange, "d")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::OutOfRange, "order_date")
     );
     let got = decoded(
         &plan,
         &Jiff {
-            i: 0,
-            d: date("0001-01-01"),
+            quantity: 0,
+            order_date: date("0001-01-01"),
         },
     );
-    assert_eq!(i32_of(&got, "d"), Some(civil::DATE_MIN_DAYS));
+    assert_eq!(i32_of(&got, "order_date"), Some(civil::DATE_MIN_DAYS));
 }
 
 #[test]
 fn interval_beyond_storage_read_range_is_refused() {
     #[derive(Serialize)]
     struct Text {
-        i: i64,
-        iv: &'static str,
+        quantity: i64,
+        lead_time: &'static str,
     }
     #[derive(Serialize)]
     struct Parts {
-        i: i64,
-        iv: BigQueryInterval,
+        quantity: i64,
+        lead_time: BigQueryInterval,
     }
     let plan = plan();
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &Text {
-            i: 0,
-            iv: "0-0 0 2562048:0:0",
+            quantity: 0,
+            lead_time: "0-0 0 2562048:0:0",
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::OutOfRange, "iv")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::OutOfRange, "lead_time")
     );
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &Parts {
-            i: 0,
-            iv: BigQueryInterval {
+            quantity: 0,
+            lead_time: BigQueryInterval {
                 months: 0,
                 days: 0,
                 nanos: 1_500,
@@ -1023,67 +1116,70 @@ fn interval_beyond_storage_read_range_is_refused() {
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::OutOfRange, "iv")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::OutOfRange, "lead_time")
     );
     let got = decoded(
         &plan,
         &Text {
-            i: 0,
-            iv: "0-0 0 2562047:0:0",
+            quantity: 0,
+            lead_time: "0-0 0 2562047:0:0",
         },
     );
-    assert_eq!(str_of(&got, "iv").as_deref(), Some("0-0 0 2562047:0:0"));
+    assert_eq!(
+        text_of(&got, "lead_time").as_deref(),
+        Some("0-0 0 2562047:0:0")
+    );
 }
 
 #[test]
 fn temporal_wrapper_on_another_temporal_column_is_type_mismatch() {
     #[derive(Serialize)]
     struct DateOnTimestamp {
-        i: i64,
-        ts: BigQueryDate,
+        quantity: i64,
+        placed_at: BigQueryDate,
     }
     #[derive(Serialize)]
     struct TimestampOnDate {
-        i: i64,
-        d: BigQueryTimestamp,
+        quantity: i64,
+        order_date: BigQueryTimestamp,
     }
     #[derive(Serialize)]
     struct DateOnInt {
-        i: BigQueryDate,
+        quantity: BigQueryDate,
     }
     let plan = plan();
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &DateOnTimestamp {
-            i: 0,
-            ts: BigQueryDate(date("2024-01-01")),
+            quantity: 0,
+            placed_at: BigQueryDate(date("2024-01-01")),
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "ts")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "placed_at")
     );
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &TimestampOnDate {
-            i: 0,
-            d: BigQueryTimestamp(jiff::Timestamp::UNIX_EPOCH),
+            quantity: 0,
+            order_date: BigQueryTimestamp(jiff::Timestamp::UNIX_EPOCH),
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "d")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "order_date")
     );
-    let e = encode_error(
+    let error = encode_error(
         &plan,
         &DateOnInt {
-            i: BigQueryDate(date("2024-01-01")),
+            quantity: BigQueryDate(date("2024-01-01")),
         },
     );
     assert_eq!(
-        (e.kind, e.path.as_str()),
-        (BigQueryCodecErrorKind::TypeMismatch, "i")
+        (error.kind, error.path.as_str()),
+        (BigQueryCodecErrorKind::TypeMismatch, "quantity")
     );
 }
 
@@ -1124,53 +1220,53 @@ impl Serialize for UuidLike {
 #[test]
 fn temporal_wrappers_write_integers_without_text() {
     #[derive(Serialize)]
-    struct A {
-        i: i64,
-        d: NoTextDate,
-        rng: BigQueryRange<NoTextDate>,
-        s: UuidLike,
+    struct WithoutText {
+        quantity: i64,
+        order_date: NoTextDate,
+        booking_window: BigQueryRange<NoTextDate>,
+        name: UuidLike,
     }
     let got = decoded(
         &plan(),
-        &A {
-            i: 0,
-            d: NoTextDate(19782),
-            rng: BigQueryRange {
+        &WithoutText {
+            quantity: 0,
+            order_date: NoTextDate(19782),
+            booking_window: BigQueryRange {
                 start: Some(NoTextDate(1)),
                 end: None,
             },
-            s: UuidLike,
+            name: UuidLike,
         },
     );
-    assert_eq!(i32_of(&got, "d"), Some(19782));
-    let rng = msg_of(&got, "rng").expect("rng is set");
+    assert_eq!(i32_of(&got, "order_date"), Some(19782));
+    let rng = message_of(&got, "booking_window").expect("rng is set");
     assert_eq!(
         (i32_of(&rng, "start"), i32_of(&rng, "end")),
         (Some(1), None)
     );
     assert_eq!(
-        str_of(&got, "s").as_deref(),
+        text_of(&got, "name").as_deref(),
         Some("67e55044-10b1-426f-9247-bb680e5fe0c8")
     );
     #[derive(Serialize)]
-    struct B {
-        i: i64,
-        d: BigQueryDate,
+    struct WrappedDate {
+        quantity: i64,
+        order_date: BigQueryDate,
         #[serde(with = "crate::serialize_as_timestamp")]
-        ts: jiff::Timestamp,
+        placed_at: jiff::Timestamp,
     }
-    let ts: jiff::Timestamp = "2024-02-29T12:34:56.789012345Z".parse().expect("valid");
+    let timestamp: jiff::Timestamp = "2024-02-29T12:34:56.789012345Z".parse().expect("valid");
     let got = decoded(
         &plan(),
-        &B {
-            i: 0,
-            d: BigQueryDate(date("2024-02-29")),
-            ts,
+        &WrappedDate {
+            quantity: 0,
+            order_date: BigQueryDate(date("2024-02-29")),
+            placed_at: timestamp,
         },
     );
-    assert_eq!(i32_of(&got, "d"), Some(19782));
+    assert_eq!(i32_of(&got, "order_date"), Some(19782));
     assert_eq!(
-        i64_of(&got, "ts"),
+        i64_of(&got, "placed_at"),
         Some(civil::parse_timestamp("2024-02-29T12:34:56.789012Z").expect("valid"))
     );
 }
@@ -1178,23 +1274,31 @@ fn temporal_wrappers_write_integers_without_text() {
 #[test]
 fn cdc_pseudo_columns_follow_the_row() {
     let plan = Arc::new(WritePlan::new(&schema(), true));
-    let names: Vec<&str> = plan.descriptor().field.iter().map(|f| f.name()).collect();
+    let names: Vec<&str> = plan
+        .descriptor()
+        .field
+        .iter()
+        .map(|field| field.name())
+        .collect();
     assert_eq!(
         &names[names.len() - 2..],
         [CHANGE_TYPE_COLUMN, CHANGE_SEQUENCE_NUMBER_COLUMN]
     );
     let descriptor = message_descriptor(&plan);
     #[derive(Serialize)]
-    struct A {
-        i: i64,
-        s: &'static str,
+    struct Customer {
+        quantity: i64,
+        name: &'static str,
     }
     let mut encoder = Encoder::new(plan.clone());
     let sequence: BigQueryChangeSequenceNumber = "1F/A".parse().expect("valid");
     let mut out = Vec::new();
     encoder
         .encode_change(
-            &A { i: 4, s: "x" },
+            &Customer {
+                quantity: 4,
+                name: "Ada",
+            },
             BigQueryChangeType::Upsert,
             Some(&sequence),
             &mut out,
@@ -1203,17 +1307,20 @@ fn cdc_pseudo_columns_follow_the_row() {
     let got = DynamicMessage::decode(descriptor.clone(), out.as_slice()).expect("decodes");
     assert_eq!(
         (
-            i64_of(&got, "i"),
-            str_of(&got, "s").as_deref(),
-            str_of(&got, CHANGE_TYPE_COLUMN).as_deref(),
-            str_of(&got, CHANGE_SEQUENCE_NUMBER_COLUMN).as_deref()
+            i64_of(&got, "quantity"),
+            text_of(&got, "name").as_deref(),
+            text_of(&got, CHANGE_TYPE_COLUMN).as_deref(),
+            text_of(&got, CHANGE_SEQUENCE_NUMBER_COLUMN).as_deref()
         ),
-        (Some(4), Some("x"), Some("UPSERT"), Some("1F/A"))
+        (Some(4), Some("Ada"), Some("UPSERT"), Some("1F/A"))
     );
     let mut out = Vec::new();
     encoder
         .encode_change(
-            &A { i: 5, s: "y" },
+            &Customer {
+                quantity: 5,
+                name: "Grace",
+            },
             BigQueryChangeType::Delete,
             None,
             &mut out,
@@ -1222,21 +1329,21 @@ fn cdc_pseudo_columns_follow_the_row() {
     let got = DynamicMessage::decode(descriptor, out.as_slice()).expect("decodes");
     assert_eq!(
         (
-            str_of(&got, CHANGE_TYPE_COLUMN).as_deref(),
+            text_of(&got, CHANGE_TYPE_COLUMN).as_deref(),
             get(&got, CHANGE_SEQUENCE_NUMBER_COLUMN)
         ),
         (Some("DELETE"), None)
     );
     #[derive(Serialize)]
     struct Spoof {
-        i: i64,
+        quantity: i64,
         #[serde(rename = "_CHANGE_TYPE")]
         change: &'static str,
     }
-    let e = match encoder
+    let error = match encoder
         .encode_change(
             &Spoof {
-                i: 1,
+                quantity: 1,
                 change: "DELETE",
             },
             BigQueryChangeType::Upsert,
@@ -1250,7 +1357,7 @@ fn cdc_pseudo_columns_follow_the_row() {
         other => panic!("expected a serialize error, got {other:?}"),
     };
     assert_eq!(
-        (e.kind, e.path.as_str()),
+        (error.kind, error.path.as_str()),
         (BigQueryCodecErrorKind::UnknownField, CHANGE_TYPE_COLUMN)
     );
 }
@@ -1261,104 +1368,115 @@ fn json_column_prints_any_shape_but_a_string_as_json() {
     let plan = Arc::new(WritePlan::new(
         &BigQueryTableSchema {
             fields: vec![
-                nullable("js", BigQueryFieldType::Json),
-                field("ajs", BigQueryFieldType::Json, Repeated),
+                nullable("attributes", BigQueryFieldType::Json),
+                field("attribute_list", BigQueryFieldType::Json, Repeated),
             ],
         },
         false,
     ));
     #[derive(Serialize)]
     struct Doc {
-        a: i64,
-        b: Vec<&'static str>,
+        count: i64,
+        tags: Vec<&'static str>,
     }
     #[derive(Serialize)]
-    struct Row<J: Serialize, A: Serialize> {
-        js: J,
-        ajs: A,
+    struct JsonColumns<Attributes: Serialize, AttributeList: Serialize> {
+        attributes: Attributes,
+        attribute_list: AttributeList,
     }
-    let js_of = |m: DynamicMessage| (str_of(&m, "js"), list_of(&m, "ajs"));
-    let text = |s: &str| Value::String(s.into());
+    let json_columns = |message: DynamicMessage| {
+        (
+            text_of(&message, "attributes"),
+            list_of(&message, "attribute_list"),
+        )
+    };
+    let text = |text: &str| Value::String(text.into());
 
-    let doc = Doc { a: 1, b: vec!["x"] };
+    let doc = Doc {
+        count: 1,
+        tags: vec!["gift"],
+    };
     assert_eq!(
-        js_of(decoded(
+        json_columns(decoded(
             &plan,
-            &Row {
-                js: &doc,
-                ajs: [&doc]
+            &JsonColumns {
+                attributes: &doc,
+                attribute_list: [&doc]
             }
         )),
         (
-            Some(r#"{"a":1,"b":["x"]}"#.into()),
-            vec![text(r#"{"a":1,"b":["x"]}"#)]
+            Some(r#"{"count":1,"tags":["gift"]}"#.into()),
+            vec![text(r#"{"count":1,"tags":["gift"]}"#)]
         )
     );
-    let value = serde_json::json!({"k": [1, null]});
+    let value = serde_json::json!({"unit": [1, null]});
     assert_eq!(
-        js_of(decoded(
+        json_columns(decoded(
             &plan,
-            &Row {
-                js: &value,
-                ajs: vec![serde_json::json!(true), serde_json::json!(2)]
+            &JsonColumns {
+                attributes: &value,
+                attribute_list: vec![serde_json::json!(true), serde_json::json!(2)]
             }
         )),
         (
-            Some(r#"{"k":[1,null]}"#.into()),
+            Some(r#"{"unit":[1,null]}"#.into()),
             vec![text("true"), text("2")]
         )
     );
-    let map = std::collections::BTreeMap::from([("z", 1.5)]);
+    let map = std::collections::BTreeMap::from([("discount", 1.5)]);
     assert_eq!(
-        js_of(decoded(
+        json_columns(decoded(
             &plan,
-            &Row {
-                js: &map,
-                ajs: [vec![1, 2]]
+            &JsonColumns {
+                attributes: &map,
+                attribute_list: [vec![1, 2]]
             }
         )),
-        (Some(r#"{"z":1.5}"#.into()), vec![text("[1,2]")])
+        (Some(r#"{"discount":1.5}"#.into()), vec![text("[1,2]")])
     );
     assert_eq!(
-        js_of(decoded(
+        json_columns(decoded(
             &plan,
-            &Row {
-                js: r#"{"raw": true}"#,
-                ajs: ["[ 1 ]"]
+            &JsonColumns {
+                attributes: r#"{"raw": true}"#,
+                attribute_list: ["[ 1 ]"]
             }
         )),
         (Some(r#"{"raw": true}"#.into()), vec![text("[ 1 ]")]),
         "a string is the JSON text as it is"
     );
     assert_eq!(
-        js_of(decoded(
+        json_columns(decoded(
             &plan,
-            &Row {
-                js: Some(serde_json::Value::Null),
-                ajs: [(); 0]
+            &JsonColumns {
+                attributes: Some(serde_json::Value::Null),
+                attribute_list: [(); 0]
             }
         )),
         (Some("null".into()), vec![]),
         "JSON null is text, apart from SQL NULL"
     );
     assert_eq!(
-        js_of(decoded(
+        json_columns(decoded(
             &plan,
-            &Row {
-                js: None::<serde_json::Value>,
-                ajs: [(); 0]
+            &JsonColumns {
+                attributes: None::<serde_json::Value>,
+                attribute_list: [(); 0]
             }
         )),
         (None, vec![])
     );
     assert_eq!(
-        js_of(decoded(
+        json_columns(decoded(
             &plan,
-            &Row {
-                js: BigQueryJson(&doc),
-                ajs: [BigQueryJson("s")]
+            &JsonColumns {
+                attributes: BigQueryJson(&doc),
+                attribute_list: [BigQueryJson("name")]
             }
         )),
-        (Some(r#"{"a":1,"b":["x"]}"#.into()), vec![text(r#""s""#)])
+        (
+            Some(r#"{"count":1,"tags":["gift"]}"#.into()),
+            vec![text(r#""name""#)]
+        )
     );
 }

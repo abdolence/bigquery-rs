@@ -300,8 +300,8 @@ pub(crate) fn relaxes_a_required_field(
                 let relaxed = before.mode == BigQueryFieldMode::Required
                     && after.mode == BigQueryFieldMode::Nullable;
                 let nested = match (&before.field_type, &after.field_type) {
-                    (BigQueryFieldType::Struct(b), BigQueryFieldType::Struct(a)) => {
-                        relaxes_a_required_field(b, a)
+                    (BigQueryFieldType::Struct(before), BigQueryFieldType::Struct(after)) => {
+                        relaxes_a_required_field(before, after)
                     }
                     _ => false,
                 };

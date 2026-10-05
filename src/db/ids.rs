@@ -31,7 +31,7 @@ const FORBIDDEN_ASCII: &[u8] = b"`'\"\\./$@";
 enum IdViolation {
     Empty,
     TooLong {
-        len: usize,
+        length: usize,
     },
     /// The character starting at byte `at` is not allowed.
     InvalidChar {
@@ -61,7 +61,7 @@ impl IdViolation {
         let error = match self {
             Self::Empty => rule.to_string(),
             // The value is unbounded here, so the message gives its length, not the value.
-            Self::TooLong { len } => format!("{rule}, was {len} bytes"),
+            Self::TooLong { length } => format!("{rule}, was {length} bytes"),
             Self::InvalidChar { at } => {
                 let ch = id[at..]
                     .chars()
@@ -87,33 +87,36 @@ impl IdViolation {
 /// further decoding.
 const fn check_id(id: &str) -> Result<(), IdViolation> {
     let bytes = id.as_bytes();
-    let len = bytes.len();
-    if len == 0 {
+    let length = bytes.len();
+    if length == 0 {
         return Err(IdViolation::Empty);
     }
-    if len > MAX_ID_BYTES {
-        return Err(IdViolation::TooLong { len });
+    if length > MAX_ID_BYTES {
+        return Err(IdViolation::TooLong { length });
     }
-    let mut i = 0;
-    while i < len {
-        let b = bytes[i];
-        let c1_control = b == 0xC2 && i + 1 < len && bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0x9F;
-        if b.is_ascii_control() || c1_control || is_forbidden_ascii(b) {
-            return Err(IdViolation::InvalidChar { at: i });
+    let mut index = 0;
+    while index < length {
+        let byte = bytes[index];
+        let c1_control = byte == 0xC2
+            && index + 1 < length
+            && bytes[index + 1] >= 0x80
+            && bytes[index + 1] <= 0x9F;
+        if byte.is_ascii_control() || c1_control || is_forbidden_ascii(byte) {
+            return Err(IdViolation::InvalidChar { at: index });
         }
-        i += 1;
+        index += 1;
     }
     Ok(())
 }
 
-/// Whether `b` is in [`FORBIDDEN_ASCII`]; a loop because slice methods are not `const fn`.
-const fn is_forbidden_ascii(b: u8) -> bool {
-    let mut i = 0;
-    while i < FORBIDDEN_ASCII.len() {
-        if FORBIDDEN_ASCII[i] == b {
+/// Whether `byte` is in [`FORBIDDEN_ASCII`]; a loop because slice methods are not `const fn`.
+const fn is_forbidden_ascii(byte: u8) -> bool {
+    let mut index = 0;
+    while index < FORBIDDEN_ASCII.len() {
+        if FORBIDDEN_ASCII[index] == byte {
             return true;
         }
-        i += 1;
+        index += 1;
     }
     false
 }

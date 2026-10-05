@@ -92,11 +92,11 @@ impl<'a> BigQueryExprBuilder<'a, BigQueryDb> {
     ///     .fluent()
     ///     .schema()
     ///     .table(SHOP.table(ORDERS))
-    ///     .columns(|c| {
-    ///         c.fields([
-    ///             c.field(path!(Order::id)).int64().required(),
-    ///             c.field(path!(Order::customer)).string(),
-    ///             c.field(path!(Order::placed_at)).timestamp(),
+    ///     .columns(|columns| {
+    ///         columns.fields([
+    ///             columns.field(path!(Order::id)).int64().required(),
+    ///             columns.field(path!(Order::customer)).string(),
+    ///             columns.field(path!(Order::placed_at)).timestamp(),
     ///         ])
     ///     })
     ///     .primary_key([path!(Order::id)])

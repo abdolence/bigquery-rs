@@ -30,11 +30,20 @@ pub(crate) enum KeyMode {
     Name,
 }
 
+/// A name in `fields` that is a column of the node.
+#[derive(Clone, Copy)]
+struct PlannedKey {
+    /// The name's position in `fields`, which derive's position keys number.
+    field_position: u32,
+    /// The column of the node that holds the name's values.
+    column: u32,
+}
+
 /// One struct target resolved against the columns of one node of a batch.
 pub(crate) struct Plan {
     mode: Cell<KeyMode>,
-    /// `(position in fields, column)`, in `fields` order, for every name that is a column.
-    keys: Vec<(u32, u32)>,
+    /// Every name that is a column, in `fields` order.
+    keys: Vec<PlannedKey>,
     /// A column that no name in `fields` matches. It is offered by name until the target
     /// ignores it once, so that `deny_unknown_fields` rejects every row of a batch with extra
     /// columns, while any other target pays for it on one row only.
@@ -54,7 +63,7 @@ impl Plan {
                 columns
                     .iter()
                     .position(|column| column == name)
-                    .and_then(|c| u32::try_from(c).ok())
+                    .and_then(|column| u32::try_from(column).ok())
             })
             .collect();
         let mode = if found.iter().all(Option::is_some) {
@@ -65,11 +74,16 @@ impl Plan {
         let keys = found
             .iter()
             .enumerate()
-            .filter_map(|(j, c)| Some((u32::try_from(j).ok()?, (*c)?)))
+            .filter_map(|(field_position, column)| {
+                Some(PlannedKey {
+                    field_position: u32::try_from(field_position).ok()?,
+                    column: (*column)?,
+                })
+            })
             .collect();
         let unknown = (0..columns.len())
-            .filter_map(|c| u32::try_from(c).ok())
-            .find(|c| !found.contains(&Some(*c)));
+            .filter_map(|column| u32::try_from(column).ok())
+            .find(|column| !found.contains(&Some(*column)));
         Plan {
             mode: Cell::new(mode),
             keys,
@@ -105,10 +119,14 @@ enum Order {
     Probe { offer_unknown: bool },
 }
 
+/// The entry handed out last, whose value is asked for next.
 #[derive(Clone, Copy)]
 enum Pending {
+    /// The plan's key at this index.
     Field(u32),
+    /// The plan's key at this index, offered as the alias probe.
     Probe(u32),
+    /// The column that no name in `fields` matches.
     Unknown(u32),
 }
 
@@ -149,7 +167,7 @@ impl<'n, 'a> FieldMap<'n, 'a> {
         let mut step = step;
         if probe {
             if step == 0 {
-                return last.map(|l| Pending::Probe(l as u32));
+                return last.map(|last| Pending::Probe(last as u32));
             }
             step -= 1;
         }
@@ -202,26 +220,32 @@ impl<'a> MapAccess<'a> for FieldMap<'_, 'a> {
         self.next += 1;
         self.pending = Some(entry);
         match entry {
-            Pending::Field(k) => {
-                let (j, _) = self.plan.keys[k as usize];
+            Pending::Field(key) => {
+                let field_position = self.plan.keys[key as usize].field_position;
                 match self.plan.mode() {
-                    KeyMode::Index => seed.deserialize(U64Deserializer::new(u64::from(j))),
-                    KeyMode::Name => {
-                        seed.deserialize(BorrowedStrDeserializer::new(self.fields[j as usize]))
+                    KeyMode::Index => {
+                        seed.deserialize(U64Deserializer::new(u64::from(field_position)))
                     }
+                    KeyMode::Name => seed.deserialize(BorrowedStrDeserializer::new(
+                        self.fields[field_position as usize],
+                    )),
                 }
                 .map(Some)
             }
-            Pending::Probe(k) => {
-                let (j, _) = self.plan.keys[k as usize];
-                let key = seed.deserialize(U64Deserializer::<CodecError>::new(u64::from(j)));
+            Pending::Probe(key) => {
+                let field_position = self.plan.keys[key as usize].field_position;
+                let key = seed.deserialize(U64Deserializer::<CodecError>::new(u64::from(
+                    field_position,
+                )));
                 if key.is_err() {
                     self.mark_aliased();
                 }
                 key.map(Some)
             }
-            Pending::Unknown(c) => seed
-                .deserialize(BorrowedStrDeserializer::new(self.node.name(c as usize)))
+            Pending::Unknown(column) => seed
+                .deserialize(BorrowedStrDeserializer::new(
+                    self.node.name(column as usize),
+                ))
                 .map(Some),
         }
     }
@@ -233,32 +257,35 @@ impl<'a> MapAccess<'a> for FieldMap<'_, 'a> {
                 "a struct value was requested before its key",
             )
         })?;
-        let (c, value) = match entry {
-            Pending::Field(k) => {
-                let c = self.plan.keys[k as usize].1 as usize;
+        let (column_index, value) = match entry {
+            Pending::Field(key) => {
+                let column_index = self.plan.keys[key as usize].column as usize;
                 let value = self
                     .node
-                    .column(c)
+                    .column(column_index)
                     .and_then(|column| seed.deserialize(ValueDeserializer::new(column, self.row)));
-                (c, value)
+                (column_index, value)
             }
-            Pending::Probe(k) => {
-                let c = self.plan.keys[k as usize].1 as usize;
-                let value = self.node.column(c).and_then(|column| {
+            Pending::Probe(key) => {
+                let column_index = self.plan.keys[key as usize].column as usize;
+                let value = self.node.column(column_index).and_then(|column| {
                     seed.deserialize(ProbeValue {
                         map: self,
                         value: ValueDeserializer::new(column, self.row),
                     })
                 });
-                (c, value)
+                (column_index, value)
             }
-            Pending::Unknown(c) => {
-                let c = c as usize;
-                let value = seed.deserialize(Unknown { map: self, c });
-                (c, value)
+            Pending::Unknown(column) => {
+                let column_index = column as usize;
+                let value = seed.deserialize(Unknown {
+                    map: self,
+                    column: column_index,
+                });
+                (column_index, value)
             }
         };
-        value.map_err(|e| e.at_field(self.node.name(c)))
+        value.map_err(|error| error.at_field(self.node.name(column_index)))
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -276,8 +303,8 @@ struct ProbeValue<'m, 'n, 'a> {
 macro_rules! forward_to_value {
     ($($method:ident),*) => {
         $(
-            fn $method<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-                serde::Deserializer::$method(self.value, v)
+            fn $method<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+                serde::Deserializer::$method(self.value, visitor)
             }
         )*
     };
@@ -313,7 +340,7 @@ impl<'a> serde::Deserializer<'a> for ProbeValue<'_, '_, 'a> {
         deserialize_identifier
     );
 
-    fn deserialize_ignored_any<V: Visitor<'a>>(self, _v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_ignored_any<V: Visitor<'a>>(self, _visitor: V) -> Result<V::Value, CodecError> {
         self.map.mark_aliased();
         Err(CodecError::new(
             BigQueryCodecErrorKind::Custom,
@@ -324,48 +351,52 @@ impl<'a> serde::Deserializer<'a> for ProbeValue<'_, '_, 'a> {
     fn deserialize_unit_struct<V: Visitor<'a>>(
         self,
         name: &'static str,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.value.deserialize_unit_struct(name, v)
+        self.value.deserialize_unit_struct(name, visitor)
     }
 
     fn deserialize_newtype_struct<V: Visitor<'a>>(
         self,
         name: &'static str,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.value.deserialize_newtype_struct(name, v)
+        self.value.deserialize_newtype_struct(name, visitor)
     }
 
-    fn deserialize_tuple<V: Visitor<'a>>(self, len: usize, v: V) -> Result<V::Value, CodecError> {
-        self.value.deserialize_tuple(len, v)
+    fn deserialize_tuple<V: Visitor<'a>>(
+        self,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value, CodecError> {
+        self.value.deserialize_tuple(len, visitor)
     }
 
     fn deserialize_tuple_struct<V: Visitor<'a>>(
         self,
         name: &'static str,
         len: usize,
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.value.deserialize_tuple_struct(name, len, v)
+        self.value.deserialize_tuple_struct(name, len, visitor)
     }
 
     fn deserialize_struct<V: Visitor<'a>>(
         self,
         name: &'static str,
         fields: &'static [&'static str],
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.value.deserialize_struct(name, fields, v)
+        self.value.deserialize_struct(name, fields, visitor)
     }
 
     fn deserialize_enum<V: Visitor<'a>>(
         self,
         name: &'static str,
         variants: &'static [&'static str],
-        v: V,
+        visitor: V,
     ) -> Result<V::Value, CodecError> {
-        self.value.deserialize_enum(name, variants, v)
+        self.value.deserialize_enum(name, variants, visitor)
     }
 }
 
@@ -373,20 +404,20 @@ impl<'a> serde::Deserializer<'a> for ProbeValue<'_, '_, 'a> {
 /// which is what derive does with a key it does not know.
 struct Unknown<'m, 'n, 'a> {
     map: &'m FieldMap<'n, 'a>,
-    c: usize,
+    column: usize,
 }
 
 impl<'a> serde::Deserializer<'a> for Unknown<'_, '_, 'a> {
     type Error = CodecError;
 
-    fn deserialize_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
-        let column = self.map.node.column(self.c)?;
-        ValueDeserializer::new(column, self.map.row).deserialize_any(v)
+    fn deserialize_any<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
+        let column = self.map.node.column(self.column)?;
+        ValueDeserializer::new(column, self.map.row).deserialize_any(visitor)
     }
 
-    fn deserialize_ignored_any<V: Visitor<'a>>(self, v: V) -> Result<V::Value, CodecError> {
+    fn deserialize_ignored_any<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.map.plan.unknown_ignored.set(true);
-        v.visit_unit()
+        visitor.visit_unit()
     }
 
     serde::forward_to_deserialize_any! {

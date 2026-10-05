@@ -49,11 +49,11 @@ pub(crate) fn injection_corpus() -> Vec<String> {
 /// Every character class the escaper has a rule for, beyond the corpus: all of C0 and C1, DEL,
 /// the invisible format characters, a non-BMP character and the tag block.
 pub(crate) fn every_char_class() -> String {
-    let mut s: String = (0u32..0x250).filter_map(char::from_u32).collect();
-    s.push_str(
+    let mut text: String = (0u32..0x250).filter_map(char::from_u32).collect();
+    text.push_str(
         "\u{00AD}\u{061C}\u{200B}\u{200E}\u{2066}\u{2069}\u{FFF9}\u{1F600}\u{E0001}\u{E007F}",
     );
-    s
+    text
 }
 
 /// One piece of a statement as GoogleSQL's lexer splits it, with every quoted token decoded.
@@ -87,28 +87,31 @@ pub(crate) fn pieces(sql: &str) -> Vec<Piece> {
         }
         let mut codes: Vec<u32> = Vec::new();
         loop {
-            let c = chars
+            let character = chars
                 .next()
                 .unwrap_or_else(|| panic!("{quote} never closes in {sql:.80?}"));
-            if c == quote {
+            if character == quote {
                 break;
             }
             assert!(
-                c != '\n' && c != '\r',
+                character != '\n' && character != '\r',
                 "a raw newline in a quoted token: {sql:.80?}"
             );
-            assert!(!bytes || c.is_ascii(), "a bytes literal holds raw {c:?}");
-            codes.push(if c == '\\' {
+            assert!(
+                !bytes || character.is_ascii(),
+                "a bytes literal holds raw {character:?}"
+            );
+            codes.push(if character == '\\' {
                 escape(&mut chars, bytes)
             } else {
-                c.into()
+                character.into()
             });
         }
         out.push(match (quote, bytes) {
             (_, true) => Piece::Bytes(
                 codes
                     .into_iter()
-                    .map(|b| u8::try_from(b).expect("a byte"))
+                    .map(|code| u8::try_from(code).expect("a byte"))
                     .collect(),
             ),
             ('`', _) => Piece::Identifier(scalars(codes)),
