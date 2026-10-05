@@ -313,7 +313,7 @@ let orders: Vec<Order> = db
 By default the library sends every query with BigQuery's short query mode
 (`JOB_CREATION_OPTIONAL`), as Google's own Rust crate does. BigQuery then answers a short query
 whose result fits in the first response without creating a job. In the
-[benchmarks](./benchmarks.md#small-query-latency) creating the job cost about 65 ms.
+[benchmarks](./benchmarks.md#small-query-latency) creating the job cost 80-165 ms.
 
 A query that ran without a job:
 
@@ -545,8 +545,8 @@ in a table read. The query's span records which path it took, as `/bigquery/rout
 
 BigQuery decides how much of a result goes inline. A small result reaches its last row sooner
 inline, since a Storage Read session costs a call to open before the first row. A large result is
-much faster through Storage Read: in the benchmarks 200,000 rows took 1.29 s, against 3.86 s for
-the official crate and 4.70 s for Python reading the same result as REST pages.
+much faster through Storage Read: in the benchmarks 200,000 rows took 1.16 s, against 4.39 s for
+the official crate and 4.55 s for Python reading the same result as REST pages.
 
 `.inline_rows_limit(rows)` caps the rows of the first response, so a result with more goes to
 Storage Read. `.read_options(..)` sets how that read opens its session, the same

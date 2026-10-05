@@ -308,4 +308,5 @@ test for it yet.
 - Every insert pays the round trip to open its write stream; share a streaming writer for many
   small writes.
 
-The [benchmarks](./benchmarks.md) have a Storage Write run of 1M rows against the official crate.
+The [benchmarks](./benchmarks.md) have Storage Write runs of 1M rows, from structures and from Arrow
+record batches, against the official crate.

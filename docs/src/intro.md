@@ -51,20 +51,21 @@ each of them provides that the other does not.
 - **gRPC throughout.** Queries, jobs, datasets and tables go through the BigQuery v2 API over
   gRPC, as well as Storage Read and Write. The official crate sends queries over REST and reads
   their rows as JSON pages.
-- **Performance.** Measured on 2026-10-04 against the official crate and Python on one home
+- **Performance.** Measured on 2026-10-05 against the official crate and Python on one home
   connection in Sweden to `europe-north2`, full details in the
   [benchmarks](./benchmarks.md):
-    - small queries take 0.096 s for `SELECT 1`, the same as the official crate, which also uses
-      BigQuery's short query mode, and faster than Python's 0.173 s, since Python creates a job;
-    - a 200,000-row query result as typed rows takes 1.29 s against 3.86 s, because the
+    - small queries take 0.117 s for `SELECT 1`, about the same as the official crate, which
+      also uses BigQuery's short query mode, and faster than Python's 0.270 s, since Python
+      creates a job;
+    - a 200,000-row query result as typed rows takes 1.16 s against 4.39 s, because the
       library reads a large result through Storage Read and the official crate pages it as
       JSON;
-    - a 1M-row table scan as typed rows takes 9.8 s. The official crate has no typed Storage
-      Read, so its typed path is a `SELECT *` query, which took 94.7 s and billed the whole
+    - a 1M-row table scan as typed rows takes 9.6 s. The official crate has no typed Storage
+      Read, so its typed path is a `SELECT *` query, which took 95.2 s and billed the whole
       table every run;
-    - a 1M-row Storage Write takes 30.0 s against 32.7 s, with 18% fewer bytes sent as
-      protobuf than the official crate's Arrow. I think the smaller requests are why it is a bit
-      faster.
+    - a 1M-row Storage Write from structures takes 34.0 s against 35.4 s, with 18% fewer bytes
+      sent as protobuf than the official crate's Arrow. I think the smaller requests are why it
+      is a bit faster.
 - **Observability.** Every query, read and write span carries what BigQuery reports: bytes
   processed and billed, slot milliseconds, cache hits, rows and bytes read, rows appended and
   bytes sent, retries. `query_with_stats()` returns a query's figures together with its rows.

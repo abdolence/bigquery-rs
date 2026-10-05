@@ -37,7 +37,7 @@ Raw results land in `bench-compare/results/<run label>/results.json`, with each 
 stderr next to it. `--only query_const,query_1k,query_200k_rows` runs a subset; the names are
 the keys of `SCENARIOS` in `python/orchestrate.py`.
 
-A full run takes about 35 minutes, most of it the official crate reading the 1M-row table over
+A full run takes about 45 minutes, most of it the official crate reading the 1M-row table over
 REST. It costs a few cents: the generated-row queries bill 0 bytes, the scans and writes fall
 under the Storage Read and Write free tiers, and only the official crate's `SELECT *` scan
 bills the table size (about 215 MB per run).
