@@ -20,6 +20,9 @@ mod table_reads_or_queries {}
 #[doc = include_str!("../docs/src/writing-data.md")]
 mod writing_data {}
 
+#[doc = include_str!("../docs/src/update-and-delete.md")]
+mod update_and_delete {}
+
 #[doc = include_str!("../docs/src/cdc.md")]
 mod cdc {}
 

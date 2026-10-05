@@ -9,6 +9,10 @@ The typical use is mirroring an OLTP database into BigQuery as a stream. You rea
 a PostgreSQL or MySQL table from its log, and write each one as it comes. The BigQuery table then
 looks like the source table, with a delay you choose.
 
+This chapter is about the CDC API itself. To update or delete a few rows by primary key,
+`db.fluent().update()` and `db.fluent().delete()` are simpler, see
+[updating and deleting](./update-and-delete.md).
+
 ## How it works
 
 A CDC table needs a primary key. BigQuery's keys are `NOT ENFORCED`: BigQuery never checks them,
@@ -220,6 +224,7 @@ From the library's side:
 - a CDC writer always writes `_CHANGE_TYPE`, so write plain inserts to the same table with a
   separate writer. BigQuery's CDC documentation says rows with and without a change type on one
   connection are not supported;
-- a delete still serializes a whole row of the table's type, but only its key columns matter;
+- a delete serializes a whole row, but only its key columns matter. A struct of just the key
+  works when every column it leaves out is `NULLABLE`;
 - delivery is at least once, as on every default stream write. With sequence numbers a change
   sent twice is harmless.

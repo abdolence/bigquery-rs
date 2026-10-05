@@ -6,18 +6,23 @@ use crate::{BigQueryDb, BigQueryQueryParams};
 use crate::{BigQueryQuerySupport, BigQueryReadSupport, BigQueryWriteSupport};
 
 mod dataset_builder;
+mod delete_builder;
 mod insert_builder;
 mod query_builder;
+mod row_changes;
 mod schema_builder;
 mod select_builder;
 mod select_filter_builder;
+mod update_builder;
 
 pub use dataset_builder::*;
+pub use delete_builder::*;
 pub use insert_builder::*;
 pub use query_builder::*;
 pub use schema_builder::*;
 pub use select_builder::*;
 pub use select_filter_builder::*;
+pub use update_builder::*;
 
 /// The entry point for fluent BigQuery operations, obtained from
 /// [`BigQueryDb::fluent()`](crate::BigQueryDb::fluent).
@@ -69,6 +74,69 @@ where
     #[inline]
     pub fn insert(self) -> BigQueryInsertInitialBuilder<'a, D> {
         BigQueryInsertInitialBuilder::new(self.db)
+    }
+
+    /// Starts an update of whole rows by primary key, written as BigQuery CDC upserts.
+    /// Continue with `.in_table()` to name the table, which needs a primary key.
+    ///
+    /// ```rust,no_run
+    /// # use bigquery::*;
+    /// # use serde::Serialize;
+    /// # async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+    /// const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    /// const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+    ///
+    /// #[derive(Serialize)]
+    /// struct Order {
+    ///     id: i64,
+    ///     status: String,
+    /// }
+    ///
+    /// let order = Order {
+    ///     id: 42,
+    ///     status: "shipped".to_string(),
+    /// };
+    /// db.fluent()
+    ///     .update()
+    ///     .in_table(SHOP.table(ORDERS))
+    ///     .object(&order)
+    ///     .execute()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    pub fn update(self) -> BigQueryUpdateInitialBuilder<'a, D> {
+        BigQueryUpdateInitialBuilder::new(self.db)
+    }
+
+    /// Starts a delete of rows by primary key, written as BigQuery CDC deletes. Continue with
+    /// `.from()` to name the table, which needs a primary key.
+    ///
+    /// ```rust,no_run
+    /// # use bigquery::*;
+    /// # use serde::Serialize;
+    /// # async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+    /// const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+    /// const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+    ///
+    /// #[derive(Serialize)]
+    /// struct OrderKey {
+    ///     id: i64,
+    /// }
+    ///
+    /// db.fluent()
+    ///     .delete()
+    ///     .from(SHOP.table(ORDERS))
+    ///     .object(&OrderKey { id: 42 })
+    ///     .execute()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    pub fn delete(self) -> BigQueryDeleteInitialBuilder<'a, D> {
+        BigQueryDeleteInitialBuilder::new(self.db)
     }
 }
 
@@ -128,5 +196,6 @@ pub(crate) mod tests {
 
     mod mock_query;
     mod mock_read;
+    mod mock_update_delete;
     mod mock_write;
 }

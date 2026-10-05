@@ -90,3 +90,92 @@ async fn cdc_upsert_then_delete() -> TestResult {
     })
     .await
 }
+
+#[derive(Serialize)]
+struct Order {
+    id: i64,
+    status: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OrderKey {
+    id: i64,
+}
+
+/// The table has no `max_staleness`, so a query merges every change at query time and sees
+/// them all as soon as `execute` returns.
+#[tokio::test]
+async fn fluent_update_replaces_whole_rows_and_delete_needs_only_the_key() -> TestResult {
+    with_scratch(
+        "fluent_update_replaces_whole_rows_and_delete_needs_only_the_key",
+        async |scratch: &Scratch| {
+            let table = create_table(
+                scratch,
+                "orders",
+                vec![
+                    BigQueryFieldSchema {
+                        name: "id".into(),
+                        field_type: BigQueryFieldType::Int64,
+                        mode: BigQueryFieldMode::Required,
+                        description: None,
+                        default_value_expression: None,
+                    },
+                    BigQueryFieldSchema {
+                        name: "status".into(),
+                        field_type: BigQueryFieldType::String { max_length: None },
+                        mode: BigQueryFieldMode::Nullable,
+                        description: None,
+                        default_value_expression: None,
+                    },
+                ],
+                Some("id"),
+            )
+            .await?;
+            let placed = |id| Order {
+                id,
+                status: Some("placed".into()),
+            };
+            scratch
+                .db
+                .fluent()
+                .update()
+                .in_table(table.clone())
+                .objects(&[placed(1), placed(2)])
+                .execute()
+                .await?;
+            scratch
+                .db
+                .fluent()
+                .update()
+                .in_table(table.clone())
+                .object(&Order {
+                    id: 1,
+                    status: None,
+                })
+                .execute()
+                .await?;
+            let summary = scratch
+                .db
+                .fluent()
+                .delete()
+                .from(table)
+                .object(&OrderKey { id: 2 })
+                .execute()
+                .await?;
+            assert_eq!((summary.rows_written, summary.rows_failed), (1, 0));
+
+            let (rows, billed) = query_rows(
+                scratch,
+                &format!(
+                    "SELECT id, status FROM {} ORDER BY id",
+                    scratch.table_sql("orders")
+                ),
+            )
+            .await?;
+            assert_eq!(rows, [vec![Some("1".to_string()), None]]);
+            eprintln!("fluent update and delete: 4 changes written, {billed} bytes billed");
+            Ok(())
+        },
+    )
+    .await
+}
