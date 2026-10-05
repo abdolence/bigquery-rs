@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bd85b202.js";
+            window.path_to_searchindex_js = "searchindex-dbdfd4fe.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -221,29 +221,30 @@ writing, October 2026). Both crates work with the same APIs in different ways, s
 each of them provides that the other does not.</p>
 <h3 id="what-this-crate-provides"><a class="header" href="#what-this-crate-provides">What this crate provides</a></h3>
 <ul>
-<li><strong>High-level typed API.</strong> Fluent builders in the same style as
-<a href="https://github.com/abdolence/firestore-rs">firestore-rs</a>. Rows are your own structures in both
-directions, through Serde, for table reads, query results, writes and CDC. Dataset and table
+<li><strong>High-level typed API.</strong> Fluent builders for table reads, queries, writes, updates and
+deletes, and table schemas. Rows are your own structures in both directions, through Serde,
+for table reads, query results, writes and CDC. Dataset and table
 IDs are checked types, column paths come from your structure fields with <code>path!</code>/<code>paths!</code>,
 and table schemas are declared once and planned or synced with <code>.plan()</code>/<code>.sync()</code>.</li>
 <li><strong>gRPC throughout.</strong> Queries, jobs, datasets and tables go through the BigQuery v2 API over
 gRPC, as well as Storage Read and Write. The official crate sends queries over REST and reads
 their rows as JSON pages.</li>
-<li><strong>Performance.</strong> Measured on 2026-10-04 against the official crate and Python on one home
+<li><strong>Performance.</strong> Measured on 2026-10-05 against the official crate and Python on one home
 connection in Sweden to <code>europe-north2</code>, full details in the
 <a href="./benchmarks.html">benchmarks</a>:
 <ul>
-<li>small queries take 0.096 s for <code>SELECT 1</code>, the same as the official crate, which also uses
-BigQuery’s short query mode, and faster than Python’s 0.173 s, since Python creates a job;</li>
-<li>a 200,000-row query result as typed rows takes 1.29 s against 3.86 s, because the
+<li>small queries take 0.117 s for <code>SELECT 1</code>, about the same as the official crate, which
+also uses BigQuery’s short query mode, and faster than Python’s 0.270 s, since Python
+creates a job;</li>
+<li>a 200,000-row query result as typed rows takes 1.16 s against 4.39 s, because the
 library reads a large result through Storage Read and the official crate pages it as
 JSON;</li>
-<li>a 1M-row table scan as typed rows takes 9.8 s. The official crate has no typed Storage
-Read, so its typed path is a <code>SELECT *</code> query, which took 94.7 s and billed the whole
+<li>a 1M-row table scan as typed rows takes 9.6 s. The official crate has no typed Storage
+Read, so its typed path is a <code>SELECT *</code> query, which took 95.2 s and billed the whole
 table every run;</li>
-<li>a 1M-row Storage Write takes 30.0 s against 32.7 s, with 18% fewer bytes sent as
-protobuf than the official crate’s Arrow. I think the smaller requests are why it is a bit
-faster.</li>
+<li>a 1M-row Storage Write from structures takes 34.0 s against 35.4 s, with 18% fewer bytes
+sent as protobuf than the official crate’s Arrow. I think the smaller requests are why it
+is a bit faster.</li>
 </ul>
 </li>
 <li><strong>Observability.</strong> Every query, read and write span carries what BigQuery reports: bytes

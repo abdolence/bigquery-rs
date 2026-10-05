@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bd85b202.js";
+            window.path_to_searchindex_js = "searchindex-dbdfd4fe.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -445,7 +445,7 @@ struct Order {
 <p>By default the library sends every query with BigQuery’s short query mode
 (<code>JOB_CREATION_OPTIONAL</code>), as Google’s own Rust crate does. BigQuery then answers a short query
 whose result fits in the first response without creating a job. In the
-<a href="./benchmarks.html#small-query-latency">benchmarks</a> creating the job cost about 65 ms.</p>
+<a href="./benchmarks.html#small-query-latency">benchmarks</a> creating the job cost 80-165 ms.</p>
 <p>A query that ran without a job:</p>
 <ul>
 <li>reports a <code>query_id</code> and no <code>job</code> in its stats and outcome;</li>
@@ -634,8 +634,8 @@ through the Storage Read API;</li>
 in a table read. The query’s span records which path it took, as <code>/bigquery/route</code>.</p>
 <p>BigQuery decides how much of a result goes inline. A small result reaches its last row sooner
 inline, since a Storage Read session costs a call to open before the first row. A large result is
-much faster through Storage Read: in the benchmarks 200,000 rows took 1.29 s, against 3.86 s for
-the official crate and 4.70 s for Python reading the same result as REST pages.</p>
+much faster through Storage Read: in the benchmarks 200,000 rows took 1.16 s, against 4.39 s for
+the official crate and 4.55 s for Python reading the same result as REST pages.</p>
 <p><code>.inline_rows_limit(rows)</code> caps the rows of the first response, so a result with more goes to
 Storage Read. <code>.read_options(..)</code> sets how that read opens its session, the same
 <code>BigQueryReadOptions</code> as for table reads:</p>
