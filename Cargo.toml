@@ -37,7 +37,7 @@ bench-internals = []
 tracing = "0.1"
 gcloud-sdk = { version = "0.32.4", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
 hyper = { version = "1" }
-rsb_derive = "0.5"
+rsb_derive = "0.5.3"
 tokio = { version = "1", features = ["time", "sync", "rt"] }
 async-trait = "0.1"
 rand = "0.10"
