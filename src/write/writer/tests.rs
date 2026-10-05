@@ -1471,3 +1471,116 @@ async fn a_row_too_large_for_a_request_is_named_by_its_write_order_index() {
     let summary = within(writer.finish()).await.expect("the writer finishes");
     assert_eq!(summary.rows_written, 3);
 }
+
+/// A fake for one committed stream of Arrow rows: `answer` gets each request's connection, its
+/// index on that connection and its rows, and returns `false` to drop the connection instead
+/// of answering.
+async fn arrow_stream_answering(
+    answer: impl Fn(usize, usize) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>>
+        + Send
+        + Sync
+        + 'static,
+) -> FakeBigQuery {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let end = Arc::new(StreamEnd::default());
+    let answer = Arc::new(answer);
+    FakeBigQuery::start(move |call| {
+        let connections = connections.clone();
+        let end = end.clone();
+        let answer = answer.clone();
+        async move {
+            let Some(mut call) = call.answer_unary(schema(&[])).await else {
+                return;
+            };
+            let connection = connections.fetch_add(1, Ordering::SeqCst);
+            let mut arrow = ArrowConnection::default();
+            let mut index = 0;
+            while let Some(request) = call.next_request::<AppendRowsRequest>().await {
+                let (line, rows) = arrow.describe(connection, &request);
+                call.log(line);
+                let answered = answer(connection, index).await;
+                index += 1;
+                if !answered {
+                    call.drop_connection().await;
+                    return;
+                }
+                call.send(&end.answer_rows(&request, rows));
+            }
+            call.finish();
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn record_batches_resent_after_a_reconnect_carry_the_schema_at_their_offset() {
+    let fake = arrow_stream_answering(|connection, index| {
+        Box::pin(async move { !(connection == 0 && index == 1) })
+    })
+    .await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_record_batch_writer_with_options(
+            SHOP.table(ORDERS),
+            BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Committed),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write_batch(&record_batch(0..2)))
+        .await
+        .expect("the batch is written");
+    within(writer.flush()).await.expect("the batch is answered");
+    within(writer.write_batch(&record_batch(2..3)))
+        .await
+        .expect("the batch is written");
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!((summary.rows_written, summary.rows_failed), (3, 0));
+    let calls = fake.calls();
+    assert_eq!(
+        on_connection(&calls, 0),
+        ["c0 append @0 [0, 1] arrow=id,name", "c0 append @2 [2]"]
+    );
+    assert_eq!(on_connection(&calls, 1), ["c1 append @2 [2] arrow=id,name"]);
+}
+
+#[tokio::test]
+async fn a_new_arrow_schema_waits_for_the_requests_in_flight_before_reconnecting() {
+    let fake = arrow_stream_answering(|connection, index| {
+        Box::pin(async move {
+            if connection == 0 && index == 0 {
+                // Holds the first batch in flight while the writer sends the next one.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            true
+        })
+    })
+    .await;
+    let (mut writer, responses) = fake
+        .db
+        .create_record_batch_writer_with_options(
+            SHOP.table(ORDERS),
+            BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Committed),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write_batch(&record_batch(0..2)))
+        .await
+        .expect("the batch is written");
+    let narrower = record_batch(2..3)
+        .project(&[0])
+        .expect("the batch has an `id` column");
+    within(writer.write_batch(&narrower))
+        .await
+        .expect("the batch is written");
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!((summary.rows_written, summary.rows_failed), (3, 0));
+    assert!(collect(responses).await.iter().all(Result::is_ok));
+    assert_eq!(
+        fake.calls()[1..],
+        [
+            "c0 append @0 [0, 1] arrow=id,name".to_string(),
+            "c1 append @2 [2] arrow=id".to_string(),
+            format!("FinalizeWriteStream {CREATED_STREAM}"),
+        ]
+    );
+}

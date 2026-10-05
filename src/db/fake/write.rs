@@ -227,9 +227,12 @@ impl ArrowConnection {
         request: &AppendRowsRequest,
     ) -> (String, usize) {
         let (batch, fields) = self.record_batch(request);
-        let offset = request.offset.map(|o| format!(" @{o}")).unwrap_or_default();
+        let offset = request
+            .offset
+            .map(|offset| format!(" @{offset}"))
+            .unwrap_or_default();
         let schema = fields
-            .map(|f| format!(" arrow={}", f.join(",")))
+            .map(|fields| format!(" arrow={}", fields.join(",")))
             .unwrap_or_default();
         let line = format!(
             "c{connection} append{offset} {:?}{schema}",
