@@ -19,9 +19,9 @@ Library provides a simple API for Google BigQuery using gRPC for every call:
     - Large query results read through the Storage Read API automatically;
     - Raw Arrow record batches for table reads and query results;
     - DML statements with affected row counts, and dry runs;
-    - Writes through the Storage Write API with built-in batching and backpressure: at least
-      once, exactly once, atomic (all rows or none), or buffered (rows readable once you flush
-      them);
+    - Writes through the Storage Write API with built-in batching and backpressure, of your
+      structures or of raw Arrow record batches: at least once, exactly once, atomic (all rows
+      or none), or buffered (rows readable once you flush them);
     - Change data capture (CDC): upserts and deletes by the primary key;
     - Declarative table schemas, planned and synced with one call: new columns, renames, drops,
       widening, partitioning, clustering, primary key, recreating an empty table;
