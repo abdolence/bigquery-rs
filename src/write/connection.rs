@@ -5,10 +5,10 @@
 //! order), resends what the delivery guarantee allows, and reports one outcome per batch in
 //! batch order.
 //!
-//! In committed and pending mode a batch's offset is the number of rows written before it, so a
-//! batch that is not written moves every later one down. The task stops sending after such a
-//! batch, takes back the later ones as BigQuery answers them (`OFFSET_OUT_OF_RANGE` or
-//! `ABORTED`), and sends them again at their new offsets once nothing is in flight.
+//! In committed, pending and buffered mode a batch's offset is the number of rows written
+//! before it, so a batch that is not written moves every later one down. The task stops sending
+//! after such a batch, takes back the later ones as BigQuery answers them (`OFFSET_OUT_OF_RANGE`
+//! or `ABORTED`), and sends them again at their new offsets once nothing is in flight.
 
 use crate::errors::{
     code_name, BigQueryError, BigQueryErrorPublicGenericDetails, BigQueryRowError,
@@ -42,8 +42,9 @@ use tracing::{debug, warn, Span};
 pub(crate) enum Command {
     /// A batch was sealed or opened.
     Wake,
-    /// Answer once every batch sealed so far has an outcome.
-    Flush(oneshot::Sender<BigQueryResult<()>>),
+    /// Answer once every batch sealed so far has an outcome, with the rows then written on a
+    /// stream with offsets.
+    Flush(oneshot::Sender<BigQueryResult<i64>>),
     /// Reconnect once the requests in flight are answered.
     Reconnect,
     /// Close the connection and end the stream as `FinishKind` says, once idle.
@@ -53,7 +54,8 @@ pub(crate) enum Command {
 /// How a finished writer leaves its stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FinishKind {
-    /// Close the default stream, finalize a committed one, finalize and commit a pending one.
+    /// Close the default stream, finalize a committed one, flush and finalize a buffered one,
+    /// finalize and commit a pending one.
     Close,
     /// Finalize a pending stream and leave the commit to the caller.
     Finalize,
@@ -223,7 +225,7 @@ pub(crate) struct ConnectionTask {
     retries: u64,
     first_error: Option<BigQueryError>,
     fatal: Option<BigQueryError>,
-    flush_waiters: Vec<oneshot::Sender<BigQueryResult<()>>>,
+    flush_waiters: Vec<oneshot::Sender<BigQueryResult<i64>>>,
     finish: Option<(FinishKind, oneshot::Sender<BigQueryResult<Finished>>)>,
 }
 
@@ -335,7 +337,7 @@ impl ConnectionTask {
         for waiter in self.flush_waiters.drain(..) {
             let answer = match &self.fatal {
                 Some(err) => Err(err.clone()),
-                None => Ok(()),
+                None => Ok(self.written_offset),
             };
             let _ = waiter.send(answer);
         }
@@ -758,7 +760,15 @@ impl ConnectionTask {
                 first_error,
                 finalized_rows: None,
             }),
-            BigQueryWriteMode::Committed => {
+            BigQueryWriteMode::Committed | BigQueryWriteMode::Buffered => {
+                // A buffered stream drops the rows past its last flush when finalized, so
+                // finishing makes every written row readable first.
+                if self.settings.mode == BigQueryWriteMode::Buffered && self.written_offset > 0 {
+                    self.settings
+                        .db
+                        .flush_rows(&self.settings.span, &stream, self.written_offset - 1)
+                        .await?;
+                }
                 let rows = self
                     .settings
                     .db

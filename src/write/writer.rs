@@ -19,7 +19,7 @@ use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::write_stream::Type as WriteStreamType;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     BatchCommitWriteStreamsRequest, CreateWriteStreamRequest, FinalizeWriteStreamRequest,
-    GetWriteStreamRequest, WriteStream, WriteStreamView,
+    FlushRowsRequest, GetWriteStreamRequest, WriteStream, WriteStreamView,
 };
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -104,6 +104,27 @@ impl BigQueryDb {
             })
             .await?;
         Ok(response.row_count)
+    }
+
+    /// Makes the rows of a buffered stream readable up to and including `offset`, and returns
+    /// the offset BigQuery reports as flushed.
+    pub(crate) async fn flush_rows(
+        &self,
+        span: &Span,
+        name: &BigQueryWriteStreamName,
+        offset: i64,
+    ) -> BigQueryResult<i64> {
+        let request = FlushRowsRequest {
+            write_stream: name.as_str().to_string(),
+            offset: Some(offset),
+        };
+        let response = self
+            .retry(span, "flush the write stream", &request, |request| {
+                let mut client = self.write_client();
+                async move { client.flush_rows(request).await }
+            })
+            .await?;
+        Ok(response.offset)
     }
 
     /// Commits finalized pending streams of the table at `table_path` together.
@@ -251,6 +272,10 @@ impl WriterCore {
             }
             BigQueryWriteMode::Pending => {
                 db.create_write_stream(&span, &table_path, WriteStreamType::Pending)
+                    .await?
+            }
+            BigQueryWriteMode::Buffered => {
+                db.create_write_stream(&span, &table_path, WriteStreamType::Buffered)
                     .await?
             }
         };
@@ -438,12 +463,47 @@ impl WriterCore {
         }
     }
 
-    pub(crate) async fn flush(&mut self) -> BigQueryResult<()> {
+    /// Sends the open batch and waits until every batch so far has an outcome. Returns the
+    /// rows then written on a stream with offsets, which is the offset of the next row.
+    pub(crate) async fn flush(&mut self) -> BigQueryResult<i64> {
         self.seal_open().await?;
         let (tx, rx) = oneshot::channel();
         self.command(Command::Flush(tx))?;
         rx.await
             .map_err(|_| BigQueryError::system("WRITER_TASK_ENDED", TASK_ENDED))?
+    }
+
+    /// Fails with [`BigQueryError::InvalidParametersError`] for the field `mode` unless the
+    /// writer is in `mode`, naming `operation` as the call that needs it.
+    fn check_mode(&self, mode: BigQueryWriteMode, operation: &str) -> BigQueryResult<()> {
+        if self.mode == mode {
+            return Ok(());
+        }
+        Err(BigQueryError::invalid_parameters(
+            "mode",
+            format!(
+                "{operation} is for {mode:?} streams, the writer is {:?}",
+                self.mode
+            ),
+        ))
+    }
+
+    /// Flushes a buffered stream up to its last written row once every batch so far has an
+    /// outcome; `None` while the stream holds no rows.
+    pub(crate) async fn flush_rows(&mut self) -> BigQueryResult<Option<i64>> {
+        self.check_mode(BigQueryWriteMode::Buffered, "flush_rows()")?;
+        let written = self.flush().await?;
+        if written == 0 {
+            return Ok(None);
+        }
+        self.flush_rows_to(written - 1).await.map(Some)
+    }
+
+    /// Flushes a buffered stream up to and including `offset`.
+    pub(crate) async fn flush_rows_to(&mut self, offset: i64) -> BigQueryResult<i64> {
+        self.check_mode(BigQueryWriteMode::Buffered, "flush_rows_to()")?;
+        self.check_failed()?;
+        self.db.flush_rows(&self.span, &self.stream, offset).await
     }
 
     pub(crate) async fn finish(&mut self, kind: FinishKind) -> BigQueryResult<Finished> {
@@ -548,12 +608,13 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
     /// The writer's failure, if it failed for good. Failed batches are reported on the
     /// response stream and in the summary, not here.
     pub async fn flush(&mut self) -> BigQueryResult<()> {
-        self.core.flush().await
+        self.core.flush().await.map(|_| ())
     }
 
     /// Flushes, waits for every acknowledgement, and closes the stream: the default stream is
-    /// left as it is, a committed one is finalized, and a pending one is finalized and
-    /// committed.
+    /// left as it is, a committed one is finalized, a buffered one is flushed up to its last
+    /// written row and finalized, so every written row becomes readable, and a pending one is
+    /// finalized and committed.
     ///
     /// # Errors
     /// The writer's failure, if it failed for good. In pending mode,
@@ -571,13 +632,12 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
     /// [`BigQueryError::InvalidParametersError`] in any other mode, and the errors of
     /// [`finish`](Self::finish).
     pub async fn finalize(mut self) -> BigQueryResult<BigQueryFinalizedStream> {
-        if self.core.mode() != BigQueryWriteMode::Pending {
-            let mode = self.core.mode();
+        if let Err(err) = self
+            .core
+            .check_mode(BigQueryWriteMode::Pending, "finalize()")
+        {
             self.core.abandon();
-            return Err(BigQueryError::invalid_parameters(
-                "mode",
-                format!("finalize() is for pending streams, the writer is {mode:?}"),
-            ));
+            return Err(err);
         }
         let finished = self.core.finish(FinishKind::Finalize).await?;
         Ok(BigQueryFinalizedStream {
@@ -585,6 +645,30 @@ impl<T: Serialize> BigQueryStreamingWriter<T> {
             name: self.core.stream_name().clone(),
             row_count: finished.finalized_rows.unwrap_or_default(),
         })
+    }
+
+    /// Buffered mode only: sends the open batch, waits until every batch written so far has an
+    /// outcome, and flushes the stream up to its last written row, so that every row written
+    /// so far becomes readable. Returns the flushed offset, or `None` while the stream holds
+    /// no rows.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for the field `mode` in any other mode, the
+    /// writer's failure if it failed for good, and the `FlushRows` failure.
+    pub async fn flush_rows(&mut self) -> BigQueryResult<Option<i64>> {
+        self.core.flush_rows().await
+    }
+
+    /// Buffered mode only: flushes the stream up to and including `offset`, such as the
+    /// [`offset`](BigQueryWriteResponse::offset) of an acknowledged batch's last row, and
+    /// returns the offset BigQuery reports as flushed. It does not wait for the batches in
+    /// flight; BigQuery checks the offset.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] for the field `mode` in any other mode, the
+    /// writer's failure if it failed for good, and the `FlushRows` failure.
+    pub async fn flush_rows_to(&mut self, offset: i64) -> BigQueryResult<i64> {
+        self.core.flush_rows_to(offset).await
     }
 
     /// The write stream's name; `None` for the default stream.
@@ -614,8 +698,8 @@ impl BigQueryDb {
             .await
     }
 
-    /// Opens a streaming writer on `table` with `options`. A committed or pending mode
-    /// creates a new write stream.
+    /// Opens a streaming writer on `table` with `options`. A committed, pending or buffered
+    /// mode creates a new write stream.
     ///
     /// # Errors
     /// [`BigQueryError::InvalidParametersError`] for options that cannot be sent, such as a

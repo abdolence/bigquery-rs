@@ -177,8 +177,9 @@ faster than the network slows down to its speed instead of buffering rows in mem
   fails only when the writer itself failed for good; a failed batch is reported on the response
   stream and in the summary.
 - `finish()` flushes, waits for every acknowledgement and closes the writer, then returns the
-  `BigQueryWriteSummary`. On the default stream that is all; a committed stream is finalized, and
-  a pending one is finalized and committed.
+  `BigQueryWriteSummary`. On the default stream that is all; a committed stream is finalized, a
+  buffered one is flushed up to its last row and finalized, and a pending one is finalized and
+  committed.
 
 ## Write modes
 
@@ -189,6 +190,7 @@ The mode decides which write stream the rows go through, and with it the deliver
 | Default | `.objects(..)` | `BigQueryWriteMode::Default` | as soon as each batch is acknowledged | at least once: a batch resent after a reconnect can be stored twice |
 | Exactly once | `.exactly_once()` | `BigQueryWriteMode::Committed` | as soon as each batch is acknowledged | exactly once: every request has an offset, and BigQuery recognises a resent one |
 | Atomic | `.atomic()` | `BigQueryWriteMode::Pending` | all together, at the commit | all rows or none |
+| Buffered | `.buffered()` | `BigQueryWriteMode::Buffered` | up to the offset you flush | exactly once, as committed |
 | CDC | `.changes(..)` or `.upsert()` | default stream | after BigQuery applies the changes | upserts and deletes by primary key, see [change data capture](./cdc.md) |
 
 ```rust,no_run
@@ -261,6 +263,63 @@ println!("committed at {commit_time}");
 # Ok(())
 # }
 ```
+
+## Buffered streams
+
+A buffered stream keeps the rows it acknowledged invisible until you flush them. A flush makes
+every row up to an offset readable, and a later flush moves that offset further. It suits a
+producer that has to decide when its rows count, for example only after it saved its own
+checkpoint:
+
+- `flush_rows()` sends the open batch, waits for every acknowledgement and flushes the stream up
+  to its last row. It returns the flushed offset, or `None` while the stream has no rows;
+- `flush_rows_to(offset)` flushes up to and including `offset`, the stream offset of a row. Every
+  `BigQueryWriteResponse` has the `offset` of its batch's first row and its `row_count`. It does
+  not wait for the batches in flight, and BigQuery checks the offset.
+
+```rust,no_run
+# use bigquery::*;
+# use serde::Serialize;
+# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+# const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+# #[derive(Serialize)]
+# struct Order {
+#     id: i64,
+# }
+# async fn save_checkpoint(offset: i64) {}
+# async fn example(db: BigQueryDb, orders: Vec<Order>) -> BigQueryResult<()> {
+let (mut writer, _responses) = db
+    .create_streaming_writer_with_options::<Order>(
+        SHOP.table(ORDERS),
+        BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
+    )
+    .await?;
+
+for chunk in orders.chunks(1_000) {
+    writer.write_all(chunk).await?;
+    // The rows of this chunk become readable here, not before
+    if let Some(offset) = writer.flush_rows().await? {
+        save_checkpoint(offset).await;
+    }
+}
+
+let summary = writer.finish().await?;
+println!("{} rows written", summary.rows_written);
+# Ok(())
+# }
+```
+
+`finish()` flushes the rest before it finalizes the stream, so every row you wrote becomes
+readable. BigQuery drops the rows past the last flush when a buffered stream is finalized without
+one. If you need the unflushed rows dropped, drop the writer instead of finishing it; it logs a
+warning and the stream is never finalized.
+
+`.buffered()` on an insert writes through a buffered stream and flushes once at the end. Unlike
+`.atomic()`, a failed batch does not hold back the others.
+
+Google itself calls the buffered type an advanced one, for the Apache Beam connector mostly. If
+you only need a few rows to appear together, the exactly once mode with all of them in one batch
+does that too.
 
 ## Errors
 

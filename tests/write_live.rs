@@ -120,6 +120,45 @@ async fn write_each_mode_then_count() -> TestResult {
     .await
 }
 
+#[tokio::test]
+async fn buffered_rows_are_readable_only_once_flushed() -> TestResult {
+    with_scratch(
+        "buffered_rows_are_readable_only_once_flushed",
+        async |scratch: &Scratch| {
+            let table_ref = create_table(scratch, "t_buffered", columns(), None).await?;
+            let (mut writer, _) = scratch
+                .db
+                .create_streaming_writer_with_options::<Row>(
+                    table_ref,
+                    BigQueryStreamingWriteOptions::new().with_mode(BigQueryWriteMode::Buffered),
+                )
+                .await?;
+            let sql = format!("SELECT COUNT(*) FROM {}", scratch.table_sql("t_buffered"));
+            let mut billed = 0;
+            writer.write_all(&rows(3)).await?;
+            writer.flush().await?;
+            let (before, b) = count(scratch, &sql).await?;
+            billed += b;
+            assert_eq!(before, 0, "acknowledged rows are invisible before a flush");
+            assert_eq!(writer.flush_rows_to(1).await?, 1);
+            let (flushed, b) = count(scratch, &sql).await?;
+            billed += b;
+            assert_eq!(flushed, 2, "rows up to the flushed offset are visible");
+            writer.write_all(&rows(2)).await?;
+            let summary = writer.finish().await?;
+            assert_eq!((summary.rows_written, summary.rows_failed), (5, 0));
+            let (finished, b) = count(scratch, &sql).await?;
+            billed += b;
+            assert_eq!(finished, 5, "finish flushes every written row");
+            eprintln!(
+                "buffered_rows_are_readable_only_once_flushed: 5 rows written, {billed} bytes billed"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
 /// A resend only happens when an acknowledgement is lost, which a live test cannot cause; the
 /// fake server covers that path. This checks the committed stream end to end with several
 /// pipelined batches: each row stored once.

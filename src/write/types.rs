@@ -141,6 +141,11 @@ pub enum BigQueryWriteMode {
     Committed,
     /// A pending stream: all rows become visible at the commit, or none do.
     Pending,
+    /// A buffered stream with offsets: each acknowledged row exactly once, readable only up
+    /// to the offset the writer last flushed with
+    /// [`flush_rows`](crate::BigQueryStreamingWriter::flush_rows) or
+    /// [`flush_rows_to`](crate::BigQueryStreamingWriter::flush_rows_to).
+    Buffered,
 }
 
 /// What BigQuery stores for a field that a row leaves out.

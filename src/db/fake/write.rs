@@ -1,5 +1,5 @@
 //! Fake answers for the Storage Write RPCs: `AppendRows`, `GetWriteStream`,
-//! `CreateWriteStream`, `FinalizeWriteStream` and `BatchCommitWriteStreams`.
+//! `CreateWriteStream`, `FlushRows`, `FinalizeWriteStream` and `BatchCommitWriteStreams`.
 
 use super::FakeCall;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_request::Rows;
@@ -11,8 +11,8 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::table_field_schema::{Mode,
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     AppendRowsRequest, AppendRowsResponse, BatchCommitWriteStreamsRequest,
     BatchCommitWriteStreamsResponse, CreateWriteStreamRequest, FinalizeWriteStreamRequest,
-    FinalizeWriteStreamResponse, GetWriteStreamRequest, RowError, StorageError, TableFieldSchema,
-    TableSchema, WriteStream,
+    FinalizeWriteStreamResponse, FlushRowsRequest, FlushRowsResponse, GetWriteStreamRequest,
+    RowError, StorageError, TableFieldSchema, TableSchema, WriteStream,
 };
 use gcloud_sdk::prost::encoding::decode_varint;
 use gcloud_sdk::prost::Message;
@@ -69,6 +69,17 @@ impl FakeCall {
                     name: CREATED_STREAM.into(),
                     table_schema: Some(schema),
                     ..Default::default()
+                });
+            }
+            "FlushRows" => {
+                let request: Option<FlushRowsRequest> = self.next_request().await;
+                let (stream, offset) = request
+                    .map(|r| (r.write_stream, r.offset))
+                    .unwrap_or_default();
+                let shown = offset.map(|o| o.to_string()).unwrap_or_default();
+                self.log(format!("FlushRows {stream} @{shown}"));
+                self.reply(&FlushRowsResponse {
+                    offset: offset.unwrap_or_default(),
                 });
             }
             "FinalizeWriteStream" => {

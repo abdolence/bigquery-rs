@@ -72,7 +72,7 @@ impl<T: Serialize> BigQueryCdcWriter<T> {
 
     /// As [`BigQueryStreamingWriter::flush`](crate::BigQueryStreamingWriter::flush).
     pub async fn flush(&mut self) -> BigQueryResult<()> {
-        self.core.flush().await
+        self.core.flush().await.map(|_| ())
     }
 
     /// Flushes, waits for every acknowledgement and closes the connection.

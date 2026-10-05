@@ -955,3 +955,155 @@ async fn an_upsert_outside_the_default_stream_is_refused_before_any_call() {
     }
     assert!(fake.calls().is_empty(), "{:?}", fake.calls());
 }
+
+/// A fake whose `AppendRows` keeps a committed or buffered stream's offsets.
+async fn stream_with_offsets() -> FakeBigQuery {
+    FakeBigQuery::start(|call| async move {
+        let Some(mut call) = call.answer_unary(schema(&[])).await else {
+            return;
+        };
+        let end = StreamEnd::default();
+        while let Some(request) = call.next_request::<AppendRowsRequest>().await {
+            call.log(describe(0, &request));
+            call.send(&end.answer(&request));
+        }
+        call.finish();
+    })
+    .await
+}
+
+#[tokio::test]
+async fn buffered_mode_flushes_what_is_written_and_finish_flushes_before_finalizing() {
+    let fake = stream_with_offsets().await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_streaming_writer_with_options::<Row>(
+            SHOP.table(ORDERS),
+            options().with_mode(BigQueryWriteMode::Buffered),
+        )
+        .await
+        .expect("the writer opens");
+    assert_eq!(
+        within(writer.flush_rows()).await.expect("nothing to flush"),
+        None
+    );
+    for id in 0..2 {
+        within(writer.write(&row(id)))
+            .await
+            .expect("the row is written");
+    }
+    assert_eq!(
+        within(writer.flush_rows()).await.expect("the rows flush"),
+        Some(1)
+    );
+    within(writer.write(&row(2)))
+        .await
+        .expect("the row is written");
+    let summary = within(writer.finish()).await.expect("the writer finishes");
+    assert_eq!(summary.rows_written, 3);
+    assert_eq!(
+        summary.stream,
+        Some(BigQueryWriteStreamName::reported(CREATED_STREAM.into()))
+    );
+    assert_eq!(
+        fake.calls(),
+        [
+            "CreateWriteStream BUFFERED".to_string(),
+            "c0 append @0 [0] schema=id,name".to_string(),
+            "c0 append @1 [1]".to_string(),
+            format!("FlushRows {CREATED_STREAM} @1"),
+            "c0 append @2 [2]".to_string(),
+            format!("FlushRows {CREATED_STREAM} @2"),
+            format!("FinalizeWriteStream {CREATED_STREAM}"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn flush_rows_to_flushes_up_to_the_given_offset() {
+    let fake = stream_with_offsets().await;
+    let (mut writer, _responses) = fake
+        .db
+        .create_streaming_writer_with_options::<Row>(
+            SHOP.table(ORDERS),
+            options().with_mode(BigQueryWriteMode::Buffered),
+        )
+        .await
+        .expect("the writer opens");
+    within(writer.write_all(&[row(0), row(1), row(2)]))
+        .await
+        .expect("the rows are written");
+    within(writer.flush()).await.expect("the batches are sent");
+    assert_eq!(
+        within(writer.flush_rows_to(0))
+            .await
+            .expect("the first row flushes"),
+        0
+    );
+    let calls = fake.calls();
+    assert_eq!(
+        calls.last(),
+        Some(&format!("FlushRows {CREATED_STREAM} @0")),
+        "{calls:?}"
+    );
+    within(writer.finish()).await.expect("the writer finishes");
+}
+
+#[tokio::test]
+async fn flushing_rows_outside_buffered_mode_is_refused_before_any_call() {
+    for mode in [
+        BigQueryWriteMode::Default,
+        BigQueryWriteMode::Committed,
+        BigQueryWriteMode::Pending,
+    ] {
+        let fake = stream_with_offsets().await;
+        let (mut writer, _responses) = fake
+            .db
+            .create_streaming_writer_with_options::<Row>(
+                SHOP.table(ORDERS),
+                options().with_mode(mode),
+            )
+            .await
+            .expect("the writer opens");
+        for result in [
+            within(writer.flush_rows()).await.map(|_| ()),
+            within(writer.flush_rows_to(0)).await.map(|_| ()),
+        ] {
+            match result {
+                Err(BigQueryError::InvalidParametersError(err)) => {
+                    assert_eq!(err.public.field, "mode", "{mode:?}");
+                }
+                other => panic!("{mode:?} must refuse a flush, got {other:?}"),
+            }
+        }
+        within(writer.finish()).await.expect("the writer finishes");
+        assert_eq!(count(&fake.calls(), "FlushRows"), 0, "{mode:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_buffered_insert_flushes_every_row_before_finalizing() {
+    let fake = stream_with_offsets().await;
+    let summary = within(
+        fake.db
+            .fluent()
+            .insert()
+            .into(SHOP.table(ORDERS))
+            .objects(&[row(0), row(1)])
+            .options(options())
+            .buffered()
+            .execute(),
+    )
+    .await
+    .expect("the insert runs");
+    assert_eq!(summary.rows_written, 2);
+    let calls = fake.calls();
+    assert_eq!(calls[0], "CreateWriteStream BUFFERED");
+    assert_eq!(
+        &calls[calls.len() - 2..],
+        [
+            format!("FlushRows {CREATED_STREAM} @1"),
+            format!("FinalizeWriteStream {CREATED_STREAM}"),
+        ]
+    );
+}

@@ -157,7 +157,7 @@ task ends. `insert()` and the CDC writer go through the same writer, so they hav
 | Field | What it means | Where it comes from |
 |---|---|---|
 | `/bigquery/table` | the table being written | the writer, when the span opens |
-| `/bigquery/write_mode` | `Default`, `Committed` or `Pending` | the writer's options, when the span opens |
+| `/bigquery/write_mode` | `Default`, `Committed`, `Pending` or `Buffered` | the writer's options, when the span opens |
 | `/bigquery/rows_appended` | rows in the batches BigQuery acknowledged | counted by the writer, the same as `rows_written` in `BigQueryWriteSummary` |
 | `/bigquery/bytes_sent` | the encoded size of every `AppendRows` request sent, resends included, before gRPC framing | counted by the writer, the same as `bytes_sent` in `BigQueryWriteSummary` |
 | `/bigquery/appends` | `AppendRows` requests sent, resends included | counted by the writer |

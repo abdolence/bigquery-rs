@@ -124,9 +124,18 @@ where
         self
     }
 
+    /// Writes through a buffered stream with offsets: each row exactly once, readable from the
+    /// flush at the end of the insert. Unlike [`atomic`](Self::atomic), a failed batch does not
+    /// hold back the rows of the others.
+    #[inline]
+    pub fn buffered(mut self) -> Self {
+        self.params.options.mode = BigQueryWriteMode::Buffered;
+        self
+    }
+
     /// Writes the rows as CDC upserts by primary key. Only the default stream takes CDC, so
-    /// together with [`exactly_once`](Self::exactly_once) or [`atomic`](Self::atomic) the
-    /// insert fails.
+    /// together with [`exactly_once`](Self::exactly_once), [`atomic`](Self::atomic) or
+    /// [`buffered`](Self::buffered) the insert fails.
     #[inline]
     pub fn upsert(mut self) -> Self {
         self.upsert = true;
@@ -134,7 +143,8 @@ where
     }
 
     /// Replaces the writer options, the mode included; call it before
-    /// [`exactly_once`](Self::exactly_once) or [`atomic`](Self::atomic) to keep those.
+    /// [`exactly_once`](Self::exactly_once), [`atomic`](Self::atomic) or
+    /// [`buffered`](Self::buffered) to keep those.
     #[inline]
     pub fn options(mut self, options: BigQueryStreamingWriteOptions) -> Self {
         self.params.options = options;
