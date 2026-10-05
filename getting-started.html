@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a2b52020.js";
+            window.path_to_searchindex_js = "searchindex-1666f472.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-38498192.js"></script>
@@ -187,6 +187,18 @@ bigquery = "0.5"
 <pre><code class="language-toml">[dependencies]
 bigquery = { version = "0.5", default-features = false, features = ["tls-webpki-roots"] }
 </code></pre>
+<h2 id="crypto-provider-error"><a class="header" href="#crypto-provider-error">Crypto provider error</a></h2>
+<p>Depends on your other dependencies you may see the error like:</p>
+<pre><code class="language-text">no process-level CryptoProvider available -- call CryptoProvider::install_default() before this point
+</code></pre>
+<p>The TLS crypto providers are not installed by default, so you can choose one. The easiest way to
+fix it is to include one, for example:</p>
+<pre><code class="language-toml">[dependencies]
+rustls = "0.23"
+</code></pre>
+<p>If you have several, you may need to call <code>CryptoProvider::install_default()</code> before creating the
+client:</p>
+<pre><code class="language-rust ignore">rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");</code></pre>
 <h2 id="creating-a-client"><a class="header" href="#creating-a-client">Creating a client</a></h2>
 <p><code>BigQueryDb</code> is the client. It opens two authenticated gRPC channels, one to the BigQuery v2 API
 for queries, jobs, datasets and tables, and one to the Storage API for reads and writes. Clones
