@@ -34,6 +34,7 @@ use serde::de::value::{BorrowedStrDeserializer, I32Deserializer, I64Deserializer
 use serde::de::{self, DeserializeOwned, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use std::cell::{Cell, OnceCell, RefCell};
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 /// The typed view of one column's values.
@@ -482,14 +483,14 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
     }
 
     /// The canonical text of a value whose only Rust form besides a number or a wrapper is a
-    /// string. `false` for values that are not of that sort.
-    fn text(&self, out: &mut String) -> bool {
+    /// string. `Ok(false)` for values that are not of that sort.
+    fn text(&self, out: &mut String) -> Result<bool, CodecError> {
         let r = self.row;
         match &self.column.values {
-            ColumnValues::Date(v) => civil::fmt_date(v[r], out),
-            ColumnValues::Time(v) => civil::fmt_time(v[r], out),
-            ColumnValues::DateTime(v) => civil::fmt_datetime(v[r], out),
-            ColumnValues::Timestamp(v) => civil::fmt_timestamp(v[r], out),
+            ColumnValues::Date(v) => civil::fmt_date(v[r], out)?,
+            ColumnValues::Time(v) => civil::fmt_time(v[r], out)?,
+            ColumnValues::DateTime(v) => civil::fmt_datetime(v[r], out)?,
+            ColumnValues::Timestamp(v) => civil::fmt_timestamp(v[r], out)?,
             ColumnValues::Numeric { unscaled: v, scale } => {
                 decimal::fmt_decimal_i128(v[r], *scale, out)
             }
@@ -497,9 +498,9 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
                 decimal::fmt_decimal_i256(v[r], *scale, out)
             }
             ColumnValues::Interval(v) => BigQueryInterval::from(v[r]).write_bq(out),
-            _ => return false,
+            _ => return Ok(false),
         }
-        true
+        Ok(true)
     }
 
     /// The integer of a temporal value: days for DATE, microseconds otherwise.
@@ -600,7 +601,7 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
             ColumnValues::Struct(node) => v.visit_map(EveryColumnMap { node, row: r, i: 0 }),
             _ => {
                 let mut s = String::with_capacity(48);
-                self.text(&mut s);
+                self.text(&mut s)?;
                 v.visit_str(&s)
             }
         }
@@ -616,7 +617,7 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
         if let ColumnValues::Timestamp(a) = &self.column.values {
             let micros = a[self.row];
             let mut s = String::with_capacity(32);
-            civil::fmt_timestamp(micros, &mut s);
+            civil::fmt_timestamp(micros, &mut s)?;
             return v.visit_str(&s).map_err(|err| {
                 if micros > jiff_max_micros() {
                     CodecError::new(
@@ -735,7 +736,7 @@ impl<'a> de::Deserializer<'a> for ValueDeserializer<'_, 'a> {
         match &self.column.values {
             ColumnValues::Numeric { .. } | ColumnValues::BigNumeric { .. } => {
                 let mut s = String::with_capacity(48);
-                self.text(&mut s);
+                self.text(&mut s)?;
                 let x = s.parse().map_err(|_| {
                     CodecError::new(
                         BigQueryCodecErrorKind::OutOfRange,
@@ -1021,20 +1022,83 @@ impl<'a> BatchDecoder<'a> {
     }
 }
 
-/// Calls `f` with every row of `batch` decoded, in order. `first_row` is the row number of the
-/// batch's first row, which errors carry.
-pub(crate) fn decode_each<T, F>(batch: &RecordBatch, first_row: u64, mut f: F)
-where
-    T: DeserializeOwned,
-    F: FnMut(BigQueryResult<T>),
-{
-    let decoder = BatchDecoder::new(batch);
-    for i in 0..decoder.num_rows() {
-        f(decoder
-            .row(i)
-            .map_err(|e| e.with_row(first_row + i as u64).into_deserialize()));
+/// The rows of one Arrow `RecordBatch` decoded into `T`, one item per row, in order.
+///
+/// It decodes the batches that
+/// [`record_batches`](crate::BigQuerySelectBuilder::record_batches) streams with the same type
+/// mapping as [`obj`](crate::BigQuerySelectBuilder::obj). A row that fails is one
+/// `Err(BigQueryError::DeserializeError)` whose `row` is the row's index in the batch, and the
+/// rows after it still decode.
+///
+/// It is not `Send`: decode a batch on the thread that holds it, and do not hold the iterator
+/// across an `.await`.
+///
+/// ```
+/// use bigquery::arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+/// use bigquery::{BigQueryBatchRows, BigQueryResult};
+/// use std::sync::Arc;
+///
+/// #[derive(serde::Deserialize, Debug, PartialEq)]
+/// struct Person {
+///     id: i64,
+///     name: String,
+/// }
+///
+/// let batch = RecordBatch::try_from_iter([
+///     ("id", Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef),
+///     ("name", Arc::new(StringArray::from(vec!["Ada", "Grace"])) as ArrayRef),
+/// ])?;
+/// let people = BigQueryBatchRows::<Person>::new(&batch).collect::<BigQueryResult<Vec<_>>>()?;
+/// assert_eq!(people[1], Person { id: 2, name: "Grace".into() });
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct BigQueryBatchRows<'a, T> {
+    decoder: BatchDecoder<'a>,
+    next_row: usize,
+    first_row: u64,
+    _target: PhantomData<fn() -> T>,
+}
+
+impl<'a, T: DeserializeOwned> BigQueryBatchRows<'a, T> {
+    /// The rows of `batch`.
+    pub fn new(batch: &'a RecordBatch) -> Self {
+        Self::numbered_from(batch, 0)
+    }
+
+    /// The rows of `batch`, whose errors number its first row `first_row`.
+    pub(crate) fn numbered_from(batch: &'a RecordBatch, first_row: u64) -> Self {
+        BigQueryBatchRows {
+            decoder: BatchDecoder::new(batch),
+            next_row: 0,
+            first_row,
+            _target: PhantomData,
+        }
     }
 }
+
+impl<T: DeserializeOwned> Iterator for BigQueryBatchRows<'_, T> {
+    type Item = BigQueryResult<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let i = self.next_row;
+        if i >= self.decoder.num_rows() {
+            return None;
+        }
+        self.next_row += 1;
+        Some(
+            self.decoder
+                .row(i)
+                .map_err(|e| e.with_row(self.first_row + i as u64).into_deserialize()),
+        )
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.decoder.num_rows() - self.next_row;
+        (left, Some(left))
+    }
+}
+
+impl<T: DeserializeOwned> ExactSizeIterator for BigQueryBatchRows<'_, T> {}
 
 /// Decodes every row of `batch`. A row that fails is one `Err(DeserializeError)` carrying its
 /// row number, `first_row` plus its index in the batch, and the other rows are unaffected.
@@ -1042,9 +1106,7 @@ pub(crate) fn decode_rows<T: DeserializeOwned>(
     batch: &RecordBatch,
     first_row: u64,
 ) -> Vec<BigQueryResult<T>> {
-    let mut rows = Vec::with_capacity(batch.num_rows());
-    decode_each(batch, first_row, |row| rows.push(row));
-    rows
+    BigQueryBatchRows::numbered_from(batch, first_row).collect()
 }
 
 #[cfg(test)]

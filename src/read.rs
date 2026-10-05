@@ -18,6 +18,7 @@ mod stream;
 mod support;
 
 pub(crate) use decoder::decode_rows;
+pub use decoder::BigQueryBatchRows;
 pub(crate) use ipc::ArrowIpcDecoder;
 pub(crate) use support::skip_failed_rows;
 
@@ -86,14 +87,5 @@ impl BigQueryDb {
     }
 }
 
-/// Decodes every row of `batch` into `T` and calls `f` with each result. Not part of the API:
-/// it exists so that the codec benchmark can time the decoder, which benchmarks cannot reach
-/// otherwise.
-#[doc(hidden)]
-pub fn __bench_decode_each<T, F>(batch: &RecordBatch, f: F)
-where
-    T: DeserializeOwned,
-    F: FnMut(BigQueryResult<T>),
-{
-    decoder::decode_each(batch, 0, f)
-}
+#[cfg(test)]
+mod tests;

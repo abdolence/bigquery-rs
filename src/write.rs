@@ -13,11 +13,13 @@ pub use cdc::BigQueryCdcWriter;
 pub use writer::BigQueryStreamingWriter;
 
 /// The row encoder alone, for `benches/write_codec.rs`; not part of the API.
+#[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub struct BigQueryWriteCodecBench {
     encoder: encoder::Encoder,
 }
 
+#[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 impl BigQueryWriteCodecBench {
     pub fn new(schema: &crate::BigQueryTableSchema) -> Self {

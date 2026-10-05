@@ -1,6 +1,8 @@
-use super::*;
 use crate::db::fake::spans::CapturedSpans;
-use crate::db::fake::FakeBigQuery;
+use crate::db::fake::write::{
+    ack, column, describe, ids, in_band, row_errors, schema, CREATED_STREAM, DEFAULT_STREAM,
+};
+use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
 use crate::BigQueryWriteStreamName;
 use crate::{
@@ -8,6 +10,13 @@ use crate::{
     BigQueryWriteResponse,
 };
 use futures::StreamExt;
+use gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
+use gcloud_sdk::google::cloud::bigquery::storage::v1::table_field_schema::{Mode, Type};
+use gcloud_sdk::google::cloud::bigquery::storage::v1::{
+    AppendRowsRequest, AppendRowsResponse, TableSchema,
+};
+use gcloud_sdk::prost::Message;
+use gcloud_sdk::tonic::Code;
 use serde::Serialize;
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};

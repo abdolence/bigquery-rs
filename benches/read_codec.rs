@@ -12,8 +12,8 @@ use arrow_array::{
 use arrow_buffer::{i256, OffsetBuffer};
 use arrow_schema::{DataType, Field, Fields, Schema};
 use bigquery::{
-    BigQueryDate, BigQueryDateTime, BigQueryInterval, BigQueryResult, BigQueryTime,
-    BigQueryTimestamp,
+    BigQueryBatchRows, BigQueryDate, BigQueryDateTime, BigQueryInterval, BigQueryResult,
+    BigQueryTime, BigQueryTimestamp,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::de::DeserializeOwned;
@@ -246,11 +246,11 @@ fn wide_batch(seed: usize) -> RecordBatch {
 /// Fails the benchmark before timing if any row of `batches` does not decode into `T`.
 fn assert_decodes<T: DeserializeOwned>(batches: &[RecordBatch]) {
     for batch in batches {
-        bigquery::__bench_decode_each(batch, |row: BigQueryResult<T>| {
+        for row in BigQueryBatchRows::<T>::new(batch) {
             if let Err(err) = row {
                 panic!("a synthetic row does not decode: {err}");
             }
-        });
+        }
     }
 }
 
@@ -262,17 +262,16 @@ fn arm<T: DeserializeOwned>(c: &mut Criterion, name: &str, batches: &[RecordBatc
     group.bench_function(BenchmarkId::new("one row at a time", name), |b| {
         b.iter(|| {
             for batch in batches {
-                bigquery::__bench_decode_each(batch, |row: BigQueryResult<T>| {
+                for row in BigQueryBatchRows::<T>::new(batch) {
                     black_box(row.ok());
-                });
+                }
             }
         })
     });
     group.bench_function(BenchmarkId::new("into Vec", name), |b| {
         b.iter(|| {
             for batch in batches {
-                let mut rows = Vec::with_capacity(batch.num_rows());
-                bigquery::__bench_decode_each(batch, |row: BigQueryResult<T>| rows.push(row));
+                let rows: Vec<BigQueryResult<T>> = BigQueryBatchRows::new(batch).collect();
                 black_box(rows);
             }
         })

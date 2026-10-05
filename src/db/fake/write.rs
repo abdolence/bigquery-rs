@@ -15,6 +15,7 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     FinalizeWriteStreamResponse, GetWriteStreamRequest, RowError, StorageError, TableFieldSchema,
     TableSchema, WriteStream,
 };
+use gcloud_sdk::prost::encoding::decode_varint;
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Code;
 
@@ -119,14 +120,7 @@ pub(crate) fn ids(request: &AppendRowsRequest) -> Vec<i64> {
                         Some(&0x08),
                         "rows start with field 1, a varint"
                     );
-                    let mut value = 0u64;
-                    for (i, byte) in row[1..].iter().enumerate() {
-                        value |= u64::from(byte & 0x7f) << (7 * i);
-                        if byte & 0x80 == 0 {
-                            break;
-                        }
-                    }
-                    value as i64
+                    decode_varint(&mut &row[1..]).expect("a varint id") as i64
                 })
                 .collect()
         })
@@ -204,6 +198,3 @@ pub(crate) fn row_errors(indexes: &[i64]) -> AppendRowsResponse {
         )
     }
 }
-
-#[cfg(test)]
-mod tests;

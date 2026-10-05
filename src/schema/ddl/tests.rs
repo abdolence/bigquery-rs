@@ -1,89 +1,26 @@
-//! Each value a statement carries stays one token: names decode back from one quoted
-//! identifier and descriptions, labels and options from one string literal, and a hostile value
-//! leaves the statement's structure exactly as a plain one does.
+//! Each value a statement carries stays one token: a statement rendered with a hostile value,
+//! once its quoted tokens are decoded, is the statement rendered with a plain one.
 
 use super::*;
-use crate::sql::tests::{injection_corpus, lex_identifier, lex_string};
+use crate::sql::tests::{injection_corpus, pieces, Piece};
 use crate::BigQueryLabels;
 use crate::{
     BigQueryDatasetId, BigQueryDatasetRef, BigQueryDecimalParams, BigQueryFieldMode,
     BigQueryFieldSchema, BigQueryPartitionUnit, BigQueryPartitioning, BigQueryTableId,
 };
 
-#[derive(Debug, PartialEq)]
-enum Token {
-    Ident(String),
-    Str(String),
-    Text(String),
-}
-
-/// Splits `sql` into quoted identifiers, string literals and the text between them. Panics on
-/// a quote that does not close, which would mean a value ran to the end of the statement.
-fn tokens(sql: &str) -> Vec<Token> {
-    let mut out = Vec::new();
-    let mut text = String::new();
-    let mut chars = sql.char_indices().peekable();
-    while let Some((start, c)) = chars.next() {
-        if c != '`' && c != '\'' {
-            text.push(c);
-            continue;
-        }
-        if !text.is_empty() {
-            out.push(Token::Text(std::mem::take(&mut text)));
-        }
-        let mut end = None;
-        while let Some((i, d)) = chars.next() {
-            if d == '\\' {
-                chars.next();
-            } else if d == c {
-                end = Some(i);
-                break;
-            }
-        }
-        let end = end.unwrap_or_else(|| panic!("an unclosed {c} at {start} in {sql:.200}"));
-        let token = &sql[start..=end];
-        out.push(if c == '`' {
-            Token::Ident(lex_identifier(token))
-        } else {
-            Token::Str(lex_string(token))
-        });
-    }
-    if !text.is_empty() {
-        out.push(Token::Text(text));
-    }
-    out
-}
-
-/// The statement with every identifier and literal replaced by a placeholder.
-fn skeleton(sql: &str) -> String {
-    tokens(sql)
+/// Fails unless `hostile` is `plain` with each quoted token holding `plain_value` holding
+/// `hostile_value` instead, decoded: the hostile value changed no other token.
+fn assert_same_statement(hostile: &str, plain: &str, hostile_value: &str, plain_value: &str) {
+    let swapped: Vec<Piece> = pieces(hostile)
         .into_iter()
-        .map(|t| match t {
-            Token::Ident(_) => "`I`".to_string(),
-            Token::Str(_) => "'S'".to_string(),
-            Token::Text(text) => text,
+        .map(|piece| match piece {
+            Piece::String(s) if s == hostile_value => Piece::String(plain_value.into()),
+            Piece::Identifier(s) if s == hostile_value => Piece::Identifier(plain_value.into()),
+            other => other,
         })
-        .collect()
-}
-
-fn strings(sql: &str) -> Vec<String> {
-    tokens(sql)
-        .into_iter()
-        .filter_map(|t| match t {
-            Token::Str(s) => Some(s),
-            _ => None,
-        })
-        .collect()
-}
-
-fn idents(sql: &str) -> Vec<String> {
-    tokens(sql)
-        .into_iter()
-        .filter_map(|t| match t {
-            Token::Ident(s) => Some(s),
-            _ => None,
-        })
-        .collect()
+        .collect();
+    assert_eq!(swapped, pieces(plain), "{hostile_value:.80?}");
 }
 
 fn column(
@@ -150,13 +87,13 @@ fn table_path_quotes_each_part_whatever_the_project_holds() {
     for (project, table) in accepted {
         let sql = table.ddl("unused").to_string();
         assert_eq!(
-            tokens(&sql),
-            vec![
-                Token::Ident(project.clone()),
-                Token::Text(".".into()),
-                Token::Ident("shop".into()),
-                Token::Text(".".into()),
-                Token::Ident("orders".into()),
+            pieces(&sql),
+            [
+                Piece::Identifier(project.clone()),
+                Piece::Text(".".into()),
+                Piece::Identifier("shop".into()),
+                Piece::Text(".".into()),
+                Piece::Identifier("orders".into()),
             ],
             "{project:.80?}"
         );
@@ -172,56 +109,28 @@ fn table_path_quotes_each_part_whatever_the_project_holds() {
 #[test]
 fn hostile_descriptions_and_labels_render_as_single_literals_that_parse_back() {
     let table = orders().ddl("acme-prod");
-    let plain = skeleton(&table.create(&hostile_target("plain"), true).expect("DDL"));
+    let plain = table.create(&hostile_target("plain"), true).expect("DDL");
     for value in injection_corpus() {
         let sql = table.create(&hostile_target(&value), true).expect("DDL");
-        assert_eq!(skeleton(&sql), plain, "{value:.80?}");
-        assert_eq!(
-            strings(&sql),
-            [value.clone(), value.clone(), value.clone(), value.clone()],
-            "column description, table description, label key and value: {value:.80?}"
-        );
+        assert_same_statement(&sql, &plain, &value, "plain");
     }
 }
 
 #[test]
 fn hostile_column_names_render_as_single_identifiers() {
     let table = orders().ddl("acme-prod");
-    let plain_create = skeleton(
-        &table
-            .create(
-                &target(vec![column("c", STRING, BigQueryFieldMode::Nullable)]),
-                false,
-            )
-            .expect("DDL"),
-    );
-    let plain_rename = skeleton(&table.rename_column("a", "b"));
-    let plain_widen = skeleton(&table.widen_column("a", &BigQueryFieldType::Numeric(None)));
-    let plain_drop = skeleton(&table.drop_column("a"));
+    let create = |name: &str| {
+        let target = target(vec![column(name, STRING, BigQueryFieldMode::Nullable)]);
+        table.create(&target, false).expect("DDL")
+    };
+    let widen = |name: &str| table.widen_column(name, &BigQueryFieldType::Numeric(None));
     for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {
-        let create = table
-            .create(
-                &target(vec![column(&name, STRING, BigQueryFieldMode::Nullable)]),
-                false,
-            )
-            .expect("DDL");
-        assert_eq!(skeleton(&create), plain_create, "{name:.80?}");
-        assert_eq!(
-            idents(&create)[3..],
-            *std::slice::from_ref(&name),
-            "{name:.80?}"
-        );
-
+        assert_same_statement(&create(&name), &create("c"), &name, "c");
         let rename = table.rename_column(&name, &name);
-        assert_eq!(skeleton(&rename), plain_rename, "{name:.80?}");
-        assert_eq!(idents(&rename)[3..], [name.clone(), name.clone()]);
-
-        let widen = table.widen_column(&name, &BigQueryFieldType::Numeric(None));
-        assert_eq!(skeleton(&widen), plain_widen, "{name:.80?}");
-
+        assert_same_statement(&rename, &table.rename_column("c", "c"), &name, "c");
+        assert_same_statement(&widen(&name), &widen("c"), &name, "c");
         let drop = table.drop_column(&name);
-        assert_eq!(skeleton(&drop), plain_drop, "{name:.80?}");
-        assert_eq!(idents(&drop)[3..], *std::slice::from_ref(&name));
+        assert_same_statement(&drop, &table.drop_column("c"), &name, "c");
     }
 }
 
@@ -462,7 +371,7 @@ fn a_default_is_one_parenthesized_operand() {
         ]);
         let sql = table.create(&target, false).expect("DDL");
         let parsed = without_comments(&sql).replacen(code, "E", 1);
-        skeleton(&parsed.split_whitespace().collect::<Vec<_>>().join(" "))
+        pieces(&parsed.split_whitespace().collect::<Vec<_>>().join(" "))
     };
     let plain = rendered("0", "0");
     for (expression, code) in [
@@ -474,8 +383,8 @@ fn a_default_is_one_parenthesized_operand() {
         assert_eq!(rendered(expression, code), plain, "{expression:?}");
     }
     assert!(
-        plain.contains("`I` INT64 DEFAULT (E ), `I` INT64"),
-        "{plain}"
+        plain.contains(&Piece::Text(" INT64 DEFAULT (E ), ".into())),
+        "{plain:?}"
     );
 }
 
@@ -495,17 +404,10 @@ fn a_nested_field_name_stays_one_identifier() {
         let target = target(vec![column("s", nested(name), BigQueryFieldMode::Nullable)]);
         table.create(&target, false).expect("DDL")
     };
-    let plain_create = skeleton(&create("c"));
-    let plain_widen = skeleton(&table.widen_column("s", &nested("c")));
+    let widen = |name: &str| table.widen_column("s", &nested(name));
     for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {
-        let segments = ["s".to_string(), name.clone(), name.clone()];
-        let create = create(&name);
-        assert_eq!(skeleton(&create), plain_create, "{name:.80?}");
-        assert_eq!(idents(&create)[3..], segments, "{name:.80?}");
-
-        let widen = table.widen_column("s", &nested(&name));
-        assert_eq!(skeleton(&widen), plain_widen, "{name:.80?}");
-        assert_eq!(idents(&widen)[3..], segments, "{name:.80?}");
+        assert_same_statement(&create(&name), &create("c"), &name, "c");
+        assert_same_statement(&widen(&name), &widen("c"), &name, "c");
     }
 }
 
@@ -557,15 +459,9 @@ fn hostile_key_clustering_and_partitioning_columns_render_as_single_identifiers(
             });
             table.create(&target, false).expect("DDL")
         };
-        let plain = skeleton(&create("c"));
+        let plain = create("c");
         for name in injection_corpus().into_iter().filter(|n| !n.is_empty()) {
-            let sql = create(&name);
-            assert_eq!(skeleton(&sql), plain, "{field_type}: {name:.80?}");
-            assert_eq!(
-                idents(&sql)[3..],
-                [name.clone(), name.clone(), name.clone(), name.clone()],
-                "column, primary key, partitioning and clustering, {field_type}: {name:.80?}"
-            );
+            assert_same_statement(&create(&name), &plain, &name, "c");
         }
     }
 }

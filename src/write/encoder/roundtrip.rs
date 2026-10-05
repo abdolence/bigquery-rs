@@ -120,7 +120,9 @@ impl Canonical {
                     Target::Date(d),
                     Target::BqDate(BigQueryDate(d)),
                     Target::I32(days),
-                    Target::Str(text(|o| civil::fmt_date(days, o))),
+                    Target::Str(text(|o| {
+                        civil::fmt_date(days, o).expect("inside BigQuery's DATE range")
+                    })),
                 ]
             }
             Canonical::Time(us) => {
@@ -129,7 +131,7 @@ impl Canonical {
                     Target::Time(t),
                     Target::BqTime(BigQueryTime(t)),
                     Target::I64(us),
-                    Target::Str(text(|o| civil::fmt_time(us, o))),
+                    Target::Str(text(|o| civil::fmt_time(us, o).expect("a time of day"))),
                 ]
             }
             Canonical::DateTime(us) => {
@@ -139,13 +141,17 @@ impl Canonical {
                     Target::DateTime(dt),
                     Target::BqDateTime(BigQueryDateTime(dt)),
                     Target::I64(us),
-                    Target::Str(text(|o| civil::fmt_datetime(us, o))),
+                    Target::Str(text(|o| {
+                        civil::fmt_datetime(us, o).expect("inside BigQuery's DATETIME range")
+                    })),
                 ]
             }
             Canonical::Timestamp(us) => {
                 let mut out = vec![
                     Target::I64(us),
-                    Target::Str(text(|o| civil::fmt_timestamp(us, o))),
+                    Target::Str(text(|o| {
+                        civil::fmt_timestamp(us, o).expect("inside BigQuery's TIMESTAMP range")
+                    })),
                 ];
                 // jiff ends below BigQuery's maximum; the integer and text forms cover the rest.
                 if let Ok(ts) = civil::jiff_timestamp(us) {

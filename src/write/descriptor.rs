@@ -7,6 +7,7 @@ use crate::{
     BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryRangeElementType,
     BigQueryTableSchema,
 };
+use gcloud_sdk::prost::encoding::{encode_key, key_len, WireType};
 use gcloud_sdk::prost_types::field_descriptor_proto::{Label, Type as ProtoType};
 use gcloud_sdk::prost_types::{DescriptorProto, FieldDescriptorProto};
 use std::collections::HashMap;
@@ -27,19 +28,13 @@ pub(crate) struct Key {
 }
 
 impl Key {
-    fn new(number: u32, wire_type: u8) -> Key {
+    fn new(number: u32, wire_type: WireType) -> Key {
         let mut bytes = [0u8; 5];
-        let mut v = (u64::from(number) << 3) | u64::from(wire_type);
-        let mut len = 0;
-        while v >= 0x80 {
-            bytes[len] = (v as u8) | 0x80;
-            v >>= 7;
-            len += 1;
-        }
-        bytes[len] = v as u8;
+        let len = key_len(number);
+        encode_key(number, wire_type, &mut &mut bytes[..len]);
         Key {
             bytes,
-            len: len as u8 + 1,
+            len: len as u8,
         }
     }
 
@@ -123,11 +118,11 @@ impl FieldKind {
         }
     }
 
-    fn wire_type(self) -> u8 {
+    fn wire_type(self) -> WireType {
         match self.proto_type() {
-            ProtoType::Int64 | ProtoType::Int32 | ProtoType::Bool => 0,
-            ProtoType::Double => 1,
-            _ => 2,
+            ProtoType::Int64 | ProtoType::Int32 | ProtoType::Bool => WireType::Varint,
+            ProtoType::Double => WireType::SixtyFourBit,
+            _ => WireType::LengthDelimited,
         }
     }
 }
@@ -224,7 +219,7 @@ impl Compiler {
                 required,
                 repeated: field.mode == BigQueryFieldMode::Repeated,
                 key: Key::new(number, kind.wire_type()),
-                packed_key: Key::new(number, 2),
+                packed_key: Key::new(number, WireType::LengthDelimited),
                 nested,
             });
             descriptors.push(descriptor);
@@ -261,8 +256,8 @@ impl WritePlan {
                 sequence_number,
             ));
             CdcKeys {
-                change_type: Key::new(change_type, 2),
-                sequence_number: Key::new(sequence_number, 2),
+                change_type: Key::new(change_type, WireType::LengthDelimited),
+                sequence_number: Key::new(sequence_number, WireType::LengthDelimited),
             }
         });
         let descriptor = DescriptorProto {

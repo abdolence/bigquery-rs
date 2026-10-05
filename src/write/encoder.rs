@@ -25,26 +25,10 @@ use crate::types::temporal::{capture_integer, temporal_tag_kind};
 use crate::write::descriptor::{FieldPlan, MessagePlan, WritePlan};
 use crate::{BigQueryChangeSequenceNumber, BigQueryChangeType};
 use arrow_buffer::i256;
+use gcloud_sdk::prost::encoding::{encode_varint, encoded_len_varint};
 use serde::ser::{self, Impossible, Serialize};
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
-
-/// The number of bytes `v` takes as a varint.
-pub(crate) fn varint_len(v: u64) -> usize {
-    let bits = u64::BITS - (v | 1).leading_zeros();
-    bits.div_ceil(7) as usize
-}
-
-fn varint_bytes(mut v: u64, buf: &mut [u8; 10]) -> usize {
-    let mut n = 0;
-    while v >= 0x80 {
-        buf[n] = (v as u8) | 0x80;
-        v >>= 7;
-        n += 1;
-    }
-    buf[n] = v as u8;
-    n + 1
-}
 
 impl FieldPlan {
     /// The error for a Rust form, described by `what`, that this field's column cannot take.
@@ -186,12 +170,7 @@ impl RowOutput<'_> {
 
     #[inline]
     fn varint(&mut self, v: u64) {
-        if v < 0x80 {
-            return self.byte(v as u8);
-        }
-        let mut buf = [0u8; 10];
-        let n = varint_bytes(v, &mut buf);
-        self.put(&buf[..n]);
+        encode_varint(v, self.out);
     }
 
     #[inline]
@@ -215,12 +194,11 @@ impl RowOutput<'_> {
             self.out[mark - 1] = len as u8;
             return;
         }
-        let mut buf = [0u8; 10];
-        let n = varint_bytes(len as u64, &mut buf);
+        let n = encoded_len_varint(len as u64);
         let extra = n - 1;
         self.out.resize(self.out.len() + extra, 0);
         self.out.copy_within(mark..mark + len, mark + extra);
-        self.out[mark - 1..mark - 1 + n].copy_from_slice(&buf[..n]);
+        encode_varint(len as u64, &mut &mut self.out[mark - 1..mark - 1 + n]);
     }
 }
 

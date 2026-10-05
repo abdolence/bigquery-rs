@@ -30,6 +30,8 @@ path = "src/lib.rs"
 default = ["tls-roots"]
 tls-roots = ["gcloud-sdk/tls-roots"]
 tls-webpki-roots = ["gcloud-sdk/tls-webpki-roots"]
+# Exposes the row encoder alone to `benches/write_codec.rs`; not part of the API.
+bench-internals = []
 
 [dependencies]
 tracing = "0.1"
@@ -74,6 +76,7 @@ harness = false
 [[bench]]
 name = "write_codec"
 harness = false
+required-features = ["bench-internals"]
 
 [lints.clippy]
 unwrap_used = "deny"

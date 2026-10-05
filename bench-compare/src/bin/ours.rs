@@ -350,13 +350,15 @@ impl Ours {
             let mut rows = 0u64;
             let mut failed = None;
             for batch in batches {
-                __bench_decode_each(batch, |row: BigQueryResult<ScanRow>| match row {
-                    Ok(row) => {
-                        std::hint::black_box(&row);
-                        rows += 1;
+                for row in BigQueryBatchRows::<ScanRow>::new(batch) {
+                    match row {
+                        Ok(row) => {
+                            std::hint::black_box(&row);
+                            rows += 1;
+                        }
+                        Err(err) => failed = Some(err),
                     }
-                    Err(err) => failed = Some(err),
-                });
+                }
             }
             match failed {
                 Some(err) => Err(err.into()),

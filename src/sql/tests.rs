@@ -1,8 +1,7 @@
 //! Each test here protects one property a value or a name relies on to stay inside its token.
 //!
-//! [`lex`] is a small GoogleSQL lexer for quoted tokens, written from the escape table on the
-//! lexical page rather than from the renderer, so the two cannot share a mistake: it accepts a
-//! token only if the closing quote is the last character and every escape is in the table.
+//! [`pieces`] is a small GoogleSQL lexer for quoted tokens, written from the escape table on the
+//! lexical page rather than from the renderer, so the two cannot share a mistake.
 
 use super::*;
 use crate::query::{infer_param, ParamLabel};
@@ -57,116 +56,110 @@ pub(crate) fn every_char_class() -> String {
     s
 }
 
-/// What a quoted token decodes to.
+/// One piece of a statement as GoogleSQL's lexer splits it, with every quoted token decoded.
 #[derive(Debug, PartialEq)]
-enum Decoded {
+pub(crate) enum Piece {
+    /// Text outside any quoted token.
     Text(String),
+    String(String),
     Bytes(Vec<u8>),
+    Identifier(String),
 }
 
-/// Decodes `token`, which must be exactly one quoted token of the given quote, optionally
-/// prefixed with `b` for bytes. Panics on anything else: a second token, an unknown escape, a
-/// raw newline, or a token that closes before the end.
-fn lex(token: &str, quote: char) -> Decoded {
-    let (bytes, body) = match token.strip_prefix('b') {
-        Some(rest) if quote == '\'' => (true, rest),
-        _ => (false, token),
-    };
-    let mut chars = body.chars();
-    assert_eq!(chars.next(), Some(quote), "{token:.80?} opens with {quote}");
-    let mut out: Vec<u32> = Vec::new();
-    let mut closed = false;
-    while let Some(c) = chars.next() {
-        if c == quote {
-            closed = true;
-            break;
-        }
-        assert!(
-            c != '\n' && c != '\r',
-            "a quoted token cannot hold a raw newline: {token:.80?}"
-        );
-        if c != '\\' {
-            if bytes {
-                assert!(c.is_ascii(), "bytes literal holds raw {c:?}");
-            }
-            out.push(c.into());
+/// Splits `sql` into its quoted tokens, decoded, and the text between them. Panics on a token
+/// that never closes, an unknown escape, or a raw newline inside a token.
+pub(crate) fn pieces(sql: &str) -> Vec<Piece> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut chars = sql.chars();
+    while let Some(quote) = chars.next() {
+        if quote != '\'' && quote != '`' {
+            text.push(quote);
             continue;
         }
-        let escape = chars.next().expect("an escape after the backslash");
-        let mut hex = |n: usize| {
-            let digits: String = chars.by_ref().take(n).collect();
-            assert_eq!(digits.len(), n, "{n} hex digits");
-            u32::from_str_radix(&digits, 16).expect("hex digits")
-        };
-        let code = match escape {
-            'a' => 0x07,
-            'b' => 0x08,
-            'f' => 0x0C,
-            'n' => 0x0A,
-            'r' => 0x0D,
-            't' => 0x09,
-            'v' => 0x0B,
-            '\\' | '?' | '"' | '\'' | '`' => escape.into(),
-            'x' | 'X' => hex(2),
-            'u' => {
-                assert!(!bytes, "\\u is valid only in string literals");
-                hex(4)
+        // The renderer quotes every name, so a bare `b` against a quote is a bytes prefix.
+        let bytes = quote == '\'' && text.ends_with('b');
+        if bytes {
+            text.pop();
+        }
+        if !text.is_empty() {
+            out.push(Piece::Text(std::mem::take(&mut text)));
+        }
+        let mut codes: Vec<u32> = Vec::new();
+        loop {
+            let c = chars
+                .next()
+                .unwrap_or_else(|| panic!("{quote} never closes in {sql:.80?}"));
+            if c == quote {
+                break;
             }
-            'U' => {
-                assert!(!bytes, "\\U is valid only in string literals");
-                hex(8)
-            }
-            '0'..='7' => {
-                let rest: String = chars.by_ref().take(2).collect();
-                u32::from_str_radix(&format!("{escape}{rest}"), 8).expect("octal digits")
-            }
-            other => panic!("\\{other} is not a GoogleSQL escape"),
-        };
-        assert!(
-            !(0xD800..=0xDFFF).contains(&code) && code <= 0x10FFFF,
-            "escape to {code:#x}"
-        );
-        out.push(code);
+            assert!(
+                c != '\n' && c != '\r',
+                "a raw newline in a quoted token: {sql:.80?}"
+            );
+            assert!(!bytes || c.is_ascii(), "a bytes literal holds raw {c:?}");
+            codes.push(if c == '\\' {
+                escape(&mut chars, bytes)
+            } else {
+                c.into()
+            });
+        }
+        out.push(match (quote, bytes) {
+            (_, true) => Piece::Bytes(
+                codes
+                    .into_iter()
+                    .map(|b| u8::try_from(b).expect("a byte"))
+                    .collect(),
+            ),
+            ('`', _) => Piece::Identifier(scalars(codes)),
+            _ => Piece::String(scalars(codes)),
+        });
     }
-    assert!(closed, "{token:.80?} never closes");
-    assert_eq!(chars.as_str(), "", "{token:.80?} closes before its end");
-    if bytes {
-        Decoded::Bytes(
-            out.into_iter()
-                .map(|b| u8::try_from(b).expect("a byte"))
-                .collect(),
-        )
-    } else {
-        Decoded::Text(
-            out.into_iter()
-                .map(|c| char::from_u32(c).expect("a scalar value"))
-                .collect(),
-        )
+    if !text.is_empty() {
+        out.push(Piece::Text(text));
+    }
+    out
+}
+
+/// The code an escape stands for, from the table on GoogleSQL's lexical page. A code that is
+/// no character, or no byte in a bytes literal, fails when the token is assembled.
+fn escape(chars: &mut std::str::Chars, bytes: bool) -> u32 {
+    let escape = chars.next().expect("an escape after the backslash");
+    let mut digits = |n: usize, radix: u32| {
+        let digits: String = chars.by_ref().take(n).collect();
+        assert_eq!(digits.len(), n, "{n} digits after \\{escape}");
+        u32::from_str_radix(&digits, radix).expect("escape digits")
+    };
+    match escape {
+        'a' => 0x07,
+        'b' => 0x08,
+        'f' => 0x0C,
+        'n' => 0x0A,
+        'r' => 0x0D,
+        't' => 0x09,
+        'v' => 0x0B,
+        '\\' | '?' | '"' | '\'' | '`' => escape.into(),
+        'x' | 'X' => digits(2, 16),
+        'u' if !bytes => digits(4, 16),
+        'U' if !bytes => digits(8, 16),
+        '0'..='7' => escape.to_digit(8).expect("an octal digit") * 64 + digits(2, 8),
+        other => panic!("\\{other} is not a GoogleSQL escape here"),
     }
 }
 
+fn scalars(codes: Vec<u32>) -> String {
+    codes
+        .into_iter()
+        .map(|c| char::from_u32(c).expect("a scalar value"))
+        .collect()
+}
+
+/// The value of `token`, which must be exactly one string literal.
 pub(crate) fn lex_string(token: &str) -> String {
-    match lex(token, '\'') {
-        Decoded::Text(s) => s,
-        other => panic!("a STRING literal, got {other:.80?}"),
+    match <[Piece; 1]>::try_from(pieces(token)) {
+        Ok([Piece::String(s)]) => s,
+        other => panic!("one STRING literal, got {other:.80?}"),
     }
-}
-
-pub(crate) fn lex_identifier(token: &str) -> String {
-    match lex(token, '`') {
-        Decoded::Text(s) => s,
-        other => panic!("a quoted identifier, got {other:.80?}"),
-    }
-}
-
-/// The keyword and the text of a `KEYWORD '...'` literal.
-fn lex_keyword_string(token: &str) -> (&str, String) {
-    let (keyword, string) = token.split_once(' ').expect("a keyword, a space, a string");
-    assert!(
-        keyword.chars().all(|c| c.is_ascii_uppercase()),
-        "{keyword:?} is a keyword"
-    );
-    (keyword, lex_string(string))
 }
 
 fn infer_literal<V: Serialize>(value: V) -> SqlLiteral {
@@ -222,8 +215,8 @@ fn bytes_literal_is_one_token_that_decodes_to_the_value() {
     {
         let literal = SqlLiteral::bytes(&value);
         assert_eq!(
-            lex(literal.as_str(), '\''),
-            Decoded::Bytes(value.clone()),
+            pieces(literal.as_str()),
+            [Piece::Bytes(value.clone())],
             "{value:.80?}"
         );
     }
@@ -234,8 +227,8 @@ fn identifier_is_one_token_that_decodes_to_the_name() {
     for name in injection_corpus().into_iter().chain([every_char_class()]) {
         let quoted = quote_identifier(&name);
         assert_eq!(
-            lex(&quoted, '`'),
-            Decoded::Text(name.clone()),
+            pieces(&quoted),
+            [Piece::Identifier(name.clone())],
             "{name:.80?}"
         );
     }
@@ -256,19 +249,21 @@ fn text_literals_are_a_keyword_and_one_escaped_string() {
         for text in injection_corpus().into_iter().take(24) {
             let literal = SqlLiteral::text(kind, &text);
             assert_eq!(
-                lex_keyword_string(literal.as_str()),
-                (name, text.clone()),
+                pieces(literal.as_str()),
+                [Piece::Text(format!("{name} ")), Piece::String(text.clone())],
                 "{name} {text:?}"
             );
         }
     }
     let interval = SqlLiteral::interval("'; DROP TABLE x; --");
-    let rest = interval
-        .as_str()
-        .strip_prefix("INTERVAL ")
-        .and_then(|s| s.strip_suffix(" YEAR TO SECOND"))
-        .expect("INTERVAL '...' YEAR TO SECOND");
-    assert_eq!(lex_string(rest), "'; DROP TABLE x; --");
+    assert_eq!(
+        pieces(interval.as_str()),
+        [
+            Piece::Text("INTERVAL ".into()),
+            Piece::String("'; DROP TABLE x; --".into()),
+            Piece::Text(" YEAR TO SECOND".into()),
+        ]
+    );
 }
 
 #[test]
@@ -279,9 +274,12 @@ fn json_literal_carries_hostile_text_inside_the_document() {
             v: &'a str,
         }
         let literal = infer_literal(BigQueryJson(Doc { v: &value }));
-        let (keyword, text) = lex_keyword_string(literal.as_str());
-        assert_eq!(keyword, "JSON");
-        let doc: serde_json::Value = serde_json::from_str(&text).expect("JSON text");
+        let decoded = pieces(literal.as_str());
+        let [Piece::Text(keyword), Piece::String(text)] = &decoded[..] else {
+            panic!("JSON and one string literal: {:.80}", literal.as_str());
+        };
+        assert_eq!(keyword, "JSON ");
+        let doc: serde_json::Value = serde_json::from_str(text).expect("JSON text");
         assert_eq!(doc["v"], value.as_str(), "{value:.80?}");
     }
 }
@@ -410,8 +408,8 @@ fn column_paths_quote_each_segment_whatever_it_holds() {
     {
         let parsed: ColumnPath = name.parse().expect("a name without control characters");
         assert_eq!(
-            lex(&parsed.sql(), '`'),
-            Decoded::Text(name.clone()),
+            pieces(&parsed.sql()),
+            [Piece::Identifier(name.clone())],
             "{name:.40?}"
         );
     }

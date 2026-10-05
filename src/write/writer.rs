@@ -675,3 +675,6 @@ impl BigQueryDb {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,9 +1,8 @@
 //! `.plan()` and `.sync()` against the fake server: what each sends, in which order, with which
 //! precondition, and what it refuses to send.
 
-use super::*;
 use crate::db::fake::query::job_reference;
-use crate::db::fake::FakeBigQuery;
+use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::errors::BigQueryError;
 use crate::{
     BigQueryDatasetId, BigQueryDroppedData, BigQueryRecreateMethod, BigQueryRefusal,

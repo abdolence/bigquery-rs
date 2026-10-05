@@ -68,37 +68,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::errors::BigQueryError;
-    use crate::{BigQueryDataset, BigQueryDatasetSummary, BigQueryJob, BigQueryTable};
-    use crate::{BigQueryResult, BigQueryTableSummary};
-    use gcloud_sdk::google::cloud::bigquery::v2;
-
-    fn assert_unexpected<T: std::fmt::Debug>(what: &str, result: BigQueryResult<T>) {
-        match result {
-            Err(BigQueryError::SystemError(err)) => {
-                assert_eq!(err.public.code, "UNEXPECTED_RESPONSE", "{what}: {err}");
-            }
-            other => panic!("{what}: expected an unexpected response, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_resource_without_its_reference_is_an_unexpected_response() {
-        assert_unexpected("dataset", BigQueryDataset::try_from(v2::Dataset::default()));
-        assert_unexpected(
-            "listed dataset",
-            BigQueryDatasetSummary::try_from(v2::ListFormatDataset::default()),
-        );
-        assert_unexpected("table", BigQueryTable::try_from(v2::Table::default()));
-        assert_unexpected(
-            "listed table",
-            BigQueryTableSummary::try_from(v2::ListFormatTable::default()),
-        );
-        assert_unexpected("job", BigQueryJob::try_from(v2::Job::default()));
-        assert_unexpected(
-            "listed job",
-            BigQueryJob::try_from(v2::ListFormatJob::default()),
-        );
-    }
-}
+mod tests;

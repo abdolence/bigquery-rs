@@ -9,6 +9,7 @@
 use crate::errors::BigQueryError;
 use crate::sql::{quote_identifier, SqlLiteral, TextLiteralKind};
 use crate::types::civil::fmt_timestamp;
+use crate::types::error::CodecError;
 use crate::{
     BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryPartitionUnit,
     BigQueryPartitioning, BigQueryResult, BigQueryTableRef, BigQueryTableTarget,
@@ -125,7 +126,7 @@ impl DdlTable {
         }
         if let Some(at) = target.expiration {
             let mut text = String::new();
-            fmt_timestamp(at.as_microsecond(), &mut text);
+            fmt_timestamp(at.as_microsecond(), &mut text).map_err(CodecError::into_serialize)?;
             options.push(format!(
                 "expiration_timestamp={}",
                 SqlLiteral::text(TextLiteralKind::Timestamp, &text)

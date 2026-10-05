@@ -191,6 +191,26 @@ fn scalars_decode_into_their_rust_forms() {
 }
 
 #[test]
+fn batch_rows_yield_every_row_past_a_failing_one() {
+    let b = batch(vec![col(
+        "x",
+        Int64Array::from(vec![Some(1), None, Some(3)]),
+    )]);
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct R {
+        x: i64,
+    }
+    let decoded: Vec<_> = BigQueryBatchRows::<R>::new(&b).collect();
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[0].as_ref().ok(), Some(&R { x: 1 }));
+    let Err(BigQueryError::DeserializeError(e)) = &decoded[1] else {
+        panic!("the NULL row must fail, got {:?}", decoded[1]);
+    };
+    assert_eq!(e.row, Some(1));
+    assert_eq!(decoded[2].as_ref().ok(), Some(&R { x: 3 }));
+}
+
+#[test]
 fn null_cells_need_option_and_errors_carry_row_and_path() {
     let b = batch(vec![col("x", Int64Array::from(vec![Some(1), None]))]);
     #[derive(Deserialize, Debug, PartialEq)]

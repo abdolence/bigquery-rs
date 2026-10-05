@@ -57,6 +57,3 @@ impl FakeCall {
         request
     }
 }
-
-#[cfg(test)]
-mod tests;

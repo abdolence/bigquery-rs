@@ -431,3 +431,6 @@ impl BigQueryDb {
         Ok(report)
     }
 }
+
+#[cfg(test)]
+mod tests;

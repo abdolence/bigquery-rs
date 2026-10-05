@@ -7,12 +7,12 @@
 use crate::errors::BigQueryCodecErrorKind;
 use crate::types::error::CodecError;
 use crate::write::descriptor::WritePlan;
-use crate::write::encoder::varint_len;
 use crate::BigQueryMissingValue;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_request::{
     self, MissingValueInterpretation, ProtoData,
 };
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{AppendRowsRequest, ProtoRows, ProtoSchema};
+use gcloud_sdk::prost::encoding::encoded_len_varint;
 use gcloud_sdk::prost::Message;
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -155,7 +155,7 @@ impl Batcher {
     /// # Errors
     /// `RowTooLarge` when the row cannot fit any request alone.
     pub(crate) fn cost(&self, len: usize) -> Result<usize, CodecError> {
-        let cost = 1 + varint_len(len as u64) + len;
+        let cost = 1 + encoded_len_varint(len as u64) + len;
         if cost > self.capacity() {
             return Err(CodecError::new(
                 BigQueryCodecErrorKind::RowTooLarge,
@@ -328,7 +328,7 @@ mod tests {
             for pair in batches.windows(2) {
                 let next = pair[1].rows[0].len();
                 let full_by_rows = max_rows.is_some_and(|m| pair[0].rows.len() >= m);
-                let cost = 1 + varint_len(next as u64) + next;
+                let cost = 1 + encoded_len_varint(next as u64) + next;
                 prop_assert!(full_by_rows || pair[0].bytes + cost > capacity);
             }
         }
@@ -339,7 +339,7 @@ mod tests {
         let target = target();
         let batcher = Batcher::new(plan(3), &target, 1_000, None);
         let capacity = batcher.capacity();
-        let fits = capacity - 1 - varint_len(capacity as u64);
+        let fits = capacity - 1 - encoded_len_varint(capacity as u64);
         assert!(batcher.cost(fits).is_ok());
         let err = batcher
             .cost(fits + 1)
