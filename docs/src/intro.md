@@ -43,9 +43,9 @@ each of them provides that the other does not.
 
 ### What this crate provides
 
-- **High-level typed API.** Fluent builders in the same style as
-  [firestore-rs](https://github.com/abdolence/firestore-rs). Rows are your own structures in both
-  directions, through Serde, for table reads, query results, writes and CDC. Dataset and table
+- **High-level typed API.** Fluent builders for table reads, queries, writes, updates and
+  deletes, and table schemas. Rows are your own structures in both directions, through Serde,
+  for table reads, query results, writes and CDC. Dataset and table
   IDs are checked types, column paths come from your structure fields with `path!`/`paths!`,
   and table schemas are declared once and planned or synced with `.plan()`/`.sync()`.
 - **gRPC throughout.** Queries, jobs, datasets and tables go through the BigQuery v2 API over
