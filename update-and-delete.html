@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Change data capture - BigQuery for Rust</title>
+        <title>Updating and deleting - BigQuery for Rust</title>
 
 
         <!-- Custom HTML head -->
@@ -177,218 +177,222 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="change-data-capture"><a class="header" href="#change-data-capture">Change data capture</a></h1>
-<p>BigQuery tables are made for appending rows. Change data capture (CDC) is BigQuery’s way to keep
-a table in sync with a changing source instead: each row you write is a change to the row with
-the same primary key, an upsert or a delete, and BigQuery applies the changes for you. There is no
-<code>MERGE</code> or <code>UPDATE</code> statement to run and no staging table to clean up.</p>
-<p>The typical use is mirroring an OLTP database into BigQuery as a stream. You read the changes of
-a PostgreSQL or MySQL table from its log, and write each one as it comes. The BigQuery table then
-looks like the source table, with a delay you choose.</p>
-<p>This chapter is about the CDC API itself. To update or delete a few rows by primary key,
-<code>db.fluent().update()</code> and <code>db.fluent().delete()</code> are simpler, see
-<a href="./update-and-delete.html">updating and deleting</a>.</p>
-<h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
-<p>A CDC table needs a primary key. BigQuery’s keys are <code>NOT ENFORCED</code>: BigQuery never checks them,
-so it is up to you that the key is unique in the source. A key can have up to 16 columns.</p>
-<p>Every row written through CDC carries two pseudo-columns besides the table’s own columns:</p>
+                        <h1 id="updating-and-deleting"><a class="header" href="#updating-and-deleting">Updating and deleting</a></h1>
+<p>BigQuery tables are made for appending rows, but the library supports updates and deletes by
+primary key too:</p>
 <ul>
-<li><code>_CHANGE_TYPE</code>: <code>UPSERT</code> inserts the row, or replaces the row with the same key; <code>DELETE</code>
-deletes the row with the same key, and only its key columns matter;</li>
-<li><code>_CHANGE_SEQUENCE_NUMBER</code>, optional: orders the changes to one key.</li>
+<li><code>db.fluent().update()</code> writes whole rows: each replaces the row with its primary key, or is
+inserted if there is none;</li>
+<li><code>db.fluent().delete()</code> deletes the rows with the given primary keys.</li>
 </ul>
-<p>Without a sequence number BigQuery orders the changes to one key by the time it received them,
-the latest wins. That is fine for one producer writing in order, but rows can be resent after a
-reconnect, and two producers can race. With a sequence number the highest one wins, whenever it
-arrived, so an old change that arrives late or twice does not overwrite a newer one.</p>
-<p>A sequence number is up to four sections of hexadecimal digits separated by <code>/</code>, each up to 16
-digits, from <code>0</code> to <code>FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF/FFFFFFFFFFFFFFFF</code>.
-BigQuery compares the sections as numbers, from left to right. A PostgreSQL LSN such as
-<code>16/B374D848</code> is already in this form. Between two changes with the same number, the one
-BigQuery ingested last wins. Sequence numbers are a choice for the whole table: once a table gets
-changes with sequence numbers, send one with every change to it, mixing changes with and without
-them gives an unpredictable order.</p>
-<p>BigQuery does not rewrite the table on every change. It keeps the recent changes beside the table
-and applies them in the background. The table’s <code>max_staleness</code> option says how old the applied
-data may be:</p>
-<ul>
-<li>without <code>max_staleness</code>, a query merges the changes not applied yet at query time, so it always
-sees the latest data and pays for that merge;</li>
-<li>with <code>max_staleness = INTERVAL 10 MINUTE</code>, BigQuery applies the changes at least once every 10
-minutes with background jobs, and a query reads the applied table, which can be up to 10 minutes
-old. If the background jobs fall behind the interval, queries merge at query time again.</li>
-</ul>
-<p>Either way a reader sees the merged result, never the raw changes. The pseudo-columns cannot be
-queried.</p>
-<h2 id="creating-the-table"><a class="header" href="#creating-the-table">Creating the table</a></h2>
-<p>Declare the primary key with <code>schema()</code>, and set <code>max_staleness</code> with a DDL statement:</p>
+<p>Both are written through BigQuery <a href="./cdc.html">change data capture</a> (CDC), as upserts and
+deletes on the table’s default write stream. There is no <code>UPDATE</code> or <code>MERGE</code> statement to run,
+BigQuery applies the changes itself.</p>
+<h2 id="the-table"><a class="header" href="#the-table">The table</a></h2>
+<p>The table needs a primary key, declared with <code>schema()</code>:</p>
 <pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
 </span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const CUSTOMERS: BigQueryTableId = BigQueryTableId::from_static("customers");
-</span>struct Customer {
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span>struct Order {
     id: i64,
-    name: String,
-    city: Option&lt;String&gt;,
+    customer: String,
+    status: String,
+    note: Option&lt;String&gt;,
 }
 
 <span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
 </span>db.fluent()
     .schema()
-    .table(SHOP.table(CUSTOMERS))
+    .table(SHOP.table(ORDERS))
     .columns(|columns| {
         columns.fields([
-            columns.field(path!(Customer::id)).int64().required(),
-            columns.field(path!(Customer::name)).string(),
-            columns.field(path!(Customer::city)).string(),
+            columns.field(path!(Order::id)).int64().required(),
+            columns.field(path!(Order::customer)).string(),
+            columns.field(path!(Order::status)).string(),
+            columns.field(path!(Order::note)).string(),
         ])
     })
-    .primary_key([path!(Customer::id)])
-    .cluster_by([path!(Customer::id)])
+    .primary_key([path!(Order::id)])
     .sync()
     .await?;
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>BigQuery never enforces the key, it only uses it to find the row a change is for. So it is up
+to you that the key is unique.</p>
+<h2 id="updates"><a class="header" href="#updates">Updates</a></h2>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::Serialize;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span>#[derive(Serialize)]
+struct Order {
+    id: i64,
+    customer: String,
+    status: String,
+    note: Option&lt;String&gt;,
+}
 
+<span class="boring">async fn example(db: BigQueryDb, orders: Vec&lt;Order&gt;) -&gt; BigQueryResult&lt;()&gt; {
+</span>let order = Order {
+    id: 42,
+    customer: "Ada".to_string(),
+    status: "shipped".to_string(),
+    note: None,
+};
 db.fluent()
-    .query("ALTER TABLE shop.customers SET OPTIONS (max_staleness = INTERVAL 10 MINUTE)")
+    .update()
+    .in_table(SHOP.table(ORDERS))
+    .object(&amp;order)
+    .execute()
+    .await?;
+
+// Many rows through one writer
+db.fluent()
+    .update()
+    .in_table(SHOP.table(ORDERS))
+    .objects(&amp;orders)
     .execute()
     .await?;
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>Clustering by the key is what Google’s own CDC example does; it is not required.</p>
-<h2 id="writing-changes"><a class="header" href="#writing-changes">Writing changes</a></h2>
-<p><code>.changes(..)</code> on an insert takes <code>BigQueryChange</code>s, each with a <code>BigQueryChangeType</code> and an
-optional <code>BigQueryChangeSequenceNumber</code>:</p>
+<p>An update replaces the whole row. There is no field mask, so a column you leave out or set to
+<code>None</code> becomes <code>NULL</code>. To change one column, write the whole row with the new value. Be aware
+that BigQuery does not support <code>UPDATE</code>, <code>DELETE</code> or <code>MERGE</code> statements on a table while CDC
+changes are streamed to it, so a DML query is not a way around this.</p>
+<p>Without sequence numbers, of two rows with one key the row BigQuery ingested last wins, see
+<a href="#ordering-changes">ordering changes</a>.</p>
+<h2 id="deletes"><a class="header" href="#deletes">Deletes</a></h2>
+<p>A delete needs only the primary key. <code>.key(..)</code> takes the key value itself: a plain value for a
+key of one column, a tuple in the key’s column order for a key of several:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">const ORDER_LINES: BigQueryTableId = BigQueryTableId::from_static("order_lines");
+</span><span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>db.fluent()
+    .delete()
+    .from(SHOP.table(ORDERS))
+    .key(42)
+    .execute()
+    .await?;
+
+// The primary key of order_lines is (order_id, line)
+db.fluent()
+    .delete()
+    .from(SHOP.table(ORDER_LINES))
+    .keys([(42, "line-1"), (42, "line-2")])
+    .execute()
+    .await?;
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>The library reads the key’s columns from the table’s metadata, one <code>GetTable</code> call per
+<code>execute()</code>, and writes rows with only those columns. A table without a primary key, or a tuple
+with another number of values than the key has columns, fails with <code>InvalidParametersError</code>
+before anything is written. A value for a key of one column is written as it is, so a <code>Vec&lt;u8&gt;</code>
+works for a <code>BYTES</code> key, and a value of the wrong type fails at the write with
+<code>SerializeError</code>.</p>
+<p>A row works as well, <code>.object(..)</code> and <code>.objects(..)</code> take a struct of just the key, or the whole
+row:</p>
 <pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
 </span><span class="boring">use serde::Serialize;
 </span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const CUSTOMERS: BigQueryTableId = BigQueryTableId::from_static("customers");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 </span>#[derive(Serialize)]
-struct Customer {
+struct OrderKey {
     id: i64,
-    name: String,
-    city: Option&lt;String&gt;,
 }
 
 <span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
-</span>let changes = vec![
-    BigQueryChange {
-        change_type: BigQueryChangeType::Upsert,
-        sequence_number: Some(BigQueryChangeSequenceNumber::from(1)),
-        row: Customer {
-            id: 1,
-            name: "Ada".to_string(),
-            city: Some("Stockholm".to_string()),
-        },
-    },
-    BigQueryChange {
-        change_type: BigQueryChangeType::Delete,
-        sequence_number: Some("16/B374D848".parse()?),
-        row: Customer {
-            id: 2,
-            name: String::new(),
-            city: None,
-        },
-    },
-];
-
-db.fluent()
-    .insert()
-    .into(SHOP.table(CUSTOMERS))
-    .changes(changes)
+</span>db.fluent()
+    .delete()
+    .from(SHOP.table(ORDERS))
+    .object(&amp;OrderKey { id: 42 })
     .execute()
     .await?;
 
-// Or plain rows as upserts, for a table that does not use sequence numbers
-let customer = Customer {
-    id: 3,
-    name: "Grace".to_string(),
-    city: None,
-};
 db.fluent()
-    .insert()
-    .into(SHOP.table(CUSTOMERS))
-    .object(&amp;customer)
-    .upsert()
+    .delete()
+    .from(SHOP.table(ORDERS))
+    .objects([OrderKey { id: 1 }, OrderKey { id: 2 }])
     .execute()
     .await?;
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p><code>BigQueryChangeSequenceNumber::from(u64)</code> writes the number in hex, as one section. Parsing a
-string takes the text as it is and BigQuery checks its form, so a source that has its own
-sequence text, like the LSN above, can pass it through.</p>
-<p>For a long-running stream of changes, <code>db.create_cdc_writer(..)</code> opens a CDC writer, the same as
-the <a href="./writing-data.html#streaming-writer">streaming writer</a> with its batching, backpressure and
-response stream:</p>
+<p>The columns the key struct or <code>.key(..)</code> leaves out must be <code>NULLABLE</code>. A row without a
+<code>REQUIRED</code> column does not serialize, so for a table with other <code>REQUIRED</code> columns pass the whole
+row instead.</p>
+<h2 id="ordering-changes"><a class="header" href="#ordering-changes">Ordering changes</a></h2>
+<p>Without sequence numbers, of the changes to one key the one BigQuery ingested last wins. That is
+fine for one producer at a time. If a change can arrive late or twice, give it a sequence
+number, the highest one wins:</p>
 <pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
 </span><span class="boring">use serde::Serialize;
 </span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-</span><span class="boring">const CUSTOMERS: BigQueryTableId = BigQueryTableId::from_static("customers");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 </span><span class="boring">#[derive(Serialize)]
-</span><span class="boring">struct Customer {
+</span><span class="boring">struct Order {
 </span><span class="boring">    id: i64,
-</span><span class="boring">    name: String,
-</span><span class="boring">    city: Option&lt;String&gt;,
+</span><span class="boring">    customer: String,
+</span><span class="boring">    status: String,
+</span><span class="boring">    note: Option&lt;String&gt;,
 </span><span class="boring">}
-</span><span class="boring">async fn example(db: BigQueryDb, source_changes: Vec&lt;BigQueryChange&lt;Customer&gt;&gt;) -&gt; BigQueryResult&lt;()&gt; {
-</span>let (mut writer, _responses) = db
-    .create_cdc_writer::&lt;Customer&gt;(
-        SHOP.table(CUSTOMERS),
-        BigQueryStreamingWriteOptions::new(),
-    )
+</span><span class="boring">async fn example(db: BigQueryDb, order: Order, orders: Vec&lt;Order&gt;) -&gt; BigQueryResult&lt;()&gt; {
+</span>db.fluent()
+    .update()
+    .in_table(SHOP.table(ORDERS))
+    .object(&amp;order)
+    .sequence_number(BigQueryChangeSequenceNumber::from(1041))
+    .execute()
     .await?;
 
-for change in &amp;source_changes {
-    writer.write_change(change).await?;
-}
+// One number for the rows of one source transaction
+db.fluent()
+    .update()
+    .in_table(SHOP.table(ORDERS))
+    .objects(&amp;orders)
+    .sequence_number(BigQueryChangeSequenceNumber::from(1042))
+    .execute()
+    .await?;
 
-let summary = writer.finish().await?;
-println!("{} changes written", summary.rows_written);
+db.fluent()
+    .delete()
+    .from(SHOP.table(ORDERS))
+    .key(42)
+    .sequence_number(BigQueryChangeSequenceNumber::from(1043))
+    .execute()
+    .await?;
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p><code>writer.upsert(&amp;row)</code> and <code>writer.delete(&amp;row)</code> write a change without a sequence number.</p>
-<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/cdc-upsert.rs">here</a>.</p>
-<h2 id="why-protobuf"><a class="header" href="#why-protobuf">Why protobuf</a></h2>
-<p>BigQuery takes CDC changes only as protobuf rows on the default write stream, Apache Arrow rows
-are not supported for CDC. This is the main reason the library writes every row as protobuf: one
-encoder serves plain inserts and CDC alike. Protobuf requests were also smaller than Arrow for the
-same rows in the <a href="./benchmarks.html">benchmarks</a>, 18% fewer bytes for 1M rows.</p>
-<h2 id="limits"><a class="header" href="#limits">Limits</a></h2>
-<p>From BigQuery’s side, as its
-<a href="https://cloud.google.com/bigquery/docs/change-data-capture#limitations">CDC limitations</a> list them:</p>
+<p><code>.sequence_number(..)</code> gives the same number to every row of the call. Between changes to one key
+with the same number, the one BigQuery ingested last wins. For changes each with its own number,
+use <code>.changes(..)</code> on an insert, see <a href="./cdc.html#writing-changes">change data capture</a>.</p>
+<p>Be aware that sequence numbers are a choice for the whole table: once a table takes changes with
+sequence numbers, send one with every change to it. Mixing changes with and without them gives
+an unpredictable order.</p>
+<h2 id="when-the-changes-show-up"><a class="header" href="#when-the-changes-show-up">When the changes show up</a></h2>
+<p>BigQuery applies the changes in the background, and the table’s <code>max_staleness</code> option says how
+old the applied data may be:</p>
 <ul>
-<li>CDC goes only through the default stream, so <code>.exactly_once()</code> and <code>.atomic()</code> cannot be
-combined with it; the library refuses them with <code>InvalidParametersError</code> before any request;</li>
-<li>the primary key is not enforced and has at most 16 columns;</li>
-<li>the table has at most 2,000 top-level columns;</li>
-<li>mutating DML (<code>UPDATE</code>, <code>DELETE</code>, <code>MERGE</code>), wildcard table queries and search indexes are not
-supported on the table;</li>
-<li>while queries merge at query time because <code>max_staleness</code> is too low or not set, the table cannot
-be copied, cloned or snapshotted, and cannot be read through the Storage Read API, so
-<a href="./reading-tables.html">table reads</a> need a <code>max_staleness</code> the background jobs keep up with;</li>
-<li>a query that merges at query time scans the whole table, whatever its partition filter;</li>
-<li>exports do not include changes not applied yet;</li>
-<li>the applying is BigQuery compute and is billed as such, on demand unless you have a BACKGROUND
-reservation, which Standard edition does not have.</li>
+<li>without <code>max_staleness</code>, a query merges the changes not applied yet at query time, so it sees
+every change as soon as <code>execute()</code> returns, and pays for that merge;</li>
+<li>with <code>max_staleness</code>, say 10 minutes, a query may read data up to 10 minutes old, so a read
+right after an update may not show it yet.</li>
 </ul>
-<p>From the library’s side:</p>
-<ul>
-<li>a CDC writer always writes <code>_CHANGE_TYPE</code>, so write plain inserts to the same table with a
-separate writer. BigQuery’s CDC documentation says rows with and without a change type on one
-connection are not supported;</li>
-<li>a delete serializes a whole row, but only its key columns matter. A struct of just the key
-works when every column it leaves out is <code>NULLABLE</code>;</li>
-<li>delivery is at least once, as on every default stream write. With sequence numbers a change
-sent twice is harmless.</li>
-</ul>
+<p>More on <code>max_staleness</code>, its costs and the limits of CDC tables in
+<a href="./cdc.html">change data capture</a>.</p>
+<p>Each <code>execute()</code> opens a CDC writer and finishes it, which costs a round trip or so. For a
+steady stream of changes keep one writer open with <code>db.create_cdc_writer(..)</code> instead.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/update-and-delete.rs">here</a>.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="update-and-delete.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="writing-data.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="schema-management.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="cdc.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -398,11 +402,11 @@ sent twice is harmless.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="update-and-delete.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="writing-data.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="schema-management.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="cdc.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
