@@ -228,7 +228,7 @@ patch release.
 
 ## Running the examples
 
-All examples available in the [examples](https://github.com/abdolence/bigquery-rs/tree/main/examples) directory.
+All examples available in the [examples](https://github.com/abdolence/bigquery-rs/tree/master/examples) directory.
 Each one creates its own scratch dataset and deletes it at the end.
 
 To run an example:

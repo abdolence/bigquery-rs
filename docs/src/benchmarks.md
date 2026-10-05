@@ -216,7 +216,7 @@ went through the Storage Read free tier, and the writes ingested about 215 MB pe
 
 ## Reproducing
 
-The harness is in [bench-compare](https://github.com/abdolence/bigquery-rs/tree/main/bench-compare),
+The harness is in [bench-compare](https://github.com/abdolence/bigquery-rs/tree/master/bench-compare),
 an unpublished crate with the Rust contenders and a [uv](https://docs.astral.sh/uv/) project for
 Python. You need application default credentials and optionally the `bq` CLI:
 

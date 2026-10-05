@@ -347,7 +347,7 @@ silently for a few seconds and then fails. `renamed_from(..)` is not held back b
 `renamed_from(..)` to the declaration the first step runs: add it only to the one used after the
 rollout, once the writers have moved to the new name. Only top-level columns can be renamed.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/schema-sync.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/schema-sync.rs).
 
 ## Widening a column
 
@@ -457,7 +457,7 @@ any of them:
 So stop writers and readers before a recreate. A dangerous recreate is logged at `warn` with the row
 count it read.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/recreate-table.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/recreate-table.rs).
 
 ## Logs and spans
 

@@ -187,7 +187,7 @@ println!("{} changes written", summary.rows_written);
 
 `writer.upsert(&row)` and `writer.delete(&row)` write a change without a sequence number.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/cdc-upsert.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/cdc-upsert.rs).
 
 ## Why protobuf
 

@@ -246,7 +246,7 @@ since the first authorize only `gcloud` tool to access the Cloud Platform.
 
 There are unit tests next to the code, many of them against a fake BigQuery gRPC server, and the
 code in the book is compiled as doctests. The integration tests in the tests directory run for
-every push to main against a real BigQuery project allocated for testing purposes, or locally when
+every push to master against a real BigQuery project allocated for testing purposes, or locally when
 `GCP_PROJECT` is set. Other branches run only the unit tests and doctests.
 Each test creates its own scratch dataset and deletes it at the end. Be aware not to introduce
 huge reads, writes or queries there, since they are billed.

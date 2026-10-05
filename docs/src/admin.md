@@ -185,7 +185,7 @@ The listings return summaries, `BigQueryDatasetSummary` and `BigQueryTableSummar
 BigQuery's list calls return: the reference, the location or table type, the labels, etc. Read the
 full value with `get()`.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/datasets-admin.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/datasets-admin.rs).
 
 ## Tables
 

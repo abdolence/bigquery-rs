@@ -59,7 +59,7 @@ all rows or none, use `.atomic()` or check the rows before the insert.
 Every `execute()` opens a write stream first, which is a round trip of about 300 ms. That is fine
 for a load of many rows, but for many small writes keep one streaming writer instead.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/insert.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/insert.rs).
 
 ## Streaming writer
 
@@ -118,7 +118,7 @@ rows not acknowledged yet and leaves a pending stream uncommitted.
 `db.create_streaming_writer_with_options(..)` takes `BigQueryStreamingWriteOptions`, the same
 options as `.options(..)` on an insert.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/streaming-writer.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/streaming-writer.rs).
 
 ## Built-in batching
 

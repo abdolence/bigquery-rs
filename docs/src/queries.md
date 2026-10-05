@@ -253,7 +253,7 @@ let outcome = db
 
 Named and positional parameters cannot be mixed in one query.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/query.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/query.rs).
 
 ### Errors
 
@@ -434,7 +434,7 @@ if let Some(schema) = estimate.schema {
 # }
 ```
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/dml-and-dry-run.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/dml-and-dry-run.rs).
 
 ## Job stats
 
@@ -487,7 +487,7 @@ then. What reading the rows cost is on the read's span, see [Observability](./ob
 Even a query that reads no table uses slots. On 1,000 generated rows BigQuery reported 0 bytes
 processed and billed, and 25 slot ms answered inline, 152 slot ms read through Storage Read.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/job-stats-tracing.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/job-stats-tracing.rs).
 
 ## Cancellation
 

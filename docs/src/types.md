@@ -340,7 +340,7 @@ keys, or a `serde_json::Value` object. Nested structs and `ARRAY<STRUCT>` work t
   `shipping.inner.zip`, and a REQUIRED subfield the row never wrote with `MissingRequiredField`;
 - a tuple works as a whole row only, a STRUCT column into a tuple is `TypeMismatch`.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/nested-structs-and-json.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/nested-structs-and-json.rs).
 
 ## Field names and serde attributes
 

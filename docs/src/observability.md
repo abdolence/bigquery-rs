@@ -44,7 +44,7 @@ let outcome = db
 # }
 ```
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/job-stats-tracing.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/job-stats-tracing.rs).
 
 ## OpenTelemetry
 

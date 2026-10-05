@@ -129,7 +129,7 @@ A few things to know:
 - a value without a literal form fails the read before any request, with `SerializeError`;
 - the whole restriction is at most 1 MB, a limit BigQuery checks.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/select-table.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/select-table.rs).
 
 ### Raw SQL filters
 
@@ -236,7 +236,7 @@ while let Some(batch) = batches.try_next().await? {
 `BigQueryBatchRows` is not `Send`, so decode a batch where you hold it and do not keep the iterator
 across an `.await`.
 
-Full example available [here](https://github.com/abdolence/bigquery-rs/blob/main/examples/record-batches.rs).
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/record-batches.rs).
 
 ## Parallel streams and resume
 
