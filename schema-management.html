@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5a971c71.js";
+            window.path_to_searchindex_js = "searchindex-bd85b202.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -182,9 +182,7 @@
 when the code needs a new column. The library supports declaring a table’s schema and settings
 in Rust instead, next to the structs that read and write it, and making the table match with one
 explicit call.</p>
-<p>It works the same way as the index management in
-<a href="https://github.com/abdolence/firestore-rs">firestore-rs</a>: a declaration, a read-only <code>.plan()</code>
-and a <code>.sync()</code> that applies it.</p>
+<p>It has three parts: a declaration, a read-only <code>.plan()</code> and a <code>.sync()</code> that applies it.</p>
 <h2 id="declaring-a-table"><a class="header" href="#declaring-a-table">Declaring a table</a></h2>
 <p>Everything starts from <code>db.fluent().schema().table(..)</code>, then a chain of declarations ending in
 <code>.plan()</code> or <code>.sync()</code>:</p>
@@ -406,7 +404,7 @@ spaces the rest about 2 seconds apart, and the rate-limit errors are retried.</p
 <p>BigQuery applies a schema change at once, but running writers and readers see it later. During a
 rolling update old and new replicas run side by side, so a sync that removes a column before the
 old replicas stop is the same as removing it under them.</p>
-<p>So run <code>.sync()</code> once per release, in two steps, the same as firestore-rs’s index management:</p>
+<p>So run <code>.sync()</code> once per release, in two steps:</p>
 <ul>
 <li><strong>before the deploy</strong>, the sync without <code>.prune_undeclared()</code>: it adds columns, relaxes REQUIRED,
 sets descriptions, labels, clustering, etc., all of which keep running writers working;</li>
