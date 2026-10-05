@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0efc7e6f.js";
+            window.path_to_searchindex_js = "searchindex-dbecf342.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-3c2ed37c.js"></script>
@@ -287,12 +287,12 @@ client:</p>
 <h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
 <p>Cargo.toml:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = "0.1"
+bigquery = "0.5"
 </code></pre>
 <p>The default feature <code>tls-roots</code> uses the native TLS roots of your system. Use
 <code>tls-webpki-roots</code> instead if you want the bundled Mozilla roots:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = { version = "0.1", default-features = false, features = ["tls-webpki-roots"] }
+bigquery = { version = "0.5", default-features = false, features = ["tls-webpki-roots"] }
 </code></pre>
 <h2 id="creating-a-client"><a class="header" href="#creating-a-client">Creating a client</a></h2>
 <p><code>BigQueryDb</code> is the client. It opens two authenticated gRPC channels, one to the BigQuery v2 API
@@ -2986,9 +2986,10 @@ commit.</p>
 <li>Python <code>google-cloud-bigquery</code> with <code>google-cloud-bigquery-storage</code> and <code>pyarrow</code>;</li>
 <li>the <code>bq</code> CLI, for query latency only.</li>
 </ul>
-<p>The numbers are from 2026-10-04, both on 0.1.0: the full run of every scenario, and a second
-run of the query scenarios, the query run. They depend a lot on the network, so treat them as a
-comparison between the clients on one connection, not as absolute figures.</p>
+<p>The numbers are from 2026-10-04, both on the pre-release code before 0.5.0: the full run of
+every scenario, and a second run of the query scenarios, the query run. They depend a lot on
+the network, so treat them as a comparison between the clients on one connection, not as
+absolute figures.</p>
 <h2 id="method"><a class="header" href="#method">Method</a></h2>
 <ul>
 <li><strong>Machine:</strong> Intel Core i7-10700K, 16 threads, 64 GB RAM, Linux 7.2, CPU governor
@@ -3035,7 +3036,7 @@ stays under the 10 MB limit, and 8 requests in flight, which is the library’s 
 <tr><th>Client</th><th>Versions</th></tr>
 </thead>
 <tbody>
-<tr><td>bigquery (this library)</td><td>0.1.0; gcloud-sdk 0.32.4 (0.32.3 for the full run), tonic 0.14.6, arrow 60.0.0</td></tr>
+<tr><td>bigquery (this library)</td><td>pre-release, before 0.5.0; gcloud-sdk 0.32.4 (0.32.3 for the full run), tonic 0.14.6, arrow 60.0.0</td></tr>
 <tr><td>google-cloud-bigquery</td><td>0.18.0, google-cloud-bigquery-v2 1.0.0, google-cloud-gax 1.15.0, google-cloud-auth 1.17.0</td></tr>
 <tr><td>Python</td><td>Python 3.14.7, google-cloud-bigquery 3.46.1, google-cloud-bigquery-storage 2.42.0, pyarrow 25.0.1, pandas 3.0.6, grpcio 1.84.0</td></tr>
 <tr><td>bq</td><td>BigQuery CLI 2.1.39 (Google Cloud SDK 587.0.0)</td></tr>
