@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-dbdfd4fe.js";
+            window.path_to_searchindex_js = "searchindex-fb690edf.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -180,12 +180,12 @@
                         <h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
 <p>Cargo.toml:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = "0.5"
+bigquery = "0.6"
 </code></pre>
 <p>The default feature <code>tls-roots</code> uses the native TLS roots of your system. Use
 <code>tls-webpki-roots</code> instead if you want the bundled Mozilla roots:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = { version = "0.5", default-features = false, features = ["tls-webpki-roots"] }
+bigquery = { version = "0.6", default-features = false, features = ["tls-webpki-roots"] }
 </code></pre>
 <h2 id="crypto-provider-error"><a class="header" href="#crypto-provider-error">Crypto provider error</a></h2>
 <p>Depends on your other dependencies you may see the error like:</p>
