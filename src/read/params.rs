@@ -36,6 +36,7 @@ pub struct BigQueryReadOptions {
 
 /// The compression of the Arrow record batch buffers a read session sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigQueryReadCompression {
     /// Uncompressed buffers.
     None,

@@ -134,6 +134,7 @@ impl Display for BigQueryWriteStreamName {
 
 /// The write stream a writer uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigQueryWriteMode {
     /// The table's `_default` stream: rows are visible when acknowledged, at least once.
     Default,

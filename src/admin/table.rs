@@ -18,6 +18,7 @@ use tracing::Span;
 /// What kind of table a table is, as BigQuery names it in `Table.type`: `TABLE`, `VIEW`,
 /// `MATERIALIZED_VIEW`, `EXTERNAL` or `SNAPSHOT`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BigQueryTableType {
     /// A table that stores its rows.
     Table,

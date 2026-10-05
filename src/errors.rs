@@ -14,6 +14,7 @@ use std::fmt::Formatter;
 
 /// The main error type for all BigQuery operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BigQueryError {
     /// An error from the client side rather than from BigQuery: authentication, the token source,
     /// channel setup, etc., or a response from BigQuery that the crate cannot use.

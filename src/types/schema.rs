@@ -17,6 +17,7 @@ use storage::table_field_schema::{Mode as StorageMode, Type as StorageType};
 /// `RANGE<DATE>` and `STRUCT<a INT64, b ARRAY<STRING>>`. An ARRAY column is the
 /// [`Repeated`](BigQueryFieldMode::Repeated) mode of its element type, not a type of its own.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BigQueryFieldType {
     /// INT64, `INTEGER` in the v2 API.
     Int64,

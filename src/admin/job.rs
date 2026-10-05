@@ -72,6 +72,7 @@ impl Display for BigQueryJobState {
 /// A name BigQuery adds later reads as [`Other`](Self::Other) with BigQuery's text, so
 /// [`as_str`](Self::as_str) gives back what BigQuery sent for every value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BigQueryJobType {
     /// A query.
     Query,

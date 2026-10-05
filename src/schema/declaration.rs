@@ -390,6 +390,7 @@ impl Display for BigQueryPartitioning {
 
 /// What `.sync()` may do when a change is impossible in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigQueryRecreatePolicy {
     /// Recreate only a table whose `GetTable` `num_rows` is 0.
     IfEmpty,

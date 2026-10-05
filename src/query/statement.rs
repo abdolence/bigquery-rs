@@ -15,6 +15,7 @@ use std::fmt::{Display, Formatter};
 /// assert_eq!(future.as_str(), "UNDROP_SCHEMA");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BigQueryStatementType {
     /// A `SELECT` statement.
     Select,

@@ -343,6 +343,7 @@ impl Display for BigQuerySchemaChange {
 
 /// What a withheld change waits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigQueryWithheldReason {
     /// The table has something the declaration does not; `prune_undeclared()` would remove it.
     PruneUndeclared,
@@ -422,6 +423,7 @@ impl Display for BigQueryTableTarget {
 
 /// How a table is recreated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigQueryRecreateMethod {
     /// `CREATE OR REPLACE TABLE`, when the partitioning and clustering stay as they are. It
     /// keeps the table's IAM bindings.
@@ -516,6 +518,7 @@ impl Display for BigQueryRecreate {
 
 /// Why `.sync()` refuses a plan, writing nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigQueryRefusal {
     /// A change is impossible in place and the declaration has no recreate opt-in.
     NoRecreateOptIn,
@@ -613,6 +616,7 @@ impl Display for BigQueryTablePlan {
 
 /// Data a `.sync()` deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigQueryDroppedData {
     /// A column dropped by `prune_undeclared()`, with every value in it.
     Column {
