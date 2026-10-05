@@ -16,7 +16,8 @@
 
 # Update and delete
 
-- [Change data capture](./cdc.md)
+- [Updating and deleting](./update-and-delete.md)
+  - [Change data capture](./cdc.md)
 
 # Tables and datasets
 
