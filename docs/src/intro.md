@@ -13,11 +13,14 @@ Library provides a simple API for Google BigQuery using gRPC for every call:
       always bound on the server side;
     - Short query mode, so BigQuery can answer short queries without creating a job;
     - Large query results read through the Storage Read API automatically;
+    - Query results written into a destination table of your own and read back the same way;
     - Raw Arrow record batches for table reads and query results;
     - DML statements with affected row counts, and dry runs;
-    - Writes through the Storage Write API with built-in batching and backpressure: at least
-      once, exactly once, or atomic (all rows or none);
-    - Change data capture (CDC): upserts and deletes by the primary key;
+    - Writes through the Storage Write API with built-in batching and backpressure, of your
+      structures or of raw Arrow record batches: at least once, exactly once, atomic (all rows
+      or none), or buffered (rows readable once you flush them);
+    - Updates and deletes by the primary key through change data capture (CDC), with fluent
+      `update()` and `delete()` or a lower-level CDC writer;
     - Declarative table schemas, planned and synced with one call: new columns, renames, drops,
       widening, partitioning, clustering, primary key, recreating an empty table;
     - Datasets, tables and jobs management;
@@ -81,6 +84,4 @@ Checked against `google-cloud-bigquery` 0.18.0 and `google-cloud-bigquery-v2` 1.
 - It uses the REST API for v2, which is GA. The v2 API over gRPC this crate uses works for every
   call the library makes, but Google does not document it and it is pre-GA, so be aware it can
   change without notice;
-- Its writer takes Arrow record batches and supports buffered streams. This crate writes your
-  structures as protobuf, through the default, committed and pending streams;
 - It has stub traits to mock its clients in your tests. This crate has no public mocks.
