@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8dbe98b0.js";
+            window.path_to_searchindex_js = "searchindex-2a6299d9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -1849,6 +1849,77 @@ inserted if there is none;</li>
 <p>Both are written through BigQuery <a href="#change-data-capture">change data capture</a> (CDC), as upserts and
 deletes on the table’s default write stream. There is no <code>UPDATE</code> or <code>MERGE</code> statement to run,
 BigQuery applies the changes itself.</p>
+<h2 id="cdc-or-dml-queries"><a class="header" href="#cdc-or-dml-queries">CDC or DML queries</a></h2>
+<p>BigQuery has its own <code>UPDATE</code>, <code>DELETE</code> and <code>MERGE</code> statements too, and the library runs them as
+queries, see <a href="#dml-and-ddl">DML and DDL</a>. The two do not mix on one table: BigQuery
+does not support mutating DML on a table while CDC changes are streamed to it. So the choice is
+one for the whole table.</p>
+<p>Use <code>update()</code> and <code>delete()</code> when:</p>
+<ul>
+<li>you change rows by primary key, and have the whole row for an update;</li>
+<li>changes come often, one by one or as a steady stream, like mirroring an OLTP database. A CDC
+change is a Storage Write API write, so it does not wait in the DML queue below;</li>
+<li>a change can arrive late or twice, <a href="#ordering-changes">sequence numbers</a> put them in order;</li>
+<li>queries can read data up to <code>max_staleness</code> old, or pay for merging the changes at query time.</li>
+</ul>
+<p>Use a DML query when:</p>
+<ul>
+<li>the rows to change are given by a condition, for example
+<code>DELETE FROM shop.orders WHERE created &lt; @cutoff</code>;</li>
+<li>you change some columns and keep the rest, or compute the new value from the old one or from
+another table: <code>SET total = total * 2</code>, a <code>MERGE</code> from a staging table, etc.;</li>
+<li>the table has no primary key, or its key is not unique;</li>
+<li>a change must apply to all its rows or none of them. Each DML statement is an implicit
+transaction, committed when it succeeds. CDC writes go through the default stream, which has
+no atomic commit, see the <a href="#limits">limits of CDC tables</a>;</li>
+<li>you need to know how many rows matched. A DML statement returns <code>num_dml_affected_rows</code>, a
+CDC write returns <code>rows_written</code>, the rows sent, whether a row with the key existed or not;</li>
+<li>the change is a rare bulk rewrite or cleanup. Google’s
+<a href="https://cloud.google.com/bigquery/docs/best-practices-performance-patterns#dml_statements_that_update_or_insert_single_rows">best practices</a>
+describe <code>UPDATE</code> and <code>DELETE</code> as “oriented towards periodic rewrites of your data”.</li>
+</ul>
+<p>Be aware not to run DML for every single change. From BigQuery’s
+<a href="https://cloud.google.com/bigquery/docs/data-manipulation-language">DML documentation</a>:</p>
+<ul>
+<li>up to 2 mutating statements (<code>UPDATE</code>, <code>DELETE</code>, <code>MERGE</code>) run on a table at once, up to 20 more
+wait as <code>PENDING</code>, and the next one fails with <code>Too many DML statements outstanding against table</code>;</li>
+<li>two statements running at once that change the same partition conflict, and BigQuery reruns
+the failed one up to three times.</li>
+</ul>
+<p>On demand, an <code>UPDATE</code> or <code>DELETE</code> is billed for the bytes the statement reads plus the size of
+the table before the change, or of the partitions it changes for a partitioned table, as the
+<a href="https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax#on-demand-query-size-calculation">on-demand query size calculation</a>
+describes. Every statement pays that size, even one that changes one row.
+CDC has its own costs, the background applying and the merge at query time, see the
+<a href="#limits">limits of CDC tables</a>.</p>
+<p>On a table that takes CDC changes, a change by condition goes through CDC as well: query the keys
+that match, then delete them by key:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::Deserialize;
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span>#[derive(Deserialize)]
+struct OrderId {
+    id: i64,
+}
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let cancelled: Vec&lt;OrderId&gt; = db
+    .fluent()
+    .query("SELECT id FROM shop.orders WHERE status = @status")
+    .param("status", "cancelled")
+    .obj::&lt;OrderId&gt;()
+    .query()
+    .await?;
+
+db.fluent()
+    .delete()
+    .from(SHOP.table(ORDERS))
+    .keys(cancelled.iter().map(|order| order.id))
+    .execute()
+    .await?;
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
 <h2 id="the-table"><a class="header" href="#the-table">The table</a></h2>
 <p>The table needs a primary key, declared with <code>schema()</code>:</p>
 <pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
@@ -2055,7 +2126,8 @@ a PostgreSQL or MySQL table from its log, and write each one as it comes. The Bi
 looks like the source table, with a delay you choose.</p>
 <p>This chapter is about the CDC API itself. To update or delete a few rows by primary key,
 <code>db.fluent().update()</code> and <code>db.fluent().delete()</code> are simpler, see
-<a href="#updating-and-deleting">updating and deleting</a>.</p>
+<a href="#updating-and-deleting">updating and deleting</a>. When to use CDC and when to run <code>UPDATE</code> and
+<code>DELETE</code> statements instead, see <a href="#cdc-or-dml-queries">CDC or DML queries</a>.</p>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
 <p>A CDC table needs a primary key. BigQuery’s keys are <code>NOT ENFORCED</code>: BigQuery never checks them,
 so it is up to you that the key is unique in the source. A key can have up to 16 columns.</p>

@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8dbe98b0.js";
+            window.path_to_searchindex_js = "searchindex-2a6299d9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -187,7 +187,8 @@ a PostgreSQL or MySQL table from its log, and write each one as it comes. The Bi
 looks like the source table, with a delay you choose.</p>
 <p>This chapter is about the CDC API itself. To update or delete a few rows by primary key,
 <code>db.fluent().update()</code> and <code>db.fluent().delete()</code> are simpler, see
-<a href="./update-and-delete.html">updating and deleting</a>.</p>
+<a href="./update-and-delete.html">updating and deleting</a>. When to use CDC and when to run <code>UPDATE</code> and
+<code>DELETE</code> statements instead, see <a href="./update-and-delete.html#cdc-or-dml-queries">CDC or DML queries</a>.</p>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
 <p>A CDC table needs a primary key. BigQuery’s keys are <code>NOT ENFORCED</code>: BigQuery never checks them,
 so it is up to you that the key is unique in the source. A key can have up to 16 columns.</p>
