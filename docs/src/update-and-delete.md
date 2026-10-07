@@ -11,6 +11,85 @@ Both are written through BigQuery [change data capture](./cdc.md) (CDC), as upse
 deletes on the table's default write stream. There is no `UPDATE` or `MERGE` statement to run,
 BigQuery applies the changes itself.
 
+## CDC or DML queries
+
+BigQuery has its own `UPDATE`, `DELETE` and `MERGE` statements too, and the library runs them as
+queries, see [DML and DDL](./queries.md#dml-and-ddl). The two do not mix on one table: BigQuery
+does not support mutating DML on a table while CDC changes are streamed to it. So the choice is
+one for the whole table.
+
+Use `update()` and `delete()` when:
+
+- you change rows by primary key, and have the whole row for an update;
+- changes come often, one by one or as a steady stream, like mirroring an OLTP database. A CDC
+  change is a Storage Write API write, so it does not wait in the DML queue below;
+- a change can arrive late or twice, [sequence numbers](#ordering-changes) put them in order;
+- queries can read data up to `max_staleness` old, or pay for merging the changes at query time.
+
+Use a DML query when:
+
+- the rows to change are given by a condition, for example
+  `DELETE FROM shop.orders WHERE created < @cutoff`;
+- you change some columns and keep the rest, or compute the new value from the old one or from
+  another table: `SET total = total * 2`, a `MERGE` from a staging table, etc.;
+- the table has no primary key, or its key is not unique;
+- a change must apply to all its rows or none of them. Each DML statement is an implicit
+  transaction, committed when it succeeds. CDC writes go through the default stream, which has
+  no atomic commit, see the [limits of CDC tables](./cdc.md#limits);
+- you need to know how many rows matched. A DML statement returns `num_dml_affected_rows`, a
+  CDC write returns `rows_written`, the rows sent, whether a row with the key existed or not;
+- the change is a rare bulk rewrite or cleanup. Google's
+  [best practices](https://cloud.google.com/bigquery/docs/best-practices-performance-patterns#dml_statements_that_update_or_insert_single_rows)
+  describe `UPDATE` and `DELETE` as "oriented towards periodic rewrites of your data".
+
+Be aware not to run DML for every single change. From BigQuery's
+[DML documentation](https://cloud.google.com/bigquery/docs/data-manipulation-language):
+
+- up to 2 mutating statements (`UPDATE`, `DELETE`, `MERGE`) run on a table at once, up to 20 more
+  wait as `PENDING`, and the next one fails with `Too many DML statements outstanding against
+  table`;
+- two statements running at once that change the same partition conflict, and BigQuery reruns
+  the failed one up to three times.
+
+On demand, an `UPDATE` or `DELETE` is billed for the bytes the statement reads plus the size of
+the table before the change, or of the partitions it changes for a partitioned table, as the
+[on-demand query size calculation](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax#on-demand-query-size-calculation)
+describes. Every statement pays that size, even one that changes one row.
+CDC has its own costs, the background applying and the merge at query time, see the
+[limits of CDC tables](./cdc.md#limits).
+
+On a table that takes CDC changes, a change by condition goes through CDC as well: query the keys
+that match, then delete them by key:
+
+```rust,no_run
+# use bigquery::*;
+# use serde::Deserialize;
+# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+# const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+#[derive(Deserialize)]
+struct OrderId {
+    id: i64,
+}
+
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+let cancelled: Vec<OrderId> = db
+    .fluent()
+    .query("SELECT id FROM shop.orders WHERE status = @status")
+    .param("status", "cancelled")
+    .obj::<OrderId>()
+    .query()
+    .await?;
+
+db.fluent()
+    .delete()
+    .from(SHOP.table(ORDERS))
+    .keys(cancelled.iter().map(|order| order.id))
+    .execute()
+    .await?;
+# Ok(())
+# }
+```
+
 ## The table
 
 The table needs a primary key, declared with `schema()`:

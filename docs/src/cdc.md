@@ -11,7 +11,8 @@ looks like the source table, with a delay you choose.
 
 This chapter is about the CDC API itself. To update or delete a few rows by primary key,
 `db.fluent().update()` and `db.fluent().delete()` are simpler, see
-[updating and deleting](./update-and-delete.md).
+[updating and deleting](./update-and-delete.md). When to use CDC and when to run `UPDATE` and
+`DELETE` statements instead, see [CDC or DML queries](./update-and-delete.md#cdc-or-dml-queries).
 
 ## How it works
 
