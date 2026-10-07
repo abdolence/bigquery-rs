@@ -21,8 +21,9 @@ Library provides a simple API for Google BigQuery using gRPC for every call:
       or none), or buffered (rows readable once you flush them);
     - Updates and deletes by the primary key through change data capture (CDC), with fluent
       `update()` and `delete()` or a lower-level CDC writer;
-    - Declarative table schemas, planned and synced with one call: new columns, renames, drops,
-      widening, partitioning, clustering, primary key, recreating an empty table;
+    - Declarative table schemas, inferred from your structures or declared by hand, planned and
+      synced with one call: new columns, renames, drops, widening, partitioning, clustering,
+      primary key, recreating an empty table;
     - Datasets, tables and jobs management;
     - Bytes processed and billed, slot milliseconds and cache hits for every query, as span
       fields and as results;
