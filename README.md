@@ -199,8 +199,7 @@ each of them provides that the other does not.
       Read, so its typed path is a `SELECT *` query, which took 95.2 s and billed the whole
       table every run;
     - a 1M-row Storage Write from structures takes 34.0 s against 35.4 s, with 18% fewer bytes
-      sent as protobuf than the official crate's Arrow. I think the smaller requests are why it
-      is a bit faster.
+      sent as protobuf than the official crate's Arrow.
 - **Observability.** Every query, read and write span carries what BigQuery reports: bytes
   processed and billed, slot milliseconds, cache hits, rows and bytes read, rows appended and
   bytes sent, retries. `query_with_stats()` returns a query's figures together with its rows.

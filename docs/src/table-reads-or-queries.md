@@ -79,11 +79,11 @@ your region and contract:
   projection from your structure does it for you, see
   [Selecting columns](./reading-tables.md#selecting-columns).
 
-So for a scan of a large table a table read is probably much cheaper, a bit more than a sixth of
-the query price per byte, and free under the monthly allowance. In the
+So for a scan of a large table a table read is much cheaper: a bit more than a sixth of the
+query price per byte, and free under the monthly allowance. In the
 [benchmarks](./benchmarks.md#cost) the 215 MB table scans went through the Storage Read free
-tier, while each `SELECT *` scan of the official crate billed the table. I didn't measure whether a row
-filter reduces the bytes billed for a table read, so I would not count on it.
+tier, while each `SELECT *` scan of the official crate billed the table. Row filters were not
+measured for bytes billed, so do not count on a filter making a table read cheaper.
 
 `.maximum_bytes_billed(..)` makes a query fail without running if it would bill more, and a
 [dry run](./queries.md#dry-run) tells you the bytes before you run it.
@@ -94,7 +94,7 @@ filter reduces the bytes billed for a table read, so I would not count on it.
   orders of this customer". It needs no job, reads in parallel and resumes by itself;
 - **Joins, aggregates, ordering, `LIMIT`, views or computed columns**: a query, with named
   parameters for every value;
-- **A small lookup, a few rows by key**: probably a query. Short query mode returns it in one
+- **A small lookup, a few rows by key**: a query. Short query mode returns it in one
   call, while a table read opens a session first;
 - **DML, DDL, or when you need job stats, labels on the job or a dry run**: a query;
 - **Arrow for your own processing**: either, both have `record_batches()`.

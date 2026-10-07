@@ -120,11 +120,11 @@ Python, because of the job:
 - The library was 10 ms behind the official crate in the query run and 41 ms in the full run
   (0.130 s against 0.089 s). To check whether that is the code, the 0.5.0 release, this commit
   and the official crate ran `SELECT 1` interleaved in one script, 20 rounds each, every round
-  on a quiet machine: 0.094 s, 0.096 s and 0.091 s. So I think the gap comes from the network
-  between runs.
+  on a quiet machine: 0.094 s, 0.096 s and 0.091 s. The cause of the larger gap in the runs
+  above was not measured.
 
 About 0.6 s of every `bq` run is the CLI starting up (`bq version` timed in each run); the rest
-probably is its job insert and polling, I didn't check.
+was not broken down.
 
 ## Large query result
 
@@ -153,8 +153,8 @@ The library reads the destination table through Storage Read once the result doe
 the first response, while the official crate and Python iterate REST pages. The official crate
 spent 0.018 s of its 3.8-4.7 s in `FromRow`, so nearly all of its time is the paging itself.
 
-Python takes the same Storage Read path for `to_arrow()` and is still twice as slow. I guess it
-is the extra metadata calls before the read session, but I didn't measure that.
+Python takes the same Storage Read path for `to_arrow()` and is still twice as slow. Where its
+extra time goes was not measured.
 
 ## Table scan
 
@@ -182,8 +182,8 @@ query bills the table: 215 MB per run. Its `FromRow` took about 1.09 s of the 95
 
 Raw Arrow scans are about the same speed in all three clients, and the library has no advantage
 there. The official crate was 7% slower in this run and 1% faster in the previous one, on
-2026-10-04, so I don't count it. Every client moved about 150 MB per scan on the network
-interface at 14-16 MB/s, so I think this connection is the limit, not the clients.
+2026-10-04, so the difference is within the variation between runs. Every client moved about
+150 MB per scan on the network interface at the same 14-16 MB/s.
 
 Python's `to_dataframe()` builds a pandas frame with typed columns, not row objects, so it is the
 closest Python has to typed rows rather than the same thing.
@@ -201,10 +201,9 @@ From Rust structures, from the full run:
 | Python | n/a: its writer takes requests you build yourself, protobuf rows with a hand-made descriptor | | | | |
 
 Both times include turning the Rust rows into the wire format. The library sent 18% fewer bytes
-and was a bit faster, but the ranges overlap. On the network interface the library ran at about
-5.8 MB/s and the official crate at about 6.7 MB/s, so the upload of this connection is probably
-not the whole limit. I think the smaller requests are why the library is a bit faster, but that is
-not measured.
+and was slightly faster, but the ranges overlap. On the network interface the library ran at
+about 5.8 MB/s and the official crate at about 6.7 MB/s, so the upload of this connection is not
+the only limit. Whether the smaller requests explain the difference was not measured.
 
 From Arrow record batches, from the rerun:
 
@@ -242,8 +241,8 @@ query, and `Row` has no public constructor, so it cannot be fed the same batches
 scan above its conversion took about 1.09 s per 1M rows, but on already parsed JSON values, so the
 two numbers are not comparable.
 
-In the library the decode runs on each read stream's task, next to the network reads, which is
-probably why typed and Arrow scans take almost the same time.
+In the library the decode runs on each read stream's task, next to the network reads, and typed
+and Arrow scans take almost the same time.
 
 ## Cost
 

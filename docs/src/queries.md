@@ -82,9 +82,9 @@ stops the reading, and does not cancel the job, see [Cancellation](#cancellation
 Rows of a large result come from several read streams at once, so they arrive in no particular
 order, even with `ORDER BY`. A result that comes inline keeps its order. If the order matters for a
 large result, sort the rows on your side, or ask for one read stream with
-`.read_options(BigQueryReadOptions::new().with_max_stream_count(1))`. I think one stream keeps the
-order of the result, Google's Python client does the same for `ORDER BY` queries, but the library
-does not test it.
+`.read_options(BigQueryReadOptions::new().with_max_stream_count(1))`. Google's Python client asks
+for one stream for `ORDER BY` queries. The library does not test that one stream keeps the order
+of the result.
 
 To get the result as Arrow, without serde, use `record_batches()` directly on the query:
 
