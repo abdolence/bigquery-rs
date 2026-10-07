@@ -489,7 +489,7 @@ async fn an_uninferred_column_and_an_unknown_with_path_are_refused_before_any_re
             .await;
         match result {
             Err(BigQueryError::SchemaInferenceError(error)) => {
-                assert_eq!((error.path.as_str(), error.kind), (path, kind));
+                assert_eq!((error.path.as_deref(), error.kind), (Some(path), kind));
             }
             other => panic!("expected a schema inference error, got {other:?}"),
         }

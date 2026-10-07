@@ -13,8 +13,14 @@
 //! - an enum is offered each of its variants, to tell a unit-variant enum from one with data;
 //! - serde derive lists a field's aliases next to its name in `fields`. Once a field's value is
 //!   produced, its key is offered a second time, and serde's `duplicate field` names the field
-//!   the key belongs to. A struct with a field whose value cannot be produced has its fields
-//!   counted by position instead, the way the decoder's key plan tells an aliased struct.
+//!   the key belongs to. A field the trace does not produce a value for is given a [`Sample`]
+//!   value instead, `None` for an `Option` and a struct built from samples of its fields.
+//!
+//! A name whose value no sample builds, such as a type that reads only its own text form, is
+//! settled by count: serde derive numbers a struct's fields and not its aliases, so the
+//! difference is how many names are aliases. When the count leaves more than one answer, the
+//! struct is built from its known fields alone, and serde's `missing field` names the first
+//! REQUIRED field left. A name still unsettled after that is refused at its own path.
 
 use crate::errors::{BigQuerySchemaInferenceError, BigQuerySchemaInferenceErrorKind};
 use crate::schema::declaration::{BigQuerySchemaColumn, BigQuerySchemaColumns, ColumnKind};
@@ -32,6 +38,7 @@ use serde::de::{
     Visitor,
 };
 use serde::Deserializer;
+use std::any::type_name;
 use std::cell::{Cell, RefCell};
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
@@ -55,7 +62,7 @@ impl BigQuerySchemaColumns {
             Ok(columns) => columns.into(),
             Err(kind) => Self {
                 columns: Vec::new(),
-                problem: Some(BigQuerySchemaInferenceError::new(String::new(), kind)),
+                problem: Some(BigQuerySchemaInferenceError::new(kind)),
             },
         }
     }
@@ -74,19 +81,99 @@ struct Explorer<T> {
 struct StructShape {
     name: &'static str,
     fields: &'static [&'static str],
+    /// The type name of the visitor that reads the struct. Two types serde names alike, such
+    /// as `Page<Page<i64>>` and `Page<i64>`, have two visitors, while a struct inside itself
+    /// reaches the same visitor again. A type name may be shared by two types, which only
+    /// refuses them as `Recursive`.
+    visitor: &'static str,
 }
 
 /// One name of a struct's `fields` list, traced.
 struct TracedName {
+    name: &'static str,
+    path: String,
     identity: Identity,
-    column: Option<BigQuerySchemaColumn>,
+    /// The text the field's value was built from when its key was offered again.
+    sample: TextSample,
+    column: Option<(ColumnKind, BigQueryFieldMode)>,
+}
+
+/// Every name of a struct's `fields` list, traced, in order.
+struct TracedFields(Vec<TracedName>);
+
+impl TracedFields {
+    fn count(&self, identity: Identity) -> usize {
+        self.0
+            .iter()
+            .filter(|name| name.identity == identity)
+            .count()
+    }
+
+    /// Settles every unknown name when `aliases`, the number of names that are aliases, leaves
+    /// one answer: all of them field names, or all of them aliases. Returns whether it did.
+    fn settle_by_count(&mut self, aliases: usize) -> bool {
+        let identity = match aliases.checked_sub(self.count(Identity::Alias)) {
+            Some(0) => Identity::Own,
+            Some(left) if left == self.count(Identity::Unknown) => Identity::Alias,
+            _ => return false,
+        };
+        self.settle_unknown(identity);
+        true
+    }
+
+    fn settle_unknown(&mut self, identity: Identity) {
+        for name in self.0.iter_mut() {
+            if name.identity == Identity::Unknown {
+                name.identity = identity;
+            }
+        }
+    }
+
+    fn known_fields(&self) -> Vec<KnownField> {
+        self.0
+            .iter()
+            .filter(|name| name.identity == Identity::Own)
+            .map(|name| KnownField {
+                name: name.name,
+                sample: name.sample,
+            })
+            .collect()
+    }
+
+    /// The columns of the field names; an unknown name left is refused at its own path.
+    fn into_columns(self) -> Vec<BigQuerySchemaColumn> {
+        self.0
+            .into_iter()
+            .filter(|name| name.identity != Identity::Alias)
+            .filter_map(|name| {
+                let (kind, mode) = name.column?;
+                let kind = match name.identity {
+                    Identity::Unknown => ColumnKind::uninferred(
+                        &name.path,
+                        BigQuerySchemaInferenceErrorKind::UnresolvedAlias,
+                    ),
+                    _ => kind,
+                };
+                Some(BigQuerySchemaColumn::inferred(
+                    name.name.to_string(),
+                    kind,
+                    mode,
+                ))
+            })
+            .collect()
+    }
 }
 
 impl<T: DeserializeOwned> Explorer<T> {
     fn run(&self, route: &[Key], offer: Offer) -> Trace {
+        self.run_for(route, offer, Purpose::Trace)
+    }
+
+    fn run_for(&self, route: &[Key], offer: Offer, purpose: Purpose<'_>) -> Trace {
         let run = Run {
             route,
             offer,
+            purpose,
             trace: RefCell::default(),
             repeated: Cell::new(false),
         };
@@ -110,31 +197,46 @@ impl<T: DeserializeOwned> Explorer<T> {
             return Err(BigQuerySchemaInferenceErrorKind::Recursive);
         }
         self.ancestors.push(shape);
-        let traced: Vec<TracedName> = shape
-            .fields
-            .iter()
-            .map(|name| self.name(route, path, name))
-            .collect();
+        let mut traced = TracedFields(
+            shape
+                .fields
+                .iter()
+                .map(|name| self.name(route, path, name))
+                .collect(),
+        );
         self.ancestors.pop();
 
-        if traced.iter().any(|name| name.identity == Identity::Unknown) {
-            let aliases = traced
-                .iter()
-                .filter(|name| matches!(name.identity, Identity::AliasOf(_)))
-                .count();
-            match self.numbered_fields(route, shape) {
-                // A hand-written impl that does not number its fields: its names are taken
-                // as its fields, since such an impl is not where serde's aliases come from.
-                0 => {}
-                numbered if shape.fields.len() - numbered == aliases => {}
-                _ => return Err(BigQuerySchemaInferenceErrorKind::UnresolvedAlias),
-            }
+        if traced.count(Identity::Unknown) > 0 {
+            self.settle(route, shape, &mut traced);
         }
-        Ok(traced
-            .into_iter()
-            .filter(|name| !matches!(name.identity, Identity::AliasOf(_)))
-            .filter_map(|name| name.column)
-            .collect())
+        Ok(traced.into_columns())
+    }
+
+    /// Settles the names of the struct at `route` that no run produced a value for.
+    fn settle(&self, route: &[Key], shape: StructShape, traced: &mut TracedFields) {
+        let numbered = self.numbered_fields(route, shape);
+        if numbered == 0 {
+            // A hand-written impl that does not number its fields: its names are taken as its
+            // fields, since such an impl is not where serde's aliases come from.
+            traced.settle_unknown(Identity::Own);
+            return;
+        }
+        let aliases = shape.fields.len() - numbered;
+        if traced.settle_by_count(aliases) {
+            return;
+        }
+        let known = traced.known_fields();
+        let missing = self
+            .run_for(route, Offer::FIRST, Purpose::FindMissing(&known))
+            .missing;
+        if let Some(name) = traced
+            .0
+            .iter_mut()
+            .find(|name| Some(name.name) == missing && name.identity == Identity::Unknown)
+        {
+            name.identity = Identity::Own;
+            traced.settle_by_count(aliases);
+        }
     }
 
     /// How many fields serde derive numbers in the struct at `route`: the first position it
@@ -155,22 +257,26 @@ impl<T: DeserializeOwned> Explorer<T> {
         route.push(Key::Name(name));
         let path = dotted_path(path, name);
         let field = self.field(&route);
-        let column = self
-            .column(&route, &path, field.wrappers, field.answer)
-            .map(|(kind, mode)| BigQuerySchemaColumn::inferred(name.to_string(), kind, mode));
+        let column = self.column(&route, &path, field.wrappers, field.answer);
         TracedName {
+            name,
+            path,
             identity: field.identity,
+            sample: field.sample,
             column,
         }
     }
 
-    /// The field at the end of `route`, with every offer it needs settled.
+    /// The field at the end of `route`, with every offer it needs settled, and its identity
+    /// learned from a sample value when no offer produced one.
     fn field(&self, route: &[Key]) -> Trace {
         let mut first = self.run(route, Offer::FIRST);
-        let mut identity = first.identity;
+        let mut identity = (first.identity, TextSample::Any);
         let mut offered = |offer: Offer| {
             let trace = self.run(route, offer);
-            identity = identity.or(trace.identity);
+            if identity.0 == Identity::Unknown {
+                identity = (trace.identity, offer.text);
+            }
             trace.accepted
         };
         first.answer = match first.answer {
@@ -206,7 +312,15 @@ impl<T: DeserializeOwned> Explorer<T> {
             }
             other => other,
         };
-        first.identity = identity;
+        (first.identity, first.sample) = identity;
+        if first.identity == Identity::Unknown {
+            if let Some((identity, sample)) = TextSample::ALL.into_iter().find_map(|sample| {
+                let trace = self.run_for(route, Offer::text(sample), Purpose::Identify);
+                (trace.identity != Identity::Unknown).then_some((trace.identity, sample))
+            }) {
+                (first.identity, first.sample) = (identity, sample);
+            }
+        }
         first
     }
 
@@ -279,7 +393,7 @@ impl<T: DeserializeOwned> Explorer<T> {
 
 impl ColumnKind {
     fn uninferred(path: &str, kind: BigQuerySchemaInferenceErrorKind) -> Self {
-        ColumnKind::Uninferred(BigQuerySchemaInferenceError::new(path.to_string(), kind))
+        ColumnKind::Uninferred(BigQuerySchemaInferenceError::new(kind).with_path(path.to_string()))
     }
 }
 
@@ -345,8 +459,9 @@ impl Offer {
 
 /// The texts a field that reads a string is offered: any text, then the text the decoder hands
 /// a string target for each temporal column type.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 enum TextSample {
+    #[default]
     Any,
     Timestamp,
     DateTime,
@@ -355,6 +470,14 @@ enum TextSample {
 }
 
 impl TextSample {
+    const ALL: [TextSample; 5] = [
+        TextSample::Any,
+        TextSample::Timestamp,
+        TextSample::DateTime,
+        TextSample::Date,
+        TextSample::Time,
+    ];
+
     fn text(self) -> String {
         let mut text = String::new();
         let printed = match self {
@@ -376,9 +499,29 @@ impl TextSample {
 struct Run<'a> {
     route: &'a [Key],
     offer: Offer,
+    purpose: Purpose<'a>,
     trace: RefCell<Trace>,
     /// Set once the field's value is produced and its key offered again.
     repeated: Cell<bool>,
+}
+
+/// What a run does at the end of its route.
+#[derive(Clone, Copy, Debug)]
+enum Purpose<'a> {
+    /// Records what the field asks for.
+    Trace,
+    /// Gives the field a [`Sample`] value of the offered text, for its key to be offered again.
+    Identify,
+    /// Builds the struct at the end of the route from these fields alone, for serde to name
+    /// the first REQUIRED field missing.
+    FindMissing(&'a [KnownField]),
+}
+
+/// A field name of a struct, and the text its [`Sample`] value is built from.
+#[derive(Clone, Copy, Debug)]
+struct KnownField {
+    name: &'static str,
+    sample: TextSample,
 }
 
 /// What a run found at the end of its route.
@@ -390,6 +533,10 @@ struct Trace {
     /// Whether the field took the offered text, or the offered variant as a unit variant.
     accepted: bool,
     identity: Identity,
+    /// The text the field's value was built from when its key was offered again.
+    sample: TextSample,
+    /// The field serde named missing, for [`Purpose::FindMissing`].
+    missing: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -415,24 +562,15 @@ enum Answer {
     Uninferred(BigQuerySchemaInferenceErrorKind),
 }
 
-/// Whose name a key of `fields` is, as serde's `duplicate field` told it.
+/// Whose name a key of `fields` is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum Identity {
     #[default]
     Unknown,
     /// The key is the field's own name.
     Own,
-    /// The key is an alias of the field with this name.
-    AliasOf(&'static str),
-}
-
-impl Identity {
-    fn or(self, other: Identity) -> Identity {
-        match self {
-            Identity::Unknown => other,
-            known => known,
-        }
-    }
+    /// The key is an alias of another field.
+    Alias,
 }
 
 /// How a run ends.
@@ -442,6 +580,8 @@ enum TraceError {
     Stop,
     /// serde's `duplicate field`, naming the field the repeated key belongs to.
     DuplicateField(&'static str),
+    /// serde's `missing field`, naming a field the struct was not given.
+    MissingField(&'static str),
 }
 
 impl Display for TraceError {
@@ -449,6 +589,7 @@ impl Display for TraceError {
         match self {
             TraceError::Stop => f.write_str("schema inference run stopped"),
             TraceError::DuplicateField(field) => write!(f, "duplicate field `{field}`"),
+            TraceError::MissingField(field) => write!(f, "missing field `{field}`"),
         }
     }
 }
@@ -462,6 +603,10 @@ impl de::Error for TraceError {
 
     fn duplicate_field(field: &'static str) -> Self {
         TraceError::DuplicateField(field)
+    }
+
+    fn missing_field(field: &'static str) -> Self {
+        TraceError::MissingField(field)
     }
 }
 
@@ -628,29 +773,10 @@ impl<'de> Deserializer<'de> for Node<'_> {
         name: &'static str,
         visitor: V,
     ) -> Result<V::Value, TraceError> {
-        if !self.at_field() {
-            return visitor.visit_newtype_struct(self);
-        }
-        let temporal = match name {
-            TAG_TIMESTAMP => Some(BigQueryFieldType::Timestamp),
-            TAG_DATE => Some(BigQueryFieldType::Date),
-            TAG_TIME => Some(BigQueryFieldType::Time),
-            TAG_DATETIME => Some(BigQueryFieldType::DateTime),
-            _ => None,
-        };
-        if let Some(field_type) = temporal {
-            self.answer(Answer::Column(field_type))?;
-            // The wrappers' visitors take the column's integer, as the decoder hands it.
-            return visitor.visit_i64(0);
-        }
-        match name {
-            TAG_DECIMAL => {
-                self.answer(Answer::Column(BigQueryFieldType::Numeric(None)))?;
-                visitor.visit_str("0")
-            }
-            TAG_JSON => {
-                self.answer(Answer::Column(BigQueryFieldType::Json))?;
-                visitor.visit_str("null")
+        match CrateWrapper::named(name) {
+            Some(wrapper) if self.at_field() => {
+                self.answer(Answer::Column(wrapper.0.clone()))?;
+                wrapper.visit(visitor)
             }
             _ => visitor.visit_newtype_struct(self),
         }
@@ -704,11 +830,24 @@ impl<'de> Deserializer<'de> for Node<'_> {
         visitor: V,
     ) -> Result<V::Value, TraceError> {
         if self.at_field() {
+            if let Purpose::FindMissing(known) = self.run.purpose {
+                return match visitor.visit_map(KnownFields { known, next: 0 }) {
+                    Err(TraceError::MissingField(field)) => {
+                        self.run.trace.borrow_mut().missing = Some(field);
+                        Err(TraceError::Stop)
+                    }
+                    other => other,
+                };
+            }
             if name == TAG_INTERVAL {
                 self.answer(Answer::Column(BigQueryFieldType::Interval))?;
                 return Err(TraceError::Stop);
             }
-            self.answer(Answer::Struct(StructShape { name, fields }))?;
+            self.answer(Answer::Struct(StructShape {
+                name,
+                fields,
+                visitor: type_name::<V>(),
+            }))?;
             return visitor.visit_map(NoEntries);
         }
         let key = self.run.route[self.depth];
@@ -721,7 +860,7 @@ impl<'de> Deserializer<'de> for Node<'_> {
                     self.run.trace.borrow_mut().identity = if field == name {
                         Identity::Own
                     } else {
-                        Identity::AliasOf(field)
+                        Identity::Alias
                     };
                 }
                 Err(TraceError::Stop)
@@ -736,6 +875,12 @@ impl<'de> Deserializer<'de> for Node<'_> {
         variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, TraceError> {
+        if variants.is_empty() {
+            self.answer(Answer::Uninferred(
+                BigQuerySchemaInferenceErrorKind::NoColumnType,
+            ))?;
+            return Err(TraceError::Stop);
+        }
         self.answer(Answer::Enum {
             variants: variants.len(),
         })?;
@@ -850,7 +995,8 @@ impl<'de> MapAccess<'de> for RouteMap<'_> {
         match self.state {
             RouteState::Key => self.state = RouteState::Value,
             RouteState::Again => self.state = RouteState::Done,
-            RouteState::Value | RouteState::Done => return Err(TraceError::Stop),
+            RouteState::Done => return Ok(None),
+            RouteState::Value => return Err(TraceError::Stop),
         }
         let key = match self.node.run.route[self.node.depth] {
             Key::Name(name) => seed.deserialize(BorrowedStrDeserializer::new(name)),
@@ -873,7 +1019,12 @@ impl<'de> MapAccess<'de> for RouteMap<'_> {
             run: self.node.run,
             depth: self.node.depth + 1,
         };
-        let produced = seed.deserialize(value);
+        let produced = match self.node.run.purpose {
+            Purpose::Identify if value.at_field() => seed.deserialize(Sample {
+                text: self.node.run.offer.text,
+            }),
+            _ => seed.deserialize(value),
+        };
         self.state = RouteState::Done;
         if produced.is_ok()
             && value.at_field()
@@ -958,6 +1109,316 @@ impl<'de> VariantAccess<'de> for VariantOffer<'_> {
     }
 }
 
+/// A newtype struct the crate's codecs read by its serde name, with the column type it holds.
+struct CrateWrapper(BigQueryFieldType);
+
+impl CrateWrapper {
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            TAG_TIMESTAMP => Some(BigQueryFieldType::Timestamp),
+            TAG_DATE => Some(BigQueryFieldType::Date),
+            TAG_TIME => Some(BigQueryFieldType::Time),
+            TAG_DATETIME => Some(BigQueryFieldType::DateTime),
+            TAG_DECIMAL => Some(BigQueryFieldType::Numeric(None)),
+            TAG_JSON => Some(BigQueryFieldType::Json),
+            _ => None,
+        }
+        .map(CrateWrapper)
+    }
+
+    /// Hands `visitor` a value of the wrapper, in the form the decoder hands it.
+    fn visit<'de, V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        match self.0 {
+            BigQueryFieldType::Numeric(_) => visitor.visit_str("0"),
+            BigQueryFieldType::Json => visitor.visit_str("null"),
+            // The temporal wrappers' visitors take the column's integer.
+            _ => visitor.visit_i64(0),
+        }
+    }
+}
+
+/// A sample value of whatever is asked for, which records nothing. An `Option` is `None` and a
+/// struct is built in field order from samples. A type that refuses `text`, such as one that
+/// reads only its own text form, has no sample.
+#[derive(Clone, Copy)]
+struct Sample {
+    text: TextSample,
+}
+
+impl<'de> Deserializer<'de> for Sample {
+    type Error = TraceError;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_bool(false)
+    }
+
+    fn deserialize_i8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_i8(1)
+    }
+
+    fn deserialize_i16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_i16(1)
+    }
+
+    fn deserialize_i32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_i32(1)
+    }
+
+    fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_i64(1)
+    }
+
+    fn deserialize_i128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_i128(1)
+    }
+
+    fn deserialize_u8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_u8(1)
+    }
+
+    fn deserialize_u16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_u16(1)
+    }
+
+    fn deserialize_u32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_u32(1)
+    }
+
+    fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_u64(1)
+    }
+
+    fn deserialize_u128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_u128(1)
+    }
+
+    fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_f32(0.0)
+    }
+
+    fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_f64(0.0)
+    }
+
+    fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_char('x')
+    }
+
+    fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_str(&self.text.text())
+    }
+
+    fn deserialize_string<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        self.deserialize_str(visitor)
+    }
+
+    fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_bytes(&[])
+    }
+
+    fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        self.deserialize_bytes(visitor)
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_none()
+    }
+
+    fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_unit_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        match CrateWrapper::named(name) {
+            Some(wrapper) => wrapper.visit(visitor),
+            None => visitor.visit_newtype_struct(self),
+        }
+    }
+
+    fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_seq(Samples {
+            sample: self,
+            left: 0,
+        })
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(
+        self,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        visitor.visit_seq(Samples {
+            sample: self,
+            left: len,
+        })
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        self.deserialize_tuple(len, visitor)
+    }
+
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_map(NoEntries)
+    }
+
+    /// serde derive reads a struct from a sequence of its numbered fields; the names in
+    /// `fields` outnumber them when some are aliases, and the extra samples are never read.
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        self.deserialize_tuple(fields.len(), visitor)
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        match variants.first() {
+            Some(variant) => visitor.visit_enum(SampleVariant {
+                sample: self,
+                variant,
+            }),
+            None => Err(TraceError::Stop),
+        }
+    }
+
+    fn deserialize_identifier<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, TraceError> {
+        Err(TraceError::Stop)
+    }
+
+    fn deserialize_ignored_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TraceError> {
+        visitor.visit_unit()
+    }
+}
+
+/// A sequence of `left` [`Sample`]s.
+struct Samples {
+    sample: Sample,
+    left: usize,
+}
+
+impl<'de> SeqAccess<'de> for Samples {
+    type Error = TraceError;
+
+    fn next_element_seed<S: DeserializeSeed<'de>>(
+        &mut self,
+        seed: S,
+    ) -> Result<Option<S::Value>, TraceError> {
+        if self.left == 0 {
+            return Ok(None);
+        }
+        self.left -= 1;
+        seed.deserialize(self.sample).map(Some)
+    }
+}
+
+/// The first variant of an enum, with [`Sample`] data when it carries any.
+struct SampleVariant {
+    sample: Sample,
+    variant: &'static str,
+}
+
+impl<'de> EnumAccess<'de> for SampleVariant {
+    type Error = TraceError;
+    type Variant = Self;
+
+    fn variant_seed<S: DeserializeSeed<'de>>(
+        self,
+        seed: S,
+    ) -> Result<(S::Value, Self), TraceError> {
+        let variant = seed.deserialize(BorrowedStrDeserializer::new(self.variant))?;
+        Ok((variant, self))
+    }
+}
+
+impl<'de> VariantAccess<'de> for SampleVariant {
+    type Error = TraceError;
+
+    fn unit_variant(self) -> Result<(), TraceError> {
+        Ok(())
+    }
+
+    fn newtype_variant_seed<S: DeserializeSeed<'de>>(
+        self,
+        seed: S,
+    ) -> Result<S::Value, TraceError> {
+        seed.deserialize(self.sample)
+    }
+
+    fn tuple_variant<V: Visitor<'de>>(
+        self,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        self.sample.deserialize_tuple(len, visitor)
+    }
+
+    fn struct_variant<V: Visitor<'de>>(
+        self,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, TraceError> {
+        self.sample.deserialize_tuple(fields.len(), visitor)
+    }
+}
+
+/// The entries of a struct given only its known fields, each with a [`Sample`] value.
+struct KnownFields<'r> {
+    known: &'r [KnownField],
+    next: usize,
+}
+
+impl<'de> MapAccess<'de> for KnownFields<'_> {
+    type Error = TraceError;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, TraceError> {
+        match self.known.get(self.next) {
+            Some(field) => seed
+                .deserialize(BorrowedStrDeserializer::new(field.name))
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn next_value_seed<S: DeserializeSeed<'de>>(
+        &mut self,
+        seed: S,
+    ) -> Result<S::Value, TraceError> {
+        let field = self.known.get(self.next).ok_or(TraceError::Stop)?;
+        self.next += 1;
+        seed.deserialize(Sample { text: field.sample })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::fake::{ORDERS, SHOP};
@@ -990,13 +1451,13 @@ mod tests {
     ) -> BigQuerySchemaColumn {
         BigQuerySchemaColumn::inferred(
             name.into(),
-            ColumnKind::Uninferred(BigQuerySchemaInferenceError::new(path.into(), kind)),
+            ColumnKind::Uninferred(BigQuerySchemaInferenceError::new(kind).with_path(path.into())),
             mode,
         )
     }
 
     /// The path and kind of the error a declaration of `T`'s inferred columns is refused with.
-    fn refusal_of<T: DeserializeOwned>() -> (String, BigQuerySchemaInferenceErrorKind) {
+    fn refusal_of<T: DeserializeOwned>() -> (Option<String>, BigQuerySchemaInferenceErrorKind) {
         let mut draft = BigQueryTableDeclarationDraft::new(SHOP.table(ORDERS));
         draft.columns = COLUMNS.from_type::<T>();
         match BigQueryTableDeclaration::try_from(draft) {
@@ -1327,14 +1788,6 @@ mod tests {
         }
         #[derive(Deserialize)]
         #[allow(dead_code, reason = "only its serde shape is read")]
-        struct Moved {
-            // A RECORD's value cannot be produced without its fields, so serde never names the
-            // field `address` belongs to.
-            #[serde(alias = "address")]
-            shipping: Address,
-        }
-        #[derive(Deserialize)]
-        #[allow(dead_code, reason = "only its serde shape is read")]
         struct Row {
             attributes: serde_json::Value,
             labels: HashMap<String, String>,
@@ -1345,7 +1798,6 @@ mod tests {
             span: BigQueryRange<i64>,
             category: Category,
             payload: Option<Payload>,
-            moved: Moved,
         }
         assert_eq!(
             COLUMNS.from_type::<Row>(),
@@ -1374,9 +1826,191 @@ mod tests {
                         Required,
                     )]
                 }),
-                uninferred("moved", "moved", UnresolvedAlias, Required),
             ])
         );
+    }
+
+    mod elsewhere {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        pub struct Node {
+            value: i64,
+        }
+    }
+
+    #[test]
+    fn distinct_types_of_one_serde_shape_are_records_and_a_boxed_self_is_recursive() {
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Node {
+            value: elsewhere::Node,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Page<T> {
+            items: T,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Thread {
+            title: String,
+            reply: Option<Box<Thread>>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Row {
+            node: Node,
+            page: Page<Page<i64>>,
+            thread: Thread,
+        }
+        assert_eq!(
+            COLUMNS.from_type::<Row>(),
+            by_hand(vec![
+                COLUMNS
+                    .field("node")
+                    .record(|node| {
+                        vec![node
+                            .field("value")
+                            .record(|inner| vec![inner.field("value").int64().required()])
+                            .required()]
+                    })
+                    .required(),
+                COLUMNS
+                    .field("page")
+                    .record(|page| {
+                        vec![page
+                            .field("items")
+                            .record(|inner| vec![inner.field("items").int64().required()])
+                            .required()]
+                    })
+                    .required(),
+                COLUMNS
+                    .field("thread")
+                    .record(|thread| {
+                        vec![
+                            thread.field("title").string().required(),
+                            uninferred(
+                                "reply",
+                                "thread.reply",
+                                BigQuerySchemaInferenceErrorKind::Recursive,
+                                BigQueryFieldMode::Nullable,
+                            ),
+                        ]
+                    })
+                    .required(),
+            ])
+        );
+    }
+
+    /// A text type that reads only its own `dev-` form, none of the texts inference offers.
+    #[derive(Debug)]
+    struct DeviceId;
+
+    impl<'de> Deserialize<'de> for DeviceId {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let text = String::deserialize(deserializer)?;
+            match text.strip_prefix("dev-") {
+                Some(_) => Ok(DeviceId),
+                None => Err(serde::de::Error::custom("not a device id")),
+            }
+        }
+    }
+
+    #[test]
+    fn an_aliased_field_infers_as_it_would_without_the_alias() {
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Row {
+            #[serde(alias = "duration")]
+            wait: BigQueryInterval,
+            #[serde(alias = "device")]
+            device_id: DeviceId,
+            #[serde(alias = "address")]
+            shipping: Address,
+            #[serde(alias = "previous")]
+            last_device: Option<DeviceId>,
+        }
+        assert_eq!(
+            COLUMNS.from_type::<Row>(),
+            by_hand(vec![
+                COLUMNS.field("wait").interval().required(),
+                COLUMNS.field("device_id").string().required(),
+                COLUMNS
+                    .field("shipping")
+                    .record(|address| {
+                        address.fields([
+                            address.field("city").string().required(),
+                            address.field("street").string(),
+                        ])
+                    })
+                    .required(),
+                COLUMNS.field("last_device").string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_alias_inference_cannot_tell_from_its_field_is_refused_at_its_own_path() {
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Row {
+            id: i64,
+            primary: DeviceId,
+            #[serde(alias = "spare")]
+            backup: DeviceId,
+        }
+        assert_eq!(
+            COLUMNS.from_type::<Row>(),
+            by_hand(vec![
+                COLUMNS.field("id").int64().required(),
+                COLUMNS.field("primary").string().required(),
+                uninferred(
+                    "backup",
+                    "backup",
+                    BigQuerySchemaInferenceErrorKind::UnresolvedAlias,
+                    BigQueryFieldMode::Required,
+                ),
+                uninferred(
+                    "spare",
+                    "spare",
+                    BigQuerySchemaInferenceErrorKind::UnresolvedAlias,
+                    BigQueryFieldMode::Required,
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_enum_without_variants_has_no_column_type() {
+        #[derive(Deserialize)]
+        enum Never {}
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Row {
+            never: Never,
+        }
+        assert_eq!(
+            COLUMNS.from_type::<Row>(),
+            by_hand(vec![uninferred(
+                "never",
+                "never",
+                BigQuerySchemaInferenceErrorKind::NoColumnType,
+                BigQueryFieldMode::Required,
+            )])
+        );
+    }
+
+    #[test]
+    fn with_keeps_the_name_of_the_column_it_replaces() {
+        #[derive(Deserialize)]
+        #[allow(dead_code, reason = "only its serde shape is read")]
+        struct Row {
+            id: i64,
+        }
+        let columns = COLUMNS
+            .from_type::<Row>()
+            .with("id", |_| COLUMNS.field("other").int64());
+        assert_eq!(columns, by_hand(vec![COLUMNS.field("id").int64()]));
     }
 
     #[test]
@@ -1398,10 +2032,10 @@ mod tests {
                 refusal_of::<(i64, String)>(),
             ],
             [
-                (String::new(), UnknownKeys),
-                (String::new(), UnknownKeys),
-                (String::new(), DynamicValue),
-                (String::new(), NotAStruct),
+                (None, UnknownKeys),
+                (None, UnknownKeys),
+                (None, DynamicValue),
+                (None, NotAStruct),
             ]
         );
     }

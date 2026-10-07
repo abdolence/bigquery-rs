@@ -574,33 +574,34 @@ impl Error for BigQuerySchemaChangeRefusedError {}
 /// infer, or a [`with`](crate::BigQuerySchemaColumns::with) path that names no inferred column.
 #[derive(Debug, Eq, PartialEq, Clone, Builder)]
 pub struct BigQuerySchemaInferenceError {
-    /// The column path, dotted for a RECORD field such as `shipping.city`; empty when the row
-    /// type itself has no columns to infer.
-    pub path: String,
     /// Why the column has no inferred type.
     pub kind: BigQuerySchemaInferenceErrorKind,
+    /// The column path, dotted for a RECORD field such as `shipping.city`; `None` when the row
+    /// type itself has no columns to infer.
+    pub path: Option<String>,
 }
 
 impl Display for BigQuerySchemaInferenceError {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        if self.path.is_empty() {
-            write!(
+        match &self.path {
+            None => write!(
                 f,
                 "Schema inference error: {}; declare the columns with `fields([..])`",
                 self.kind
-            )
-        } else if self.kind == BigQuerySchemaInferenceErrorKind::UnknownColumn {
-            write!(
+            ),
+            Some(path) if self.kind == BigQuerySchemaInferenceErrorKind::UnknownColumn => {
+                write!(f, "Schema inference error on `{path}`: {}", self.kind)
+            }
+            Some(path) if self.kind == BigQuerySchemaInferenceErrorKind::UnresolvedAlias => write!(
                 f,
-                "Schema inference error on `{}`: {}",
-                self.path, self.kind
-            )
-        } else {
-            write!(
+                "Schema inference error on `{path}`: {}; declare the columns with `fields([..])`",
+                self.kind
+            ),
+            Some(path) => write!(
                 f,
-                "Schema inference error on `{}`: {}; declare its type with `.with(..)`",
-                self.path, self.kind
-            )
+                "Schema inference error on `{path}`: {}; declare its type with `.with(..)`",
+                self.kind
+            ),
         }
     }
 }
@@ -627,13 +628,16 @@ pub enum BigQuerySchemaInferenceErrorKind {
     NestedArray,
     /// An array of `Option`s, whose `None` BigQuery cannot store.
     NullableArrayElement,
-    /// `()`, a unit or tuple struct, a tuple, or an array of anything but `u8`.
+    /// `()`, a unit or tuple struct, a tuple, an array of anything but `u8`, or an enum with no
+    /// variants.
     NoColumnType,
     /// A RANGE whose element is not DATE, DATETIME or TIMESTAMP.
     RangeElement,
     /// A struct that contains itself.
     Recursive,
-    /// A struct with `#[serde(alias)]` names that inference cannot tell from its field names.
+    /// A name of a struct with `#[serde(alias)]` names that inference cannot tell apart as a
+    /// field's own name or an alias, because no field value it can build is accepted. Each such
+    /// name is refused at its own path.
     UnresolvedAlias,
     /// A `Deserialize` impl that asked for something else when it was run again.
     Inconsistent,
@@ -666,16 +670,16 @@ impl Display for BigQuerySchemaInferenceErrorKind {
                 "a BigQuery array cannot hold NULL elements"
             }
             BigQuerySchemaInferenceErrorKind::NoColumnType => {
-                "`()`, a unit or tuple struct, a tuple or an array of anything but `u8` has no \
-                 column type"
+                "`()`, a unit or tuple struct, a tuple, an array of anything but `u8` or an enum \
+                 with no variants has no column type"
             }
             BigQuerySchemaInferenceErrorKind::RangeElement => {
                 "a RANGE element must be DATE, DATETIME or TIMESTAMP"
             }
             BigQuerySchemaInferenceErrorKind::Recursive => "the type contains itself",
             BigQuerySchemaInferenceErrorKind::UnresolvedAlias => {
-                "the struct has `#[serde(alias)]` names that inference cannot tell from its \
-                 field names"
+                "inference cannot tell whether this name is a field's own name or a \
+                 `#[serde(alias)]`"
             }
             BigQuerySchemaInferenceErrorKind::Inconsistent => {
                 "the type's `Deserialize` asked for something else when it was run again"

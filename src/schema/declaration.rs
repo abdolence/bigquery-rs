@@ -284,7 +284,12 @@ impl BigQuerySchemaColumnsBuilder {
     /// Infers the columns from the row type `T` through its `Deserialize` impl, the same serde
     /// path the crate's codecs read `T` with. Each field the impl reads is one column, in
     /// declaration order and under its serde name, so `rename`, `rename_all` and `skip` are
-    /// followed and an `alias` is not a column of its own.
+    /// followed and an `alias` adds no column. An alias is told from the field's own name by
+    /// building a sample value of the field. An alias on a field without one, as a REQUIRED
+    /// `uuid::Uuid` has none, is told apart only when that field is the struct's one field
+    /// without a sample value and is not `#[serde(default)]`; otherwise each name not told apart
+    /// is refused at its own path with
+    /// [`UnresolvedAlias`](crate::errors::BigQuerySchemaInferenceErrorKind::UnresolvedAlias).
     ///
     /// Each field maps by the type mapping of the book's "Type mapping" chapter:
     ///
@@ -365,6 +370,12 @@ impl BigQuerySchemaColumns {
     /// field without an inferred type goes away with them, so `.with("payload", |c| c.json())`
     /// settles every field of `payload` at once.
     ///
+    /// The column keeps its name whatever the closure returns, so `|_| columns.field("other")
+    /// .int64()` changes the type of the column at `path` and not its name. The name is the
+    /// field's serde name, which the codecs read and write the row type under; a column under
+    /// another name would not match the field. Rename the field in the row type, and use
+    /// `renamed_from(..)` to keep the table's values.
+    ///
     /// A path that names no column is refused by `.plan()` and `.sync()` with
     /// [`UnknownColumn`](crate::errors::BigQuerySchemaInferenceErrorKind::UnknownColumn).
     pub fn with<F>(mut self, path: impl Into<String>, column: F) -> Self
@@ -375,14 +386,19 @@ impl BigQuerySchemaColumns {
         match self.column_mut(&path) {
             Some(found) => {
                 let current = std::mem::replace(found, BigQuerySchemaColumn::new(String::new()));
-                *found = column(current);
+                let name = current.name.clone();
+                *found = BigQuerySchemaColumn {
+                    name,
+                    ..column(current)
+                };
             }
             None => {
-                self.problem
-                    .get_or_insert(BigQuerySchemaInferenceError::new(
-                        path,
+                self.problem.get_or_insert(
+                    BigQuerySchemaInferenceError::new(
                         BigQuerySchemaInferenceErrorKind::UnknownColumn,
-                    ));
+                    )
+                    .with_path(path),
+                );
             }
         }
         self
