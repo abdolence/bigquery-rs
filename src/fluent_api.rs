@@ -164,8 +164,8 @@ impl<'a> BigQueryExprBuilder<'a, BigQueryDb> {
     ///     .columns(|columns| {
     ///         columns.fields([
     ///             columns.field(path!(Order::id)).int64().required(),
-    ///             columns.field(path!(Order::customer)).string(),
-    ///             columns.field(path!(Order::placed_at)).timestamp(),
+    ///             columns.field(path!(Order::customer)).string().required(),
+    ///             columns.field(path!(Order::placed_at)).timestamp().required(),
     ///         ])
     ///     })
     ///     .primary_key([path!(Order::id)])

@@ -10,6 +10,8 @@ mod declaration;
 pub(crate) use declaration::BigQueryTableDeclarationDraft;
 pub use declaration::*;
 
+mod infer;
+
 mod plan;
 pub use plan::*;
 

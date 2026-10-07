@@ -8,7 +8,7 @@ use crate::BigQueryLabels;
 use crate::{
     BigQueryDatasetBuilder, BigQueryDatasetListBuilder, BigQueryDatasetRef, BigQueryDb,
     BigQueryPartitionUnit, BigQueryPartitioning, BigQueryRecreatePolicy, BigQueryResult,
-    BigQuerySchemaColumn, BigQuerySchemaColumnsBuilder, BigQueryTable, BigQueryTableDeclaration,
+    BigQuerySchemaColumns, BigQuerySchemaColumnsBuilder, BigQueryTable, BigQueryTableDeclaration,
     BigQueryTablePlan, BigQueryTableRef, BigQueryTableSyncReport,
 };
 use std::time::Duration;
@@ -105,7 +105,10 @@ pub struct BigQueryTableSchemaBuilder<'a> {
 }
 
 impl<'a> BigQueryTableSchemaBuilder<'a> {
-    /// Declares the columns, in table order. Each call replaces the columns of a previous one.
+    /// Declares the columns, in table order, by hand with
+    /// [`fields`](BigQuerySchemaColumnsBuilder::fields) or inferred from the row type with
+    /// [`from_type`](BigQuerySchemaColumnsBuilder::from_type). Each call replaces the columns of
+    /// a previous one.
     ///
     /// ```rust
     /// # use bigquery::*;
@@ -122,11 +125,12 @@ impl<'a> BigQueryTableSchemaBuilder<'a> {
     /// # }
     /// ```
     #[inline]
-    pub fn columns<F>(mut self, columns: F) -> Self
+    pub fn columns<F, R>(mut self, columns: F) -> Self
     where
-        F: FnOnce(BigQuerySchemaColumnsBuilder) -> Vec<BigQuerySchemaColumn>,
+        F: FnOnce(BigQuerySchemaColumnsBuilder) -> R,
+        R: Into<BigQuerySchemaColumns>,
     {
-        self.draft.columns = columns(BigQuerySchemaColumnsBuilder);
+        self.draft.columns = columns(BigQuerySchemaColumnsBuilder).into();
         self
     }
 
@@ -299,9 +303,12 @@ impl<'a> BigQueryTableSchemaBuilder<'a> {
     /// Reports what [`sync`](Self::sync) would do, writing nothing.
     ///
     /// # Errors
+    /// Before any request,
     /// [`InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError) for a
-    /// declaration the crate cannot diff or render, before any request; otherwise what
-    /// `GetTable` returned.
+    /// declaration the crate cannot diff or render, and
+    /// [`SchemaInferenceError`](crate::errors::BigQueryError::SchemaInferenceError) for a
+    /// column without an inferred type or a `.with(..)` path that names no column; otherwise
+    /// what `GetTable` returned.
     pub async fn plan(self) -> BigQueryResult<BigQueryTablePlan> {
         let declaration = BigQueryTableDeclaration::try_from(self.draft)?;
         self.db.plan_table_schema(declaration).await
@@ -324,7 +331,8 @@ impl<'a> BigQueryTableSchemaBuilder<'a> {
     /// - [`DataConflictError`](crate::errors::BigQueryError::DataConflictError) when the table
     ///   changed between the read and a patch or update; run the sync again. Changes sent before
     ///   it stay applied, as do those of any failure later in the sync;
-    /// - [`InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError) as for
+    /// - [`InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError) and
+    ///   [`SchemaInferenceError`](crate::errors::BigQueryError::SchemaInferenceError) as for
     ///   [`plan`](Self::plan).
     pub async fn sync(self) -> BigQueryResult<BigQueryTableSyncReport> {
         let declaration = BigQueryTableDeclaration::try_from(self.draft)?;

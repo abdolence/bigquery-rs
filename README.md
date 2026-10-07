@@ -25,8 +25,9 @@ Library provides a simple API for Google BigQuery using gRPC for every call:
       or none), or buffered (rows readable once you flush them);
     - Updates and deletes by the primary key through change data capture (CDC), with fluent
       `update()` and `delete()` or a lower-level CDC writer;
-    - Declarative table schemas, planned and synced with one call: new columns, renames, drops,
-      widening, partitioning, clustering, primary key, recreating an empty table;
+    - Declarative table schemas, inferred from your structures or declared by hand, planned and
+      synced with one call: new columns, renames, drops, widening, partitioning, clustering,
+      primary key, recreating an empty table;
     - Datasets, tables and jobs management;
     - Bytes processed and billed, slot milliseconds and cache hits for every query, as span
       fields and as results;
@@ -83,19 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .execute()
         .await?;
 
-    // Create the table, or bring an existing one to this schema
+    // Create the table, or bring an existing one to this schema, with the columns of `Order`
     let report = db
         .fluent()
         .schema()
         .table(SHOP.table(ORDERS))
-        .columns(|columns| {
-            columns.fields([
-                columns.field(path!(Order::id)).int64().required(),
-                columns.field(path!(Order::customer)).string(),
-                columns.field(path!(Order::total)).float64(),
-                columns.field(path!(Order::placed_at)).timestamp(),
-            ])
-        })
+        .columns(|columns| columns.from_type::<Order>())
         .primary_key([path!(Order::id)])
         .partition_by_day(path!(Order::placed_at))
         .sync()
@@ -205,8 +199,7 @@ each of them provides that the other does not.
       Read, so its typed path is a `SELECT *` query, which took 95.2 s and billed the whole
       table every run;
     - a 1M-row Storage Write from structures takes 34.0 s against 35.4 s, with 18% fewer bytes
-      sent as protobuf than the official crate's Arrow. I think the smaller requests are why it
-      is a bit faster.
+      sent as protobuf than the official crate's Arrow.
 - **Observability.** Every query, read and write span carries what BigQuery reports: bytes
   processed and billed, slot milliseconds, cache hits, rows and bytes read, rows appended and
   bytes sent, retries. `query_with_stats()` returns a query's figures together with its rows.

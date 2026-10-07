@@ -95,6 +95,111 @@ empty column name or one with `.` or a control character, two columns that diffe
 without a recreate opt-in. These fail `.plan()` and `.sync()` with `InvalidParametersError`
 before any request. Lengths, naming rules and label rules are left to BigQuery.
 
+## Inferring the columns from a structure
+
+The library can also infer the columns from the structure you read and write the table with, so
+the declaration does not repeat every field. `from_type::<T>()` goes through the structure's
+`Deserialize`, the same serde path the library's codecs use, and gives one column per field, in
+declaration order:
+
+```rust,no_run
+use bigquery::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Address {
+    city: String,
+    street: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Order {
+    id: i64,
+    customer: Option<String>,
+    total: String,
+    shipping: Option<Address>,
+    tags: Vec<String>,
+    placed_at: jiff::Timestamp,
+}
+
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+let report = db
+    .fluent()
+    .schema()
+    .table(SHOP.table(ORDERS))
+    .columns(|columns| {
+        columns
+            .from_type::<Order>()
+            .with(path!(Order::total), |total| total.numeric_with(10, 2))
+            .with(path!(Order::shipping~city), |city| city.string_with_max_length(64))
+            .with(path!(Order::placed_at), |placed_at| {
+                placed_at.description("When the customer placed the order")
+            })
+    })
+    .primary_key([path!(Order::id)])
+    .partition_by_day(path!(Order::placed_at))
+    .sync()
+    .await?;
+println!("{report}");
+# Ok(())
+# }
+```
+
+Each field maps by the [type mapping](types.md):
+
+- `Option<T>` is NULLABLE, a bare `T` is REQUIRED, `Vec<T>` and `Option<Vec<T>>` are REPEATED;
+- integers are INT64, floats FLOAT64, `bool` BOOL, `Vec<u8>` BYTES;
+- `jiff::Timestamp` is TIMESTAMP and `jiff::civil::Time` is TIME;
+- the temporal wrappers, `BigQueryDecimal<T>` (NUMERIC), `BigQueryJson<T>`, `BigQueryInterval` and
+  `BigQueryRange<T>` are their own types;
+- `String`, unit enums and any other type that reads from a string are STRING;
+- a structure is a RECORD, with its fields inferred the same way.
+
+Serde attributes are followed: `rename` and `rename_all` name the column, `skip` leaves the field
+out, an `alias` adds no column, and `default` does not change the mode.
+
+An aliased field infers as it would without the alias. Inference tells an alias from the field's
+own name by building a sample value of the field, and a type that reads only its own text form,
+such as `uuid::Uuid`, has no sample value. An alias on a REQUIRED field of such a type is told
+apart only when that field is the one field of the structure without a sample value, and is not
+`#[serde(default)]`. Otherwise each name that cannot be told apart is refused at its own path with
+`UnresolvedAlias`, and the structure is declared with `fields([..])`.
+
+Be aware of the modes. An inferred bare `T` is REQUIRED, while a column declared by hand with
+`field(..)` is NULLABLE until `required()`. So moving `customer: String` from
+`columns.field("customer").string()` to `from_type` makes the column REQUIRED, and BigQuery cannot
+make an existing NULLABLE column REQUIRED in place. Use `Option<String>` in the structure, or
+`.with(path!(Order::customer), |customer| customer.nullable())`.
+
+`.with(path, |column| ..)` changes one inferred column. The closure gets the column as it was
+inferred:
+
+- `description(..)`, `default_value(..)` and `renamed_from(..)` keep its type and mode;
+- a type method such as `numeric()` replaces the type and keeps the mode;
+- `nullable()`, `required()` and `repeated()` change the mode;
+- a dotted path reaches a field of a RECORD, `path!(Order::shipping~city)` steps through the
+  `Option`;
+- on a RECORD column a type method such as `json()` drops its fields, and `record(..)` replaces
+  them.
+
+Some types do not tell the column type, and need `.with`:
+
+- NUMERIC, BIGNUMERIC, GEOGRAPHY and JSON held in a `String` are inferred as STRING;
+- a plain `jiff::civil::Date` and `jiff::civil::DateTime` read the same text forms, so the library
+  cannot tell DATE from DATETIME and leaves the type to you. The `BigQueryDate` and
+  `BigQueryDateTime` wrappers, and `serialize_as_date`/`serialize_as_datetime`, are inferred;
+- `serde_json::Value`, maps, enums with data and arrays of arrays get no type.
+
+A column without an inferred type, or a `.with` path that names no column, fails `.plan()` and
+`.sync()` with `SchemaInferenceError` before any request, and the error carries the column path.
+A structure with `#[serde(flatten)]` does not list its fields at all, so declare its table with
+`fields([..])`.
+
+Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/schema-sync.rs).
+
 ## plan() versus sync()
 
 `.plan()` is read-only. It sends one `GetTable` (and `ListRowAccessPolicies` when a recreate is

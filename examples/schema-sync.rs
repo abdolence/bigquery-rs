@@ -1,6 +1,7 @@
 //! Declares a table's schema in code and syncs it: the first sync creates the table, the next
-//! one adds columns and renames one in place, and `prune_undeclared()` then drops the column the
-//! declaration no longer has. Each step is planned first, which writes nothing.
+//! one, inferred from the struct the example reads the table with, adds columns and renames one
+//! in place, and `prune_undeclared()` then drops the column the declaration no longer has. Each
+//! step is planned first, which writes nothing.
 //!
 //! Run with `PROJECT_ID=<your-project> cargo run --example schema-sync`.
 
@@ -18,8 +19,9 @@ const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 struct Order {
     order_id: i64,
     customer_name: String,
-    total: String,
+    total: Option<String>,
     status: Option<String>,
+    placed_at: Option<jiff::Timestamp>,
 }
 
 /// A dataset name unique to this run, so that concurrent runs never share one.
@@ -51,8 +53,9 @@ fn orders_first_version<'a>(
         .description("Orders placed in the shop")
 }
 
-/// The second version: `customer` is renamed to `customer_name`, `status` and `placed_at` are
-/// added, and `note` is no longer declared.
+/// The second version, inferred from `Order`: `customer` is renamed to `customer_name`, `status`
+/// and `placed_at` are added, and `note` is no longer declared. `total` holds NUMERIC text in a
+/// `String`, which only `.with(..)` can tell from a STRING.
 fn orders_second_version<'a>(
     db: &'a BigQueryDb,
     dataset: &BigQueryDatasetId,
@@ -61,20 +64,15 @@ fn orders_second_version<'a>(
         .schema()
         .table(dataset.table(ORDERS))
         .columns(|columns| {
-            columns.fields([
-                columns.field("order_id").int64().required(),
-                columns
-                    .field("customer_name")
-                    .string()
-                    .required()
-                    .renamed_from("customer"),
-                columns.field("total").numeric(),
-                columns.field("status").string(),
-                columns
-                    .field("placed_at")
-                    .timestamp()
-                    .default_value("CURRENT_TIMESTAMP()"),
-            ])
+            columns
+                .from_type::<Order>()
+                .with(path!(Order::customer_name), |customer_name| {
+                    customer_name.renamed_from("customer")
+                })
+                .with(path!(Order::total), |total| total.numeric())
+                .with(path!(Order::placed_at), |placed_at| {
+                    placed_at.default_value("CURRENT_TIMESTAMP()")
+                })
         })
         .description("Orders placed in the shop")
 }
@@ -132,7 +130,7 @@ async fn sync_orders(
     let orders: Vec<Order> = db
         .fluent()
         .query(format!(
-            "SELECT order_id, customer_name, total, status \
+            "SELECT order_id, customer_name, total, status, placed_at \
              FROM `{ORDERS}` ORDER BY order_id LIMIT 5"
         ))
         .default_dataset(dataset.clone())
@@ -142,11 +140,14 @@ async fn sync_orders(
     println!("The first orders after the rename and the drop:");
     for order in &orders {
         println!(
-            "  order {}: customer {}, total {}, status {}",
+            "  order {}: customer {}, total {}, status {}, placed at {}",
             order.order_id,
             order.customer_name,
-            order.total,
-            order.status.as_deref().unwrap_or("unset")
+            order.total.as_deref().unwrap_or("unset"),
+            order.status.as_deref().unwrap_or("unset"),
+            order
+                .placed_at
+                .map_or_else(|| "unset".to_string(), |placed_at| placed_at.to_string())
         );
     }
     Ok(())

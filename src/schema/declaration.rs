@@ -2,7 +2,9 @@
 //! it can diff or render a declaration.
 
 use crate::db::proto::millis;
-use crate::errors::BigQueryError;
+use crate::errors::{
+    BigQueryError, BigQuerySchemaInferenceError, BigQuerySchemaInferenceErrorKind,
+};
 use crate::sql::{column_segment_violation, dotted_path};
 use crate::BigQueryInstant;
 use crate::BigQueryLabels;
@@ -10,17 +12,19 @@ use crate::{
     BigQueryDecimalParams, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType,
     BigQueryRangeElementType, BigQueryResult, BigQueryTableRef,
 };
+use serde::de::DeserializeOwned;
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
 /// One declared column, or one field of a declared RECORD, as
-/// [`BigQuerySchemaColumnsBuilder::field`] starts it.
+/// [`BigQuerySchemaColumnsBuilder::field`] starts it or
+/// [`from_type`](BigQuerySchemaColumnsBuilder::from_type) infers it.
 ///
-/// A column is NULLABLE until [`required`](Self::required) or [`repeated`](Self::repeated) says
-/// otherwise, and has no type until one of the type methods sets it; a column without a type is
-/// refused at `.plan()`/`.sync()`. A description or default value left undeclared is not
-/// cleared: whatever the table already holds for it stays.
+/// A column started with `field` is NULLABLE until [`required`](Self::required) or
+/// [`repeated`](Self::repeated) says otherwise, and has no type until one of the type methods
+/// sets it; a column without a type is refused at `.plan()`/`.sync()`. A description or default
+/// value left undeclared is not cleared: whatever the table already holds for it stays.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BigQuerySchemaColumn {
     name: String,
@@ -32,9 +36,12 @@ pub struct BigQuerySchemaColumn {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum ColumnKind {
+pub(super) enum ColumnKind {
     Type(BigQueryFieldType),
     Record(Vec<BigQuerySchemaColumn>),
+    /// A field inference found no type for; refused at `.plan()`/`.sync()` unless a type method
+    /// replaces it.
+    Uninferred(BigQuerySchemaInferenceError),
 }
 
 impl BigQuerySchemaColumn {
@@ -46,6 +53,14 @@ impl BigQuerySchemaColumn {
             description: None,
             default_value: None,
             renamed_from: None,
+        }
+    }
+
+    pub(super) fn inferred(name: String, kind: ColumnKind, mode: BigQueryFieldMode) -> Self {
+        Self {
+            kind: Some(kind),
+            mode,
+            ..Self::new(name)
         }
     }
 
@@ -175,6 +190,15 @@ impl BigQuerySchemaColumn {
         }
     }
 
+    /// NULLABLE: may be NULL. A column started with `field` is NULLABLE already; on an inferred
+    /// column this relaxes the REQUIRED that a field which is not an `Option` infers.
+    pub fn nullable(self) -> Self {
+        Self {
+            mode: BigQueryFieldMode::Nullable,
+            ..self
+        }
+    }
+
     /// REQUIRED: never NULL.
     ///
     /// BigQuery cannot add a REQUIRED column to an existing table or make a NULLABLE column
@@ -255,6 +279,153 @@ impl BigQuerySchemaColumnsBuilder {
         I: IntoIterator<Item = BigQuerySchemaColumn>,
     {
         columns.into_iter().collect()
+    }
+
+    /// Infers the columns from the row type `T` through its `Deserialize` impl, the same serde
+    /// path the crate's codecs read `T` with. Each field the impl reads is one column, in
+    /// declaration order and under its serde name, so `rename`, `rename_all` and `skip` are
+    /// followed and an `alias` adds no column. An alias is told from the field's own name by
+    /// building a sample value of the field. An alias on a field without one, as a REQUIRED
+    /// `uuid::Uuid` has none, is told apart only when that field is the struct's one field
+    /// without a sample value and is not `#[serde(default)]`; otherwise each name not told apart
+    /// is refused at its own path with
+    /// [`UnresolvedAlias`](crate::errors::BigQuerySchemaInferenceErrorKind::UnresolvedAlias).
+    ///
+    /// Each field maps by the type mapping of the book's "Type mapping" chapter:
+    ///
+    /// - `Option<T>` is NULLABLE, a bare `T` REQUIRED, and `Vec<T>` or `Option<Vec<T>>`
+    ///   REPEATED. A column started with [`field`](Self::field) is NULLABLE instead, until
+    ///   [`required`](BigQuerySchemaColumn::required) says otherwise;
+    /// - integers are INT64, floats FLOAT64, `bool` BOOL, and `Vec<u8>`, `[u8; N]` and serde
+    ///   bytes BYTES;
+    /// - `jiff::Timestamp` is TIMESTAMP and `jiff::civil::Time` TIME. Any other type that reads
+    ///   from a string, a unit-variant enum included, is STRING;
+    /// - the temporal wrappers and their `serialize_as_*` modules are their own types,
+    ///   `BigQueryDecimal<T>` is NUMERIC, `BigQueryJson<T>` JSON, `BigQueryInterval` INTERVAL and
+    ///   `BigQueryRange<T>` a RANGE of its element;
+    /// - a struct is a RECORD of its own fields.
+    ///
+    /// Some columns need [`with`](BigQuerySchemaColumns::with), since the Rust type does not
+    /// tell them apart: NUMERIC, BIGNUMERIC, GEOGRAPHY and JSON held in a `String` infer as
+    /// STRING, and a plain `jiff::civil::Date` or `jiff::civil::DateTime`, a map,
+    /// `serde_json::Value`, an enum with data or a `#[serde(flatten)]` struct infers no type at
+    /// all. `.plan()` and `.sync()` refuse a column without an inferred type, before any request,
+    /// with [`SchemaInferenceError`](crate::errors::BigQueryError::SchemaInferenceError) naming
+    /// its path, unless `.with(..)` gives it one.
+    ///
+    /// ```rust
+    /// # use bigquery::*;
+    /// #[derive(serde::Deserialize)]
+    /// struct Order {
+    ///     id: i64,
+    ///     customer: Option<String>,
+    ///     total: String,
+    ///     placed_at: jiff::Timestamp,
+    /// }
+    ///
+    /// # fn declare(columns: BigQuerySchemaColumnsBuilder) {
+    /// let inferred = columns
+    ///     .from_type::<Order>()
+    ///     .with(path!(Order::total), |total| total.numeric());
+    ///
+    /// let by_hand = columns.fields([
+    ///     columns.field("id").int64().required(),
+    ///     columns.field("customer").string(),
+    ///     columns.field("total").numeric().required(),
+    ///     columns.field("placed_at").timestamp().required(),
+    /// ]);
+    /// assert_eq!(inferred, by_hand.into());
+    /// # }
+    /// # declare(BigQuerySchemaColumnsBuilder);
+    /// ```
+    pub fn from_type<T: DeserializeOwned>(&self) -> BigQuerySchemaColumns {
+        BigQuerySchemaColumns::infer::<T>()
+    }
+}
+
+/// The columns a [`columns`](crate::BigQueryTableSchemaBuilder::columns) closure declares, in
+/// table order: the list [`fields`](BigQuerySchemaColumnsBuilder::fields) collects, or the one
+/// [`from_type`](BigQuerySchemaColumnsBuilder::from_type) infers.
+///
+/// The closure cannot return an error, so a row type with no columns to infer, or a
+/// [`with`](Self::with) path that names no column, is kept here and refused by `.plan()` and
+/// `.sync()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BigQuerySchemaColumns {
+    pub(super) columns: Vec<BigQuerySchemaColumn>,
+    /// The first problem found; the declaration is refused with it.
+    pub(super) problem: Option<BigQuerySchemaInferenceError>,
+}
+
+impl BigQuerySchemaColumns {
+    /// Replaces the column at `path` with what `column` makes of it.
+    ///
+    /// The closure gets the column as it is, so `.description(..)`, `.default_value(..)` or
+    /// `.renamed_from(..)` keep its type and mode, a type method such as `.numeric()` replaces
+    /// the type and keeps the mode, and `.nullable()` relaxes a REQUIRED one. A dotted path, as
+    /// [`path!`](crate::path!) builds it, reaches a field of a RECORD column.
+    ///
+    /// A RECORD column comes with its fields: they stay when the closure keeps the RECORD, a
+    /// type method drops them, and [`record`](BigQuerySchemaColumn::record) replaces them. A
+    /// field without an inferred type goes away with them, so `.with("payload", |c| c.json())`
+    /// settles every field of `payload` at once.
+    ///
+    /// The column keeps its name whatever the closure returns, so `|_| columns.field("other")
+    /// .int64()` changes the type of the column at `path` and not its name. The name is the
+    /// field's serde name, which the codecs read and write the row type under; a column under
+    /// another name would not match the field. Rename the field in the row type, and use
+    /// `renamed_from(..)` to keep the table's values.
+    ///
+    /// A path that names no column is refused by `.plan()` and `.sync()` with
+    /// [`UnknownColumn`](crate::errors::BigQuerySchemaInferenceErrorKind::UnknownColumn).
+    pub fn with<F>(mut self, path: impl Into<String>, column: F) -> Self
+    where
+        F: FnOnce(BigQuerySchemaColumn) -> BigQuerySchemaColumn,
+    {
+        let path = path.into();
+        match self.column_mut(&path) {
+            Some(found) => {
+                let current = std::mem::replace(found, BigQuerySchemaColumn::new(String::new()));
+                let name = current.name.clone();
+                *found = BigQuerySchemaColumn {
+                    name,
+                    ..column(current)
+                };
+            }
+            None => {
+                self.problem.get_or_insert(
+                    BigQuerySchemaInferenceError::new(
+                        BigQuerySchemaInferenceErrorKind::UnknownColumn,
+                    )
+                    .with_path(path),
+                );
+            }
+        }
+        self
+    }
+
+    fn column_mut(&mut self, path: &str) -> Option<&mut BigQuerySchemaColumn> {
+        let mut segments = path.split('.');
+        let top = segments.next()?;
+        let mut column = self.columns.iter_mut().find(|column| column.name == top)?;
+        for segment in segments {
+            column = match &mut column.kind {
+                Some(ColumnKind::Record(fields)) => {
+                    fields.iter_mut().find(|field| field.name == segment)?
+                }
+                _ => return None,
+            };
+        }
+        Some(column)
+    }
+}
+
+impl From<Vec<BigQuerySchemaColumn>> for BigQuerySchemaColumns {
+    fn from(columns: Vec<BigQuerySchemaColumn>) -> Self {
+        Self {
+            columns,
+            problem: None,
+        }
     }
 }
 
@@ -411,7 +582,7 @@ pub(crate) struct DeclaredColumn {
 #[derive(Debug, Clone)]
 pub(crate) struct BigQueryTableDeclarationDraft {
     pub table: BigQueryTableRef,
-    pub columns: Vec<BigQuerySchemaColumn>,
+    pub columns: BigQuerySchemaColumns,
     pub primary_key: Option<Vec<String>>,
     pub partitioning: Option<BigQueryPartitioning>,
     pub partition_expiration: Option<Duration>,
@@ -429,7 +600,7 @@ impl BigQueryTableDeclarationDraft {
     pub(crate) fn new(table: BigQueryTableRef) -> Self {
         Self {
             table,
-            columns: Vec::new(),
+            columns: Vec::new().into(),
             primary_key: None,
             partitioning: None,
             partition_expiration: None,
@@ -527,6 +698,9 @@ impl DeclaredColumn {
                         format!("the column `{at}` has no type"),
                     ))
                 }
+                Some(ColumnKind::Uninferred(error)) => {
+                    return Err(BigQueryError::SchemaInferenceError(error))
+                }
                 Some(ColumnKind::Type(BigQueryFieldType::Struct(fields))) => {
                     for field in &fields {
                         check_name("columns", &field.name)?;
@@ -556,16 +730,19 @@ impl DeclaredColumn {
     }
 }
 
-/// Refuses what the diff and the DDL renderer cannot represent: a column without a type, a
-/// name the renderer cannot quote unambiguously or the diff cannot tell apart, a nested
-/// rename, a partitioning column that is not declared (its type picks the `PARTITION BY`
-/// expression), and options that only mean something next to another one. Everything else,
-/// lengths and BigQuery's naming rules included, is left to BigQuery.
+/// Refuses what the diff and the DDL renderer cannot represent: a column without a type,
+/// inferred or declared, a name the renderer cannot quote unambiguously or the diff cannot tell
+/// apart, a nested rename, a partitioning column that is not declared (its type picks the
+/// `PARTITION BY` expression), and options that only mean something next to another one.
+/// Everything else, lengths and BigQuery's naming rules included, is left to BigQuery.
 impl TryFrom<BigQueryTableDeclarationDraft> for BigQueryTableDeclaration {
     type Error = BigQueryError;
 
     fn try_from(draft: BigQueryTableDeclarationDraft) -> Result<Self, Self::Error> {
-        let columns = DeclaredColumn::checked(draft.columns, "")?;
+        if let Some(problem) = draft.columns.problem {
+            return Err(BigQueryError::SchemaInferenceError(problem));
+        }
+        let columns = DeclaredColumn::checked(draft.columns.columns, "")?;
         if let Some(old) = columns
             .iter()
             .filter_map(|c| c.renamed_from.as_ref())
