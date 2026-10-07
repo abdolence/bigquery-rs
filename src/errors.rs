@@ -44,6 +44,9 @@ pub enum BigQueryError {
     JobError(Box<BigQueryJobError>),
     /// A schema sync refused its plan and wrote nothing. Boxed, since it carries the plan.
     SchemaChangeRefused(Box<BigQuerySchemaChangeRefusedError>),
+    /// A column list that [`from_type`](crate::BigQuerySchemaColumnsBuilder::from_type) could
+    /// not infer, refused by `.plan()` and `.sync()` before any request.
+    SchemaInferenceError(BigQuerySchemaInferenceError),
 }
 
 impl BigQueryError {
@@ -181,6 +184,7 @@ impl Display for BigQueryError {
             BigQueryError::WriteStreamError(ref err) => err.fmt(f),
             BigQueryError::JobError(ref err) => err.fmt(f),
             BigQueryError::SchemaChangeRefused(ref err) => err.fmt(f),
+            BigQueryError::SchemaInferenceError(ref err) => err.fmt(f),
         }
     }
 }
@@ -200,6 +204,7 @@ impl Error for BigQueryError {
             BigQueryError::WriteStreamError(ref err) => Some(err),
             BigQueryError::JobError(ref err) => Some(err.as_ref()),
             BigQueryError::SchemaChangeRefused(ref err) => Some(err.as_ref()),
+            BigQueryError::SchemaInferenceError(ref err) => Some(err),
         }
     }
 }
@@ -564,6 +569,123 @@ impl Display for BigQuerySchemaChangeRefusedError {
 }
 
 impl Error for BigQuerySchemaChangeRefusedError {}
+
+/// A column list that [`from_type`](crate::BigQuerySchemaColumnsBuilder::from_type) could not
+/// infer, or a [`with`](crate::BigQuerySchemaColumns::with) path that names no inferred column.
+#[derive(Debug, Eq, PartialEq, Clone, Builder)]
+pub struct BigQuerySchemaInferenceError {
+    /// The column path, dotted for a RECORD field such as `shipping.city`; empty when the row
+    /// type itself has no columns to infer.
+    pub path: String,
+    /// Why the column has no inferred type.
+    pub kind: BigQuerySchemaInferenceErrorKind,
+}
+
+impl Display for BigQuerySchemaInferenceError {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        if self.path.is_empty() {
+            write!(
+                f,
+                "Schema inference error: {}; declare the columns with `fields([..])`",
+                self.kind
+            )
+        } else if self.kind == BigQuerySchemaInferenceErrorKind::UnknownColumn {
+            write!(
+                f,
+                "Schema inference error on `{}`: {}",
+                self.path, self.kind
+            )
+        } else {
+            write!(
+                f,
+                "Schema inference error on `{}`: {}; declare its type with `.with(..)`",
+                self.path, self.kind
+            )
+        }
+    }
+}
+
+impl Error for BigQuerySchemaInferenceError {}
+
+/// The kinds of [`BigQuerySchemaInferenceError`].
+#[non_exhaustive]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub enum BigQuerySchemaInferenceErrorKind {
+    /// The row type is not a struct with named fields.
+    NotAStruct,
+    /// A map, or a struct with `#[serde(flatten)]`, which does not list its keys.
+    UnknownKeys,
+    /// A value whose `Deserialize` takes whatever it is given, such as `serde_json::Value` or
+    /// an untagged enum.
+    DynamicValue,
+    /// An enum with a variant that carries data; a unit-variant enum is a STRING.
+    EnumWithData,
+    /// A text field that reads both DATE and DATETIME text, as `jiff::civil::Date` and
+    /// `jiff::civil::DateTime` both do.
+    DateOrDateTime,
+    /// An array of arrays, which BigQuery has no column type for.
+    NestedArray,
+    /// An array of `Option`s, whose `None` BigQuery cannot store.
+    NullableArrayElement,
+    /// `()`, a unit or tuple struct, a tuple, or an array of anything but `u8`.
+    NoColumnType,
+    /// A RANGE whose element is not DATE, DATETIME or TIMESTAMP.
+    RangeElement,
+    /// A struct that contains itself.
+    Recursive,
+    /// A struct with `#[serde(alias)]` names that inference cannot tell from its field names.
+    UnresolvedAlias,
+    /// A `Deserialize` impl that asked for something else when it was run again.
+    Inconsistent,
+    /// A [`with`](crate::BigQuerySchemaColumns::with) path that names no inferred column.
+    UnknownColumn,
+}
+
+impl Display for BigQuerySchemaInferenceErrorKind {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            BigQuerySchemaInferenceErrorKind::NotAStruct => {
+                "the row type is not a struct with named fields"
+            }
+            BigQuerySchemaInferenceErrorKind::UnknownKeys => {
+                "a map or a `#[serde(flatten)]` struct does not list its keys"
+            }
+            BigQuerySchemaInferenceErrorKind::DynamicValue => {
+                "a self-describing value, such as `serde_json::Value` or an untagged enum, has \
+                 no fixed type"
+            }
+            BigQuerySchemaInferenceErrorKind::EnumWithData => {
+                "an enum with a variant that carries data has no column type"
+            }
+            BigQuerySchemaInferenceErrorKind::DateOrDateTime => {
+                "the field reads both DATE and DATETIME text, as `jiff::civil::Date` and \
+                 `jiff::civil::DateTime` both do"
+            }
+            BigQuerySchemaInferenceErrorKind::NestedArray => "BigQuery has no array of arrays",
+            BigQuerySchemaInferenceErrorKind::NullableArrayElement => {
+                "a BigQuery array cannot hold NULL elements"
+            }
+            BigQuerySchemaInferenceErrorKind::NoColumnType => {
+                "`()`, a unit or tuple struct, a tuple or an array of anything but `u8` has no \
+                 column type"
+            }
+            BigQuerySchemaInferenceErrorKind::RangeElement => {
+                "a RANGE element must be DATE, DATETIME or TIMESTAMP"
+            }
+            BigQuerySchemaInferenceErrorKind::Recursive => "the type contains itself",
+            BigQuerySchemaInferenceErrorKind::UnresolvedAlias => {
+                "the struct has `#[serde(alias)]` names that inference cannot tell from its \
+                 field names"
+            }
+            BigQuerySchemaInferenceErrorKind::Inconsistent => {
+                "the type's `Deserialize` asked for something else when it was run again"
+            }
+            BigQuerySchemaInferenceErrorKind::UnknownColumn => {
+                "`.with(..)` names no inferred column"
+            }
+        })
+    }
+}
 
 /// One error a job reported, as in the v2 `ErrorProto`.
 #[derive(Debug, Eq, PartialEq, Clone, Builder)]

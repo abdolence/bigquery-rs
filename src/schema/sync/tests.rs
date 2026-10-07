@@ -5,8 +5,10 @@ use crate::db::fake::query::job_reference;
 use crate::db::fake::table::v2_field;
 use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::db::fake::{ORDERS, SHOP};
-use crate::errors::BigQueryError;
-use crate::{BigQueryDroppedData, BigQueryRecreateMethod, BigQueryRefusal};
+use crate::errors::{BigQueryError, BigQuerySchemaInferenceErrorKind};
+use crate::{
+    BigQueryDroppedData, BigQueryRecreateMethod, BigQueryRefusal, BigQuerySchemaColumnsBuilder,
+};
 use gcloud_sdk::google::cloud::bigquery::v2::{
     self as v2, ListRowAccessPoliciesResponse, QueryResponse, RowAccessPolicy,
     RowAccessPolicyReference,
@@ -448,6 +450,49 @@ async fn an_invalid_declaration_is_refused_before_any_request() {
             matches!(result, Err(BigQueryError::InvalidParametersError(_))),
             "{names:?}: {result:?}"
         );
+    }
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn an_uninferred_column_and_an_unknown_with_path_are_refused_before_any_request() {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code, reason = "only its serde shape is read")]
+    struct Row {
+        id: i64,
+        attributes: serde_json::Value,
+    }
+    let fake = start(Scenario::new(Some(live_table()))).await;
+    let columns = BigQuerySchemaColumnsBuilder;
+    for (declared, path, kind) in [
+        (
+            columns.from_type::<Row>(),
+            "attributes",
+            BigQuerySchemaInferenceErrorKind::DynamicValue,
+        ),
+        (
+            columns
+                .from_type::<Row>()
+                .with("attributes", |attributes| attributes.json())
+                .with("attributes.kind", |kind| kind.string()),
+            "attributes.kind",
+            BigQuerySchemaInferenceErrorKind::UnknownColumn,
+        ),
+    ] {
+        let result = fake
+            .db
+            .fluent()
+            .schema()
+            .table(SHOP.table(ORDERS))
+            .columns(|_| declared)
+            .plan()
+            .await;
+        match result {
+            Err(BigQueryError::SchemaInferenceError(error)) => {
+                assert_eq!((error.path.as_str(), error.kind), (path, kind));
+            }
+            other => panic!("expected a schema inference error, got {other:?}"),
+        }
     }
     assert!(fake.calls().is_empty(), "{:?}", fake.calls());
 }

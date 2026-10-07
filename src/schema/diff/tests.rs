@@ -66,7 +66,7 @@ fn declare(
     set: impl FnOnce(&mut BigQueryTableDeclarationDraft),
 ) -> BigQueryTableDeclaration {
     let mut draft = BigQueryTableDeclarationDraft::new(SHOP.table(ORDERS));
-    draft.columns = columns;
+    draft.columns = columns.into();
     set(&mut draft);
     BigQueryTableDeclaration::try_from(draft).expect("a valid declaration")
 }
