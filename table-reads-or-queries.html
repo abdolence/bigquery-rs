@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f85a9c76.js";
+            window.path_to_searchindex_js = "searchindex-8dbe98b0.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -255,11 +255,11 @@ billed. Neither is a query answered from the query cache;</li>
 projection from your structure does it for you, see
 <a href="./reading-tables.html#selecting-columns">Selecting columns</a>.</li>
 </ul>
-<p>So for a scan of a large table a table read is probably much cheaper, a bit more than a sixth of
-the query price per byte, and free under the monthly allowance. In the
+<p>So for a scan of a large table a table read is much cheaper: a bit more than a sixth of the
+query price per byte, and free under the monthly allowance. In the
 <a href="./benchmarks.html#cost">benchmarks</a> the 215 MB table scans went through the Storage Read free
-tier, while each <code>SELECT *</code> scan of the official crate billed the table. I didn’t measure whether a row
-filter reduces the bytes billed for a table read, so I would not count on it.</p>
+tier, while each <code>SELECT *</code> scan of the official crate billed the table. Row filters were not
+measured for bytes billed, so do not count on a filter making a table read cheaper.</p>
 <p><code>.maximum_bytes_billed(..)</code> makes a query fail without running if it would bill more, and a
 <a href="./queries.html#dry-run">dry run</a> tells you the bytes before you run it.</p>
 <h2 id="which-one-to-use"><a class="header" href="#which-one-to-use">Which one to use</a></h2>
@@ -268,7 +268,7 @@ filter reduces the bytes billed for a table read, so I would not count on it.</p
 orders of this customer”. It needs no job, reads in parallel and resumes by itself;</li>
 <li><strong>Joins, aggregates, ordering, <code>LIMIT</code>, views or computed columns</strong>: a query, with named
 parameters for every value;</li>
-<li><strong>A small lookup, a few rows by key</strong>: probably a query. Short query mode returns it in one
+<li><strong>A small lookup, a few rows by key</strong>: a query. Short query mode returns it in one
 call, while a table read opens a session first;</li>
 <li><strong>DML, DDL, or when you need job stats, labels on the job or a dry run</strong>: a query;</li>
 <li><strong>Arrow for your own processing</strong>: either, both have <code>record_batches()</code>.</li>

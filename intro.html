@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f85a9c76.js";
+            window.path_to_searchindex_js = "searchindex-8dbe98b0.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -200,8 +200,9 @@ structures or of raw Arrow record batches: at least once, exactly once, atomic (
 or none), or buffered (rows readable once you flush them);</li>
 <li>Updates and deletes by the primary key through change data capture (CDC), with fluent
 <code>update()</code> and <code>delete()</code> or a lower-level CDC writer;</li>
-<li>Declarative table schemas, planned and synced with one call: new columns, renames, drops,
-widening, partitioning, clustering, primary key, recreating an empty table;</li>
+<li>Declarative table schemas, inferred from your structures or declared by hand, planned and
+synced with one call: new columns, renames, drops, widening, partitioning, clustering,
+primary key, recreating an empty table;</li>
 <li>Datasets, tables and jobs management;</li>
 <li>Bytes processed and billed, slot milliseconds and cache hits for every query, as span
 fields and as results;</li>
@@ -243,8 +244,7 @@ JSON;</li>
 Read, so its typed path is a <code>SELECT *</code> query, which took 95.2 s and billed the whole
 table every run;</li>
 <li>a 1M-row Storage Write from structures takes 34.0 s against 35.4 s, with 18% fewer bytes
-sent as protobuf than the official crate’s Arrow. I think the smaller requests are why it
-is a bit faster.</li>
+sent as protobuf than the official crate’s Arrow.</li>
 </ul>
 </li>
 <li><strong>Observability.</strong> Every query, read and write span carries what BigQuery reports: bytes

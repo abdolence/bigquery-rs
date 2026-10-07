@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f85a9c76.js";
+            window.path_to_searchindex_js = "searchindex-8dbe98b0.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -201,8 +201,9 @@ structures or of raw Arrow record batches: at least once, exactly once, atomic (
 or none), or buffered (rows readable once you flush them);</li>
 <li>Updates and deletes by the primary key through change data capture (CDC), with fluent
 <code>update()</code> and <code>delete()</code> or a lower-level CDC writer;</li>
-<li>Declarative table schemas, planned and synced with one call: new columns, renames, drops,
-widening, partitioning, clustering, primary key, recreating an empty table;</li>
+<li>Declarative table schemas, inferred from your structures or declared by hand, planned and
+synced with one call: new columns, renames, drops, widening, partitioning, clustering,
+primary key, recreating an empty table;</li>
 <li>Datasets, tables and jobs management;</li>
 <li>Bytes processed and billed, slot milliseconds and cache hits for every query, as span
 fields and as results;</li>
@@ -244,8 +245,7 @@ JSON;</li>
 Read, so its typed path is a <code>SELECT *</code> query, which took 95.2 s and billed the whole
 table every run;</li>
 <li>a 1M-row Storage Write from structures takes 34.0 s against 35.4 s, with 18% fewer bytes
-sent as protobuf than the official crate’s Arrow. I think the smaller requests are why it
-is a bit faster.</li>
+sent as protobuf than the official crate’s Arrow.</li>
 </ul>
 </li>
 <li><strong>Observability.</strong> Every query, read and write span carries what BigQuery reports: bytes
@@ -794,9 +794,9 @@ stops the reading, and does not cancel the job, see <a href="#cancellation">Canc
 <p>Rows of a large result come from several read streams at once, so they arrive in no particular
 order, even with <code>ORDER BY</code>. A result that comes inline keeps its order. If the order matters for a
 large result, sort the rows on your side, or ask for one read stream with
-<code>.read_options(BigQueryReadOptions::new().with_max_stream_count(1))</code>. I think one stream keeps the
-order of the result, Google’s Python client does the same for <code>ORDER BY</code> queries, but the library
-does not test it.</p>
+<code>.read_options(BigQueryReadOptions::new().with_max_stream_count(1))</code>. Google’s Python client asks
+for one stream for <code>ORDER BY</code> queries. The library does not test that one stream keeps the order
+of the result.</p>
 <p>To get the result as Arrow, without serde, use <code>record_batches()</code> directly on the query:</p>
 <pre><code class="language-rust no_run">use bigquery::*;
 use futures::TryStreamExt;
@@ -1337,11 +1337,11 @@ billed. Neither is a query answered from the query cache;</li>
 projection from your structure does it for you, see
 <a href="#selecting-columns">Selecting columns</a>.</li>
 </ul>
-<p>So for a scan of a large table a table read is probably much cheaper, a bit more than a sixth of
-the query price per byte, and free under the monthly allowance. In the
+<p>So for a scan of a large table a table read is much cheaper: a bit more than a sixth of the
+query price per byte, and free under the monthly allowance. In the
 <a href="#cost">benchmarks</a> the 215 MB table scans went through the Storage Read free
-tier, while each <code>SELECT *</code> scan of the official crate billed the table. I didn’t measure whether a row
-filter reduces the bytes billed for a table read, so I would not count on it.</p>
+tier, while each <code>SELECT *</code> scan of the official crate billed the table. Row filters were not
+measured for bytes billed, so do not count on a filter making a table read cheaper.</p>
 <p><code>.maximum_bytes_billed(..)</code> makes a query fail without running if it would bill more, and a
 <a href="#dry-run">dry run</a> tells you the bytes before you run it.</p>
 <h2 id="which-one-to-use"><a class="header" href="#which-one-to-use">Which one to use</a></h2>
@@ -1350,7 +1350,7 @@ filter reduces the bytes billed for a table read, so I would not count on it.</p
 orders of this customer”. It needs no job, reads in parallel and resumes by itself;</li>
 <li><strong>Joins, aggregates, ordering, <code>LIMIT</code>, views or computed columns</strong>: a query, with named
 parameters for every value;</li>
-<li><strong>A small lookup, a few rows by key</strong>: probably a query. Short query mode returns it in one
+<li><strong>A small lookup, a few rows by key</strong>: a query. Short query mode returns it in one
 call, while a table read opens a session first;</li>
 <li><strong>DML, DDL, or when you need job stats, labels on the job or a dry run</strong>: a query;</li>
 <li><strong>Arrow for your own processing</strong>: either, both have <code>record_batches()</code>.</li>
@@ -2332,6 +2332,101 @@ empty column name or one with <code>.</code> or a control character, two columns
 <code>primary_key</code> with no columns, <code>partition_expiration</code> without partitioning and <code>snapshot_first()</code>
 without a recreate opt-in. These fail <code>.plan()</code> and <code>.sync()</code> with <code>InvalidParametersError</code>
 before any request. Lengths, naming rules and label rules are left to BigQuery.</p>
+<h2 id="inferring-the-columns-from-a-structure"><a class="header" href="#inferring-the-columns-from-a-structure">Inferring the columns from a structure</a></h2>
+<p>The library can also infer the columns from the structure you read and write the table with, so
+the declaration does not repeat every field. <code>from_type::&lt;T&gt;()</code> goes through the structure’s
+<code>Deserialize</code>, the same serde path the library’s codecs use, and gives one column per field, in
+declaration order:</p>
+<pre><code class="language-rust no_run">use bigquery::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Address {
+    city: String,
+    street: Option&lt;String&gt;,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Order {
+    id: i64,
+    customer: Option&lt;String&gt;,
+    total: String,
+    shipping: Option&lt;Address&gt;,
+    tags: Vec&lt;String&gt;,
+    placed_at: jiff::Timestamp,
+}
+
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let report = db
+    .fluent()
+    .schema()
+    .table(SHOP.table(ORDERS))
+    .columns(|columns| {
+        columns
+            .from_type::&lt;Order&gt;()
+            .with(path!(Order::total), |total| total.numeric_with(10, 2))
+            .with(path!(Order::shipping~city), |city| city.string_with_max_length(64))
+            .with(path!(Order::placed_at), |placed_at| {
+                placed_at.description("When the customer placed the order")
+            })
+    })
+    .primary_key([path!(Order::id)])
+    .partition_by_day(path!(Order::placed_at))
+    .sync()
+    .await?;
+println!("{report}");
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Each field maps by the <a href="#type-mapping">type mapping</a>:</p>
+<ul>
+<li><code>Option&lt;T&gt;</code> is NULLABLE, a bare <code>T</code> is REQUIRED, <code>Vec&lt;T&gt;</code> and <code>Option&lt;Vec&lt;T&gt;&gt;</code> are REPEATED;</li>
+<li>integers are INT64, floats FLOAT64, <code>bool</code> BOOL, <code>Vec&lt;u8&gt;</code> BYTES;</li>
+<li><code>jiff::Timestamp</code> is TIMESTAMP and <code>jiff::civil::Time</code> is TIME;</li>
+<li>the temporal wrappers, <code>BigQueryDecimal&lt;T&gt;</code> (NUMERIC), <code>BigQueryJson&lt;T&gt;</code>, <code>BigQueryInterval</code> and
+<code>BigQueryRange&lt;T&gt;</code> are their own types;</li>
+<li><code>String</code>, unit enums and any other type that reads from a string are STRING;</li>
+<li>a structure is a RECORD, with its fields inferred the same way.</li>
+</ul>
+<p>Serde attributes are followed: <code>rename</code> and <code>rename_all</code> name the column, <code>skip</code> leaves the field
+out, an <code>alias</code> adds no column, and <code>default</code> does not change the mode.</p>
+<p>An aliased field infers as it would without the alias. Inference tells an alias from the field’s
+own name by building a sample value of the field, and a type that reads only its own text form,
+such as <code>uuid::Uuid</code>, has no sample value. An alias on a REQUIRED field of such a type is told
+apart only when that field is the one field of the structure without a sample value, and is not
+<code>#[serde(default)]</code>. Otherwise each name that cannot be told apart is refused at its own path with
+<code>UnresolvedAlias</code>, and the structure is declared with <code>fields([..])</code>.</p>
+<p>Be aware of the modes. An inferred bare <code>T</code> is REQUIRED, while a column declared by hand with
+<code>field(..)</code> is NULLABLE until <code>required()</code>. So moving <code>customer: String</code> from
+<code>columns.field("customer").string()</code> to <code>from_type</code> makes the column REQUIRED, and BigQuery cannot
+make an existing NULLABLE column REQUIRED in place. Use <code>Option&lt;String&gt;</code> in the structure, or
+<code>.with(path!(Order::customer), |customer| customer.nullable())</code>.</p>
+<p><code>.with(path, |column| ..)</code> changes one inferred column. The closure gets the column as it was
+inferred:</p>
+<ul>
+<li><code>description(..)</code>, <code>default_value(..)</code> and <code>renamed_from(..)</code> keep its type and mode;</li>
+<li>a type method such as <code>numeric()</code> replaces the type and keeps the mode;</li>
+<li><code>nullable()</code>, <code>required()</code> and <code>repeated()</code> change the mode;</li>
+<li>a dotted path reaches a field of a RECORD, <code>path!(Order::shipping~city)</code> steps through the
+<code>Option</code>;</li>
+<li>on a RECORD column a type method such as <code>json()</code> drops its fields, and <code>record(..)</code> replaces
+them.</li>
+</ul>
+<p>Some types do not tell the column type, and need <code>.with</code>:</p>
+<ul>
+<li>NUMERIC, BIGNUMERIC, GEOGRAPHY and JSON held in a <code>String</code> are inferred as STRING;</li>
+<li>a plain <code>jiff::civil::Date</code> and <code>jiff::civil::DateTime</code> read the same text forms, so the library
+cannot tell DATE from DATETIME and leaves the type to you. The <code>BigQueryDate</code> and
+<code>BigQueryDateTime</code> wrappers, and <code>serialize_as_date</code>/<code>serialize_as_datetime</code>, are inferred;</li>
+<li><code>serde_json::Value</code>, maps, enums with data and arrays of arrays get no type.</li>
+</ul>
+<p>A column without an inferred type, or a <code>.with</code> path that names no column, fails <code>.plan()</code> and
+<code>.sync()</code> with <code>SchemaInferenceError</code> before any request, and the error carries the column path.
+A structure with <code>#[serde(flatten)]</code> does not list its fields at all, so declare its table with
+<code>fields([..])</code>.</p>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/schema-sync.rs">here</a>.</p>
 <h2 id="plan-versus-sync"><a class="header" href="#plan-versus-sync">plan() versus sync()</a></h2>
 <p><code>.plan()</code> is read-only. It sends one <code>GetTable</code> (and <code>ListRowAccessPolicies</code> when a recreate is
 planned) and reports what <code>.sync()</code> would do, writing nothing.</p>
@@ -3599,11 +3694,11 @@ every time.</li>
 <li>The library was 10 ms behind the official crate in the query run and 41 ms in the full run
 (0.130 s against 0.089 s). To check whether that is the code, the 0.5.0 release, this commit
 and the official crate ran <code>SELECT 1</code> interleaved in one script, 20 rounds each, every round
-on a quiet machine: 0.094 s, 0.096 s and 0.091 s. So I think the gap comes from the network
-between runs.</li>
+on a quiet machine: 0.094 s, 0.096 s and 0.091 s. The cause of the larger gap in the runs
+above was not measured.</li>
 </ul>
 <p>About 0.6 s of every <code>bq</code> run is the CLI starting up (<code>bq version</code> timed in each run); the rest
-probably is its job insert and polling, I didn’t check.</p>
+was not broken down.</p>
 <h2 id="large-query-result"><a class="header" href="#large-query-result">Large query result</a></h2>
 <p>200,000 generated rows of 4 columns, read as typed rows, from the query run:</p>
 <div class="table-wrapper">
@@ -3638,8 +3733,8 @@ same path, the others 1.218-1.429 s.</p>
 <p>The library reads the destination table through Storage Read once the result does not fit in
 the first response, while the official crate and Python iterate REST pages. The official crate
 spent 0.018 s of its 3.8-4.7 s in <code>FromRow</code>, so nearly all of its time is the paging itself.</p>
-<p>Python takes the same Storage Read path for <code>to_arrow()</code> and is still twice as slow. I guess it
-is the extra metadata calls before the read session, but I didn’t measure that.</p>
+<p>Python takes the same Storage Read path for <code>to_arrow()</code> and is still twice as slow. Where its
+extra time goes was not measured.</p>
 <h2 id="table-scan"><a class="header" href="#table-scan">Table scan</a></h2>
 <p>The whole 1M-row table, every column, from the full run. MB/s is the table’s 215 MB divided by
 the median.</p>
@@ -3673,8 +3768,8 @@ the median.</p>
 query bills the table: 215 MB per run. Its <code>FromRow</code> took about 1.09 s of the 95 s.</p>
 <p>Raw Arrow scans are about the same speed in all three clients, and the library has no advantage
 there. The official crate was 7% slower in this run and 1% faster in the previous one, on
-2026-10-04, so I don’t count it. Every client moved about 150 MB per scan on the network
-interface at 14-16 MB/s, so I think this connection is the limit, not the clients.</p>
+2026-10-04, so the difference is within the variation between runs. Every client moved about
+150 MB per scan on the network interface at the same 14-16 MB/s.</p>
 <p>Python’s <code>to_dataframe()</code> builds a pandas frame with typed columns, not row objects, so it is the
 closest Python has to typed rows rather than the same thing.</p>
 <h2 id="storage-write"><a class="header" href="#storage-write">Storage Write</a></h2>
@@ -3693,10 +3788,9 @@ closest Python has to typed rows rather than the same thing.</p>
 </table>
 </div>
 <p>Both times include turning the Rust rows into the wire format. The library sent 18% fewer bytes
-and was a bit faster, but the ranges overlap. On the network interface the library ran at about
-5.8 MB/s and the official crate at about 6.7 MB/s, so the upload of this connection is probably
-not the whole limit. I think the smaller requests are why the library is a bit faster, but that is
-not measured.</p>
+and was slightly faster, but the ranges overlap. On the network interface the library ran at
+about 5.8 MB/s and the official crate at about 6.7 MB/s, so the upload of this connection is not
+the only limit. Whether the smaller requests explain the difference was not measured.</p>
 <p>From Arrow record batches, from the rerun:</p>
 <div class="table-wrapper">
 <table>
@@ -3739,8 +3833,8 @@ from the full run:</p>
 query, and <code>Row</code> has no public constructor, so it cannot be fed the same batches. Inside the REST
 scan above its conversion took about 1.09 s per 1M rows, but on already parsed JSON values, so the
 two numbers are not comparable.</p>
-<p>In the library the decode runs on each read stream’s task, next to the network reads, which is
-probably why typed and Arrow scans take almost the same time.</p>
+<p>In the library the decode runs on each read stream’s task, next to the network reads, and typed
+and Arrow scans take almost the same time.</p>
 <h2 id="cost"><a class="header" href="#cost">Cost</a></h2>
 <p>The full run billed 1.29 GB of queries, all of them the official crate’s <code>SELECT *</code> scans. The
 query run and the Arrow write rerun billed 0 bytes. Every other query read generated rows and

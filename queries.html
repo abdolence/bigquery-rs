@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f85a9c76.js";
+            window.path_to_searchindex_js = "searchindex-8dbe98b0.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -250,9 +250,9 @@ stops the reading, and does not cancel the job, see <a href="#cancellation">Canc
 <p>Rows of a large result come from several read streams at once, so they arrive in no particular
 order, even with <code>ORDER BY</code>. A result that comes inline keeps its order. If the order matters for a
 large result, sort the rows on your side, or ask for one read stream with
-<code>.read_options(BigQueryReadOptions::new().with_max_stream_count(1))</code>. I think one stream keeps the
-order of the result, Google’s Python client does the same for <code>ORDER BY</code> queries, but the library
-does not test it.</p>
+<code>.read_options(BigQueryReadOptions::new().with_max_stream_count(1))</code>. Google’s Python client asks
+for one stream for <code>ORDER BY</code> queries. The library does not test that one stream keeps the order
+of the result.</p>
 <p>To get the result as Arrow, without serde, use <code>record_batches()</code> directly on the query:</p>
 <pre><code class="language-rust no_run">use bigquery::*;
 use futures::TryStreamExt;
