@@ -159,7 +159,14 @@ Each field maps by the [type mapping](types.md):
 - a structure is a RECORD, with its fields inferred the same way.
 
 Serde attributes are followed: `rename` and `rename_all` name the column, `skip` leaves the field
-out, an `alias` is not a column of its own, and `default` does not change the mode.
+out, an `alias` adds no column, and `default` does not change the mode.
+
+An aliased field infers as it would without the alias. Inference tells an alias from the field's
+own name by building a sample value of the field, and a type that reads only its own text form,
+such as `uuid::Uuid`, has no sample value. An alias on a REQUIRED field of such a type is told
+apart only when that field is the one field of the structure without a sample value, and is not
+`#[serde(default)]`. Otherwise each name that cannot be told apart is refused at its own path with
+`UnresolvedAlias`, and the structure is declared with `fields([..])`.
 
 Be aware of the modes. An inferred bare `T` is REQUIRED, while a column declared by hand with
 `field(..)` is NULLABLE until `required()`. So moving `customer: String` from
