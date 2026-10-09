@@ -194,7 +194,6 @@ pub(crate) fn pack_datetime(micros: i64) -> i64 {
 }
 
 /// The inverse of [`pack_time`].
-#[cfg(any(test, feature = "testing"))]
 pub(crate) fn unpack_time(packed: i64) -> i64 {
     let micros = packed & 0xF_FFFF;
     let fields = packed >> 20;
@@ -203,7 +202,6 @@ pub(crate) fn unpack_time(packed: i64) -> i64 {
 }
 
 /// The inverse of [`pack_datetime`]. `OutOfRange` for a year, month and day that are no date.
-#[cfg(any(test, feature = "testing"))]
 pub(crate) fn unpack_datetime(packed: i64) -> Result<i64, CodecError> {
     let micros = packed & 0xF_FFFF;
     let fields = packed >> 20;

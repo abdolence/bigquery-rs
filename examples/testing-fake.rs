@@ -2,8 +2,7 @@
 //! scripted query, a write whose rows are read back, a failure the client retries past, and a
 //! lost append acknowledgement on the default stream and on an exactly-once write.
 //!
-//! Needs no credentials and no network. Run with
-//! `cargo run --example testing-fake --features testing`.
+//! Needs no credentials and no network. Run with `cargo run --example testing-fake`.
 
 use bigquery::testing::{BigQueryFake, BigQueryFakeCode, BigQueryFakeFault, BigQueryFakeRpc};
 use bigquery::*;

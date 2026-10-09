@@ -44,7 +44,6 @@ mod type_mapping {}
 #[doc = include_str!("../docs/src/observability.md")]
 mod observability {}
 
-#[cfg(feature = "testing")]
 #[doc = include_str!("../docs/src/testing.md")]
 mod testing {}
 

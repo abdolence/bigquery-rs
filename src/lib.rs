@@ -100,7 +100,6 @@ mod admin;
 
 pub use admin::*;
 
-#[cfg(feature = "testing")]
 pub mod testing;
 
 mod struct_path_macro;

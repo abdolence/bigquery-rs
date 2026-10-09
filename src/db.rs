@@ -21,7 +21,6 @@ pub use table_ref::*;
 mod support;
 pub(crate) use support::*;
 
-#[cfg(any(test, feature = "testing"))]
 pub(crate) mod fake;
 
 use crate::errors::BigQueryError;

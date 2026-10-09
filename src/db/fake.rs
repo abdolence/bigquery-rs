@@ -210,14 +210,6 @@ impl FakeCall {
     }
 
     /// The request header `name` as text, if the call carries it.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "bigquery::testing reads the if-match precondition of dataset and table \
-                      updates with it"
-        )
-    )]
     pub fn header(&self, name: &str) -> Option<String> {
         self.headers
             .get(name)

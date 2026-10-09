@@ -416,7 +416,6 @@ impl From<&BigQueryTableSchema> for v2::TableSchema {
 }
 
 /// The Storage API type of a column of this kind.
-#[cfg(feature = "testing")]
 impl From<FieldKind> for StorageType {
     fn from(kind: FieldKind) -> Self {
         match kind {
@@ -442,7 +441,6 @@ impl From<FieldKind> for StorageType {
 
 /// A column as `GetWriteStream` and `CreateWriteStream` return it, which reads back as the
 /// same column.
-#[cfg(feature = "testing")]
 impl From<&BigQueryFieldSchema> for storage::TableFieldSchema {
     fn from(field: &BigQueryFieldSchema) -> Self {
         let mut out = storage::TableFieldSchema {
@@ -488,7 +486,6 @@ impl From<&BigQueryFieldSchema> for storage::TableFieldSchema {
 }
 
 /// The schema `GetWriteStream` and `CreateWriteStream` return.
-#[cfg(feature = "testing")]
 impl From<&BigQueryTableSchema> for storage::TableSchema {
     fn from(schema: &BigQueryTableSchema) -> Self {
         storage::TableSchema {

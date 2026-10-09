@@ -74,7 +74,6 @@ pub(crate) enum RetryBackoff {
     FullJitter,
     /// No delay, for a client of the in-process fake, whose failures are scripted and whose
     /// tests should not wait out a backoff meant for a real backend.
-    #[cfg(feature = "testing")]
     Immediate,
 }
 
@@ -83,7 +82,6 @@ impl RetryBackoff {
     pub(crate) fn delay(self, retries: usize) -> Duration {
         match self {
             RetryBackoff::FullJitter => retry_delay(retries),
-            #[cfg(feature = "testing")]
             RetryBackoff::Immediate => Duration::ZERO,
         }
     }

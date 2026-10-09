@@ -193,7 +193,6 @@ pub(crate) fn decimal_le_bytes(unscaled: i256) -> ([u8; 32], usize) {
 
 /// The inverse of [`decimal_le_bytes`]: little-endian two's complement of up to 32 bytes,
 /// sign-extended. Bytes beyond 32 are ignored.
-#[cfg(any(test, feature = "testing"))]
 pub(crate) fn decimal_from_le_bytes(bytes: &[u8]) -> i256 {
     let negative = bytes.last().is_some_and(|byte| byte & 0x80 != 0);
     let mut buffer = if negative { [0xff; 32] } else { [0; 32] };
