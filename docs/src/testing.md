@@ -167,7 +167,9 @@ A table read is served the table's rows, projected to the selected columns. The 
 no filter, so a read with a row restriction needs a rule, `fake.read(table).row_restriction(..)`,
 with the rows it returns. `fake.reject_rows::<T>(table, reason, |row| ...)` fails each append
 request that has a row the predicate accepts, with a row error per such row, and writes nothing
-of that request, as BigQuery does.
+of that request, as BigQuery does. A row written from a serde type fails the same way when it has
+a value beyond the precision of its `NUMERIC(p,s)` or `BIGNUMERIC(p,s)` column, and a value with
+more decimal places than the scale is rounded.
 
 A CDC writer's rows are recorded as changes and not applied to the table's rows.
 `fake.changes::<T>(table)` returns them, each with its change type and sequence number.
@@ -177,9 +179,9 @@ the fake's state, and the admin calls are served from it.
 
 ## Faults and retries
 
-A query rule's `fails` scripts the failure of a query. `fake.fault(rpc)` does the same for every
-other RPC, and `.on_table(..)` narrows it to the calls on one table. A fault answers before every
-rule and before the tables, as one of:
+A query rule's `fails` scripts the failure of a query. `fake.fault(rpc).fails(..)` does the same
+for every other RPC, and `.on_table(..)` narrows it to the calls on one table. A fault answers
+before every rule and before the tables, as one of:
 
 - `BigQueryFakeFault::status(code, message)`, a gRPC status, which the client maps as it maps
   BigQuery's own: `NotFound` is a `DataNotFoundError`, `Unavailable` a retryable
@@ -402,10 +404,10 @@ The fake does not provide:
 - failures in the middle of a read stream, and partial acknowledgements of an append;
 - polling of running jobs, other than for `fails_job` and queries with a destination table;
 - CDC changes applied to the table's rows;
-- Arrow appends in Arrow types other than the table's own;
-- the server side checks of `STRING(n)`, `NUMERIC(p,s)`, default values, request limits and
-  quotas;
-- paging: a list call returns one page;
+- Arrow appends in Arrow types other than the table's own, and the precision check of their
+  decimal values;
+- the server side checks of `STRING(n)`, default values, request limits and quotas;
+- a read that selects a field of a STRUCT column, such as `.fields(["address.city"])`;
 - `ListJobs`, `DeleteJob`, models, routines, row access policies, table snapshots and copies.
 
 Full example available [here](https://github.com/abdolence/bigquery-rs/blob/master/examples/testing-fake.rs).
