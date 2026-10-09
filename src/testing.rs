@@ -71,7 +71,7 @@
 //! let fake = BigQueryFake::start().await?;
 //! let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
 //! let rule = fake
-//!     .query(ORDERS_OF)
+//!     .when_query_match(ORDERS_OF)
 //!     .param("customer", "Alice")
 //!     .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
 //!
@@ -134,13 +134,13 @@
 //! let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
 //! let unavailable =
 //!     || BigQueryFakeFault::status(BigQueryFakeCode::Unavailable, "backend went away");
-//! let lost = fake.query(ORDERS_OF).times(1).fails(unavailable())?;
+//! let lost = fake.when_query_match(ORDERS_OF).times(1).fails(unavailable())?;
 //! let answer = fake
-//!     .query(ORDERS_OF)
+//!     .when_query_match(ORDERS_OF)
 //!     .param("customer", "Alice")
 //!     .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
 //! let outage = fake
-//!     .query(ORDERS_OF)
+//!     .when_query_match(ORDERS_OF)
 //!     .param("customer", "Bob")
 //!     .fails(unavailable())?;
 //!
@@ -161,6 +161,7 @@
 //! next timer whenever it is idle, and waiting on the fake's loopback socket counts as idle.
 
 mod admin;
+mod matcher;
 mod query;
 mod read;
 mod rows;
@@ -170,6 +171,7 @@ mod server;
 mod state;
 mod write;
 
+pub use matcher::BigQueryFakeQuery;
 pub use rules::{
     BigQueryFakeCode, BigQueryFakeFault, BigQueryFakeJobFailure, BigQueryFakeRpc, BigQueryFakeRule,
 };
@@ -180,8 +182,8 @@ use crate::query::{parameter_mode, ParamList};
 use crate::read::BigQueryBatchRows;
 use crate::testing::rows::ProtoBatchBuilder;
 use crate::testing::rules::{
-    FaultRule, QueryAnswer, QueryReply, QueryRule, ReadRule, RejectRule, ShownParameters,
-    SqlMatcher,
+    FaultRule, QueryAnswer, QueryMatcher, QueryReply, QueryRule, ReadRule, RejectRule,
+    ShownParameters,
 };
 use crate::testing::server::FakeShared;
 use crate::testing::state::{DatasetKey, FakeTable, TableKey};
@@ -235,17 +237,22 @@ impl BigQueryFake {
     /// Starts a rule for the statement whose SQL equals `sql` exactly: no whitespace or case
     /// folding, so the rule matches only the text the code under test sends. A statement from
     /// [`sql_file!`](crate::sql_file!) matches by its file's text.
-    pub fn query(&self, sql: impl Into<BigQuerySql>) -> BigQueryFakeQueryBuilder<'_> {
+    pub fn when_query_match(&self, sql: impl Into<BigQuerySql>) -> BigQueryFakeQueryBuilder<'_> {
         let (sql, _) = sql.into().into_parts();
-        BigQueryFakeQueryBuilder::new(self, SqlMatcher::Exact(sql))
+        BigQueryFakeQueryBuilder::new(self, QueryMatcher::Exact(sql))
     }
 
-    /// Starts a rule for every statement whose SQL `sql` accepts.
-    pub fn query_matching<F>(&self, sql: F) -> BigQueryFakeQueryBuilder<'_>
+    /// Starts a rule for every call `matcher` accepts, given the call's SQL and its parameters
+    /// as a [`BigQueryFakeQuery`].
+    ///
+    /// The matcher runs for each query and job call that reaches its rule, while the fake holds
+    /// its rules, so a matcher that blocks holds up every other call. A matcher that panics
+    /// fails the call with `Internal` and fails [`verify`](Self::verify).
+    pub fn when_query<F>(&self, matcher: F) -> BigQueryFakeQueryBuilder<'_>
     where
-        F: Fn(&str) -> bool + Send + Sync + 'static,
+        F: Fn(&BigQueryFakeQuery<'_>) -> bool + Send + Sync + 'static,
     {
-        BigQueryFakeQueryBuilder::new(self, SqlMatcher::Matching(Box::new(sql)))
+        BigQueryFakeQueryBuilder::new(self, QueryMatcher::Matching(Box::new(matcher)))
     }
 
     /// Creates the dataset. A dataset without a project is in the client's.
@@ -290,7 +297,7 @@ impl BigQueryFake {
     /// Starts a rule for the read sessions of an existing table. A session without a row
     /// restriction is served the table's rows when no rule answers it; one with a row
     /// restriction needs a rule, since the fake does not evaluate filters.
-    pub fn read(&self, table: impl Into<BigQueryTableRef>) -> BigQueryFakeReadBuilder<'_> {
+    pub fn when_read(&self, table: impl Into<BigQueryTableRef>) -> BigQueryFakeReadBuilder<'_> {
         BigQueryFakeReadBuilder {
             fake: self,
             table: table.into(),
@@ -301,7 +308,7 @@ impl BigQueryFake {
 
     /// Starts a fault for the calls of `rpc`. Faults answer before every other rule and before
     /// the tables.
-    pub fn fault(&self, rpc: BigQueryFakeRpc) -> BigQueryFakeFaultBuilder<'_> {
+    pub fn when_fault(&self, rpc: BigQueryFakeRpc) -> BigQueryFakeFaultBuilder<'_> {
         BigQueryFakeFaultBuilder {
             fake: self,
             rpc,
@@ -316,7 +323,7 @@ impl BigQueryFake {
     ///
     /// The rows are read as `T`, as [`rows`](Self::rows) reads them, before `rejects` sees
     /// them.
-    pub fn reject_rows<T, F>(
+    pub fn when_rows_rejected<T, F>(
         &self,
         table: impl Into<BigQueryTableRef>,
         reason: impl Into<String>,
@@ -328,7 +335,8 @@ impl BigQueryFake {
     {
         let table = TableKey::resolve(&table.into(), self.shared.project());
         let reason = reason.into();
-        let rule = BigQueryFakeRule::unlimited(format!("reject_rows on {table}: {reason:?}"));
+        let rule =
+            BigQueryFakeRule::unlimited(format!("when_rows_rejected on {table}: {reason:?}"));
         self.shared.rules().add_rejection(RejectRule {
             table,
             reason,
@@ -398,8 +406,8 @@ impl BigQueryFake {
     }
 }
 
-/// A query rule being built, from [`BigQueryFake::query`] or
-/// [`BigQueryFake::query_matching`]: add the parameters it expects, then pick what it answers
+/// A query rule being built, from [`BigQueryFake::when_query_match`] or
+/// [`BigQueryFake::when_query`]: add the parameters it expects, then pick what it answers
 /// with.
 ///
 /// The builder methods never fail. A parameter that cannot be encoded, or a
@@ -409,17 +417,17 @@ impl BigQueryFake {
 #[must_use]
 pub struct BigQueryFakeQueryBuilder<'a> {
     fake: &'a BigQueryFake,
-    sql: SqlMatcher,
+    matcher: QueryMatcher,
     parameters: ParamList,
     times: Option<usize>,
     bytes_processed: Option<i64>,
 }
 
 impl<'a> BigQueryFakeQueryBuilder<'a> {
-    fn new(fake: &'a BigQueryFake, sql: SqlMatcher) -> Self {
+    fn new(fake: &'a BigQueryFake, matcher: QueryMatcher) -> Self {
         Self {
             fake,
-            sql,
+            matcher,
             parameters: ParamList::default(),
             times: None,
             bytes_processed: None,
@@ -567,13 +575,13 @@ impl BigQueryFakeQueryBuilder<'_> {
     fn register(self, answer: QueryAnswer) -> BigQueryResult<BigQueryFakeRule> {
         let parameters = self.parameters.into_parameters()?;
         parameter_mode(&parameters)?;
-        let mut description = self.sql.to_string();
+        let mut description = self.matcher.to_string();
         if !parameters.is_empty() {
             description.push_str(&format!(" with {}", ShownParameters(&parameters)));
         }
         let rule = BigQueryFakeRule::limited(description, self.times)?;
         self.fake.shared.rules().add_query(QueryRule {
-            sql: self.sql,
+            matcher: self.matcher,
             parameters: (!parameters.is_empty()).then_some(parameters),
             reply: Arc::new(QueryReply {
                 answer,
@@ -650,7 +658,7 @@ impl BigQueryFakeTableBuilder<'_> {
     }
 }
 
-/// A rule for the read sessions of one table, from [`BigQueryFake::read`].
+/// A rule for the read sessions of one table, from [`BigQueryFake::when_read`].
 #[derive(Debug)]
 #[must_use]
 pub struct BigQueryFakeReadBuilder<'a> {
@@ -703,7 +711,7 @@ impl BigQueryFakeReadBuilder<'_> {
     }
 }
 
-/// A fault being built, from [`BigQueryFake::fault`].
+/// A fault being built, from [`BigQueryFake::when_fault`].
 #[derive(Debug)]
 #[must_use]
 pub struct BigQueryFakeFaultBuilder<'a> {
@@ -819,7 +827,7 @@ mod tests {
             unpaid(2, "Alice", -0.5),
         ];
         let rule = fake
-            .query(ORDERS_OF)
+            .when_query_match(ORDERS_OF)
             .returns_rows(|columns| columns.from_type::<Order>(), &orders)?;
 
         let (rows, stats) = fake
@@ -841,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn an_unmatched_query_fails_verify() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query("SELECT 1")
+        fake.when_query_match("SELECT 1")
             .returns_rows(|columns| columns.from_type::<Order>(), Vec::<Order>::new())?;
 
         let unmatched = orders_of(fake.db(), "Alice").await;
@@ -863,7 +871,7 @@ mod tests {
         let fake = BigQueryFake::start().await?;
         let orders = vec![unpaid(1, "Alice", 120.0)];
         let rule = fake
-            .query(ORDERS_OF)
+            .when_query_match(ORDERS_OF)
             .times(2)
             .returns_rows(|columns| columns.from_type::<Order>(), &orders)?;
 
@@ -880,11 +888,11 @@ mod tests {
         let alice = vec![unpaid(1, "Alice", 120.0)];
         let anyone = vec![paid(2, "Bob", 80.5, b"r-2"), unpaid(3, "Carol", 7.0)];
         let for_alice = fake
-            .query(ORDERS_OF)
+            .when_query_match(ORDERS_OF)
             .param("customer", "Alice")
             .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
         let for_anyone = fake
-            .query(ORDERS_OF)
+            .when_query_match(ORDERS_OF)
             .returns_rows(|columns| columns.from_type::<Order>(), &anyone)?;
 
         assert_eq!(orders_of(fake.db(), "Bob").await?, anyone);
@@ -914,7 +922,7 @@ mod tests {
         let fake = BigQueryFake::start().await?;
 
         let registered = fake
-            .query(ORDERS_OF)
+            .when_query_match(ORDERS_OF)
             .param("customer", "Alice")
             .positional_param(1)
             .returns_rows(|columns| columns.from_type::<Order>(), Vec::<Order>::new());
@@ -931,7 +939,7 @@ mod tests {
     #[tokio::test]
     async fn named_parameters_must_equal_the_rule_as_a_set() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(ORDERS_OF)
+        fake.when_query_match(ORDERS_OF)
             .param("customer", "Alice")
             .param("customer", "Alice")
             .returns_rows(|columns| columns.from_type::<Order>(), Vec::<Order>::new())?;
@@ -950,6 +958,164 @@ mod tests {
             Err(BigQueryError::DatabaseError(err)) => assert_eq!(err.public.code, "Unimplemented"),
             other => panic!("expected the call to go unmatched, got {other:?}"),
         }
+        assert!(drop_panics(fake));
+        Ok(())
+    }
+
+    fn assert_unmatched<T: Debug>(call: &BigQueryResult<T>) {
+        match call {
+            Err(BigQueryError::DatabaseError(err)) => assert_eq!(err.public.code, "Unimplemented"),
+            other => panic!("expected the call to go unmatched, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_when_query_matcher_sees_the_sql_and_a_named_param() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let alice = vec![unpaid(1, "Alice", 120.0)];
+        let rule = fake
+            .when_query(|query| {
+                query.sql() == ORDERS_OF
+                    && query.param::<String>("customer").as_deref() == Some("Alice")
+            })
+            .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
+
+        assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
+        assert_unmatched(&orders_of(fake.db(), "Bob").await);
+
+        assert_eq!(rule.calls(), 1);
+        assert!(drop_panics(fake));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_when_query_matcher_reads_param_names_ignoring_case() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let alice = vec![unpaid(1, "Alice", 120.0)];
+        let rule = fake
+            .when_query(|query| query.param::<String>("CUSTOMER").as_deref() == Some("Alice"))
+            .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
+
+        assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
+
+        assert_eq!(rule.calls(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_when_query_matcher_sees_a_positional_param() -> BigQueryResult<()> {
+        const ORDER_BY_ID: &str =
+            "SELECT id, customer, total, paid, receipt FROM shop.orders WHERE id = ?";
+        let fake = BigQueryFake::start().await?;
+        let second = vec![unpaid(2, "Bob", 80.5)];
+        let rule = fake
+            .when_query(|query| query.positional_param::<i64>(0) == Some(2))
+            .returns_rows(|columns| columns.from_type::<Order>(), &second)?;
+        let order_by_id = |id: i64| {
+            fake.db()
+                .fluent()
+                .query(ORDER_BY_ID)
+                .positional_param(id)
+                .obj::<Order>()
+                .query()
+        };
+
+        assert_eq!(order_by_id(2).await?, second);
+        assert_unmatched(&order_by_id(3).await);
+
+        assert_eq!(rule.calls(), 1);
+        assert!(drop_panics(fake));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_named_param_that_does_not_decode_as_t_is_none() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let rule = fake
+            .when_query(|query| query.param::<i64>("customer").is_some())
+            .returns_rows(|columns| columns.from_type::<Order>(), Vec::<Order>::new())?;
+
+        assert_unmatched(&orders_of(fake.db(), "Alice").await);
+
+        assert_eq!(rule.calls(), 0);
+        assert!(drop_panics(fake));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn param_decodes_array_struct_and_range_values() -> BigQueryResult<()> {
+        use crate::{BigQueryDate, BigQueryRange};
+        use std::sync::Mutex;
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct Filter {
+            customer: String,
+            since: BigQueryDate,
+            tags: Vec<String>,
+        }
+
+        const FILTERED: &str = "SELECT id FROM shop.orders \
+            WHERE id IN UNNEST(@ids) AND customer = @filter.customer AND day <@ @days";
+        let day = |day: i8| BigQueryDate(jiff::civil::date(2024, 3, day));
+        let ids = vec![1_i64, 2, 3];
+        let filter = Filter {
+            customer: "Alice".into(),
+            since: day(1),
+            tags: vec!["vip".into(), "eu".into()],
+        };
+        let days = BigQueryRange {
+            start: Some(day(1)),
+            end: None,
+        };
+
+        type Seen = (
+            Option<Vec<i64>>,
+            Option<Filter>,
+            Option<BigQueryRange<BigQueryDate>>,
+        );
+        let fake = BigQueryFake::start().await?;
+        let seen: Arc<Mutex<Option<Seen>>> = Arc::default();
+        let recorded = seen.clone();
+        fake.when_query(move |query| {
+            *recorded.lock().expect("no test thread panics holding it") = Some((
+                query.param("ids"),
+                query.param("filter"),
+                query.param("days"),
+            ));
+            true
+        })
+        .returns_statement(BigQueryStatementType::Select)?;
+
+        fake.db()
+            .fluent()
+            .query(FILTERED)
+            .param("ids", &ids)
+            .param("filter", &filter)
+            .param("days", days)
+            .execute()
+            .await?;
+
+        let seen = seen
+            .lock()
+            .expect("no test thread panics holding it")
+            .take();
+        assert_eq!(seen, Some((Some(ids), Some(filter), Some(days))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn param_narrows_a_when_query_matcher() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let alice = vec![unpaid(1, "Alice", 120.0)];
+        let rule = fake
+            .when_query(|query| query.sql().starts_with("SELECT"))
+            .param("customer", "Alice")
+            .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
+
+        assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
+        assert_unmatched(&orders_of(fake.db(), "Bob").await);
+
+        assert_eq!(rule.calls(), 1);
         assert!(drop_panics(fake));
         Ok(())
     }

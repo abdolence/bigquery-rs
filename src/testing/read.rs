@@ -477,7 +477,7 @@ mod tests {
         let fake = fake_with(&[order(1, "Alice"), order(2, "Bob")], 1).await?;
         let bobs = vec![order(2, "Bob")];
         let rule = fake
-            .read(orders())
+            .when_read(orders())
             .row_restriction("customer = 'Bob'")
             .returns_rows(&bobs)?;
 
@@ -524,7 +524,7 @@ mod tests {
     async fn a_fault_refuses_the_session() -> BigQueryResult<()> {
         let fake = fake_with(&[order(1, "Alice")], 1).await?;
         let fault = fake
-            .fault(BigQueryFakeRpc::CreateReadSession)
+            .when_fault(BigQueryFakeRpc::CreateReadSession)
             .on_table(orders())
             .fails(BigQueryFakeFault::status(
                 BigQueryFakeCode::PermissionDenied,
@@ -546,7 +546,7 @@ mod tests {
         let rows = vec![order(1, "Alice"), order(2, "Bob")];
         let fake = fake_with(&rows, 1).await?;
         let fault = fake
-            .fault(BigQueryFakeRpc::ReadRows)
+            .when_fault(BigQueryFakeRpc::ReadRows)
             .on_table(orders())
             .times(1)
             .fails(BigQueryFakeFault::status(
@@ -656,7 +656,7 @@ mod tests {
     async fn a_read_rule_takes_a_column_added_after_it() -> BigQueryResult<()> {
         let fake = fake_with(&[], 1).await?;
         let bob = order(2, "Bob");
-        fake.read(orders())
+        fake.when_read(orders())
             .row_restriction("customer = 'Bob'")
             .returns_rows([&bob])?;
         fake.db()

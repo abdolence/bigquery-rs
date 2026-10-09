@@ -741,7 +741,7 @@ mod tests {
             updated: 3,
             deleted: 0,
         };
-        fake.query(CLOSE_ORDERS)
+        fake.when_query_match(CLOSE_ORDERS)
             .bytes_processed(4096)
             .returns_dml(BigQueryStatementType::Update, stats)?;
 
@@ -757,7 +757,7 @@ mod tests {
     #[tokio::test]
     async fn a_dry_run_reports_the_rows_schema_and_bytes() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .bytes_processed(2048)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
 
@@ -772,7 +772,7 @@ mod tests {
     #[tokio::test]
     async fn a_ddl_statement_reports_its_type_and_no_rows() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(CREATE_ARCHIVE)
+        fake.when_query_match(CREATE_ARCHIVE)
             .returns_statement(BigQueryStatementType::CreateTable)?;
 
         let outcome = fake.db().fluent().query(CREATE_ARCHIVE).execute().await?;
@@ -788,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn rows_beyond_max_results_go_to_the_hidden_job_table() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
 
         let outcome = fake.db().fluent().query(BEST_ORDERS).execute().await?;
@@ -816,7 +816,7 @@ mod tests {
     async fn a_destination_table_is_written_by_its_disposition() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
         fake.create_dataset(SHOP)?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
         let into = || fake.db().fluent().query(BEST_ORDERS);
 
@@ -844,7 +844,7 @@ mod tests {
     #[tokio::test]
     async fn a_destination_in_a_missing_dataset_is_not_found() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
 
         let refused = fake
@@ -871,7 +871,7 @@ mod tests {
     async fn rows_beyond_the_inline_limit_read_back_through_the_job_table() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
         let orders = vec![order(1, "Alice"), order(2, "Bob"), order(3, "Carol")];
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), &orders)?;
         let query = || fake.db().fluent().query(BEST_ORDERS).inline_rows_limit(1);
 
@@ -893,7 +893,7 @@ mod tests {
         })
         .rows(&held)
         .create()?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
 
         let refused = fake
@@ -915,7 +915,7 @@ mod tests {
     #[tokio::test]
     async fn get_job_reads_a_finished_query_job() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .bytes_processed(512)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
 
@@ -960,7 +960,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_job_stops_a_running_job() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(BEST_ORDERS).fails_job(invalid_query())?;
+        fake.when_query_match(BEST_ORDERS)
+            .fails_job(invalid_query())?;
         let response = fake
             .db()
             .job_client()
@@ -991,7 +992,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_a_finished_job_leaves_it_as_it_finished() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(CLOSE_ORDERS)
+        fake.when_query_match(CLOSE_ORDERS)
             .returns_statement(BigQueryStatementType::Update)?;
         let outcome = fake
             .db()
@@ -1014,7 +1015,7 @@ mod tests {
     async fn a_fault_answers_get_job_before_the_job_records() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
         let fault = fake
-            .fault(crate::testing::BigQueryFakeRpc::GetJob)
+            .when_fault(crate::testing::BigQueryFakeRpc::GetJob)
             .times(1)
             .fails(BigQueryFakeFault::status(
                 BigQueryFakeCode::PermissionDenied,
@@ -1039,7 +1040,7 @@ mod tests {
     #[tokio::test]
     async fn a_job_named_in_another_location_is_not_found() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.query(CLOSE_ORDERS)
+        fake.when_query_match(CLOSE_ORDERS)
             .returns_statement(BigQueryStatementType::Update)?;
         let outcome = fake
             .db()
@@ -1090,7 +1091,7 @@ mod tests {
             columns.from_type::<Customer>()
         })
         .create()?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
 
         let refused = fake
@@ -1119,7 +1120,7 @@ mod tests {
             })
         })
         .create()?;
-        fake.query(BEST_ORDERS)
+        fake.when_query_match(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
 
         fake.db()
@@ -1139,11 +1140,11 @@ mod tests {
         let first = AtomicBool::new(true);
         // The first call holds the rules while the second passes its own checks, so both
         // are in flight at once.
-        fake.query_matching(move |sql| {
+        fake.when_query(move |query| {
             if first.swap(false, Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(300));
             }
-            sql == CLOSE_ORDERS
+            query.sql() == CLOSE_ORDERS
         })
         .returns_statement(BigQueryStatementType::Update)?;
         let insert = || async {

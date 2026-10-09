@@ -64,7 +64,7 @@ async fn scripted_query() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
     let alice = vec![order(1, "Alice", 120.0), order(3, "Alice", 15.25)];
     let rule = fake
-        .query(ORDERS_OF)
+        .when_query_match(ORDERS_OF)
         .param("customer", "Alice")
         .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
 
@@ -95,14 +95,14 @@ async fn retried_failure() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
     let alice = vec![order(1, "Alice", 120.0)];
     let lost = fake
-        .query(ORDERS_OF)
+        .when_query_match(ORDERS_OF)
         .times(1)
         .fails(BigQueryFakeFault::status(
             BigQueryFakeCode::Unavailable,
             "backend went away",
         ))?;
     let answer = fake
-        .query(ORDERS_OF)
+        .when_query_match(ORDERS_OF)
         .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
 
     let found = orders_of(fake.db(), "Alice").await?;
@@ -119,7 +119,7 @@ async fn lost_append_acknowledgement() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
     fake.table(SHOP.table(ORDERS), |columns| columns.from_type::<Order>())
         .create()?;
-    fake.fault(BigQueryFakeRpc::AppendRows)
+    fake.when_fault(BigQueryFakeRpc::AppendRows)
         .times(1)
         .fails(BigQueryFakeFault::ConnectionDropped)?;
     save(fake.db(), &orders).await?;
@@ -134,7 +134,7 @@ async fn lost_append_acknowledgement() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
     fake.table(SHOP.table(ORDERS), |columns| columns.from_type::<Order>())
         .create()?;
-    fake.fault(BigQueryFakeRpc::AppendRows)
+    fake.when_fault(BigQueryFakeRpc::AppendRows)
         .times(1)
         .fails(BigQueryFakeFault::ConnectionDropped)?;
     save_exactly_once(fake.db(), &orders).await?;

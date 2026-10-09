@@ -2,6 +2,7 @@
 //! can answer with.
 
 use crate::errors::BigQueryError;
+use crate::testing::matcher::BigQueryFakeQuery;
 use crate::testing::state::TableKey;
 use crate::{BigQueryDmlStats, BigQueryResult, BigQueryStatementType, BigQueryTableSchema};
 use arrow_array::RecordBatch;
@@ -64,7 +65,8 @@ impl BigQueryFakeRule {
     }
 
     /// The RPCs this rule answered, retries included. For
-    /// [`reject_rows`](super::BigQueryFake::reject_rows), the append requests it rejected.
+    /// [`when_rows_rejected`](super::BigQueryFake::when_rows_rejected), the append requests it
+    /// rejected.
     pub fn calls(&self) -> usize {
         self.counter.calls.load(Ordering::SeqCst)
     }
@@ -334,40 +336,42 @@ impl BigQueryFakeJobFailure {
     }
 }
 
-/// Which statements a query rule matches.
-pub(super) enum SqlMatcher {
+/// Which calls a query rule matches.
+pub(super) enum QueryMatcher {
     /// The SQL text, compared exactly.
     Exact(String),
-    /// A test's predicate over the SQL text.
-    Matching(Box<dyn Fn(&str) -> bool + Send + Sync>),
+    /// A test's predicate over the call.
+    Matching(Box<dyn Fn(&BigQueryFakeQuery<'_>) -> bool + Send + Sync>),
 }
 
-impl SqlMatcher {
-    /// Whether `sql` matches.
+impl QueryMatcher {
+    /// Whether `query` matches.
     ///
     /// # Errors
     /// A panic of the test's predicate, as an internal failure of the fake: a server task that
     /// panics leaves its client waiting for an answer.
-    fn matches(&self, sql: &str) -> Result<bool, String> {
+    fn matches(&self, query: &BigQueryFakeQuery<'_>) -> Result<bool, String> {
         match self {
-            SqlMatcher::Exact(expected) => Ok(expected == sql),
-            SqlMatcher::Matching(predicate) => catch_unwind(AssertUnwindSafe(|| predicate(sql)))
-                .map_err(|_| format!("the query_matching predicate panicked on {sql:?}")),
+            QueryMatcher::Exact(expected) => Ok(expected == query.sql()),
+            QueryMatcher::Matching(predicate) => {
+                catch_unwind(AssertUnwindSafe(|| predicate(query)))
+                    .map_err(|_| format!("a when_query matcher panicked on {:?}", query.sql()))
+            }
         }
     }
 }
 
-/// `query "SQL"` or `query_matching(..)`.
-impl Display for SqlMatcher {
+/// `query "SQL"` or `a when_query matcher`.
+impl Display for QueryMatcher {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            SqlMatcher::Exact(sql) => write!(f, "query {sql:?}"),
-            SqlMatcher::Matching(_) => f.write_str("query_matching(..)"),
+            QueryMatcher::Exact(sql) => write!(f, "query {sql:?}"),
+            QueryMatcher::Matching(_) => f.write_str("a when_query matcher"),
         }
     }
 }
 
-impl Debug for SqlMatcher {
+impl Debug for QueryMatcher {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         Display::fmt(self, f)
     }
@@ -403,7 +407,7 @@ pub(super) struct QueryReply {
 
 /// One query rule.
 pub(super) struct QueryRule {
-    pub sql: SqlMatcher,
+    pub matcher: QueryMatcher,
     /// `None` answers a call whatever its parameters; otherwise named parameters must equal
     /// these as a set and positional ones in order.
     pub parameters: Option<Vec<QueryParameter>>,
@@ -413,7 +417,10 @@ pub(super) struct QueryRule {
 
 impl QueryRule {
     fn matches(&self, sql: &str, parameters: &[QueryParameter]) -> Result<bool, String> {
-        if !self.sql.matches(sql)? {
+        if !self
+            .matcher
+            .matches(&BigQueryFakeQuery::new(sql, parameters))?
+        {
             return Ok(false);
         }
         let Some(expected) = &self.parameters else {
@@ -453,12 +460,12 @@ pub(super) struct FaultRule {
     pub rule: BigQueryFakeRule,
 }
 
-/// The indexes, within an appended batch, of the rows a `reject_rows` predicate refuses, or
-/// the error decoding them into the test's type.
+/// The indexes, within an appended batch, of the rows a `when_rows_rejected` predicate refuses,
+/// or the error decoding them into the test's type.
 pub(super) type RowRejection =
     Box<dyn Fn(&RecordBatch) -> BigQueryResult<Vec<usize>> + Send + Sync>;
 
-/// One `reject_rows` rule.
+/// One `when_rows_rejected` rule.
 pub(super) struct RejectRule {
     pub table: TableKey,
     /// The message of each row error.
@@ -496,7 +503,7 @@ impl FakeRules {
     /// The reply of the first query rule with calls left that matches, counting the call.
     ///
     /// # Errors
-    /// An internal failure of the fake, such as a panicking `query_matching` predicate.
+    /// An internal failure of the fake, such as a panicking `when_query` matcher.
     pub(super) fn answer_query(
         &self,
         sql: &str,
@@ -529,7 +536,7 @@ impl FakeRules {
 
     /// The fault of the first fault rule with calls left for `rpc` on `table`, counting the
     /// call. Faults are tried before any other rule and before state.
-    pub(super) fn fault(
+    pub(super) fn answer_fault(
         &self,
         rpc: BigQueryFakeRpc,
         table: Option<&TableKey>,
@@ -544,7 +551,8 @@ impl FakeRules {
             .map(|rule| rule.fault.clone())
     }
 
-    /// The `reject_rows` rules of `table`, in registration order, to apply outside the lock.
+    /// The `when_rows_rejected` rules of `table`, in registration order, to apply outside the
+    /// lock.
     pub(super) fn rejections(&self, table: &TableKey) -> Vec<Arc<RejectRule>> {
         self.rejections
             .iter()

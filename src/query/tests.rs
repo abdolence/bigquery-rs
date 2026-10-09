@@ -1132,7 +1132,7 @@ fn ids(batches: &[RecordBatch]) -> Vec<i64> {
 #[tokio::test]
 async fn record_batches_carry_the_result_rows() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
-    fake.query(PEOPLE).returns_rows(
+    fake.when_query_match(PEOPLE).returns_rows(
         |columns| columns.from_type::<Person>(),
         [person(1), person(2)],
     )?;
@@ -1193,10 +1193,12 @@ async fn invalid_parameter_name_fails_before_sending() -> BigQueryResult<()> {
 async fn job_less_result_is_decoded_inline_with_its_query_id() -> BigQueryResult<()> {
     let (spans, _guard) = CapturedSpans::capture();
     let fake = BigQueryFake::start().await?;
-    fake.query(PEOPLE).bytes_processed(64).returns_rows(
-        |columns| columns.from_type::<Person>(),
-        [person(1), person(2)],
-    )?;
+    fake.when_query_match(PEOPLE)
+        .bytes_processed(64)
+        .returns_rows(
+            |columns| columns.from_type::<Person>(),
+            [person(1), person(2)],
+        )?;
 
     let (rows, stats) = fake
         .db()
@@ -1232,7 +1234,7 @@ async fn dml_has_no_rows() -> BigQueryResult<()> {
         updated: 2,
         deleted: 0,
     };
-    fake.query("UPDATE t")
+    fake.when_query_match("UPDATE t")
         .returns_dml(BigQueryStatementType::Update, updated)?;
 
     let rows: Vec<Person> = fake.db().fluent().query("UPDATE t").obj().query().await?;
@@ -1249,7 +1251,7 @@ async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
         updated: 0,
         deleted: 1,
     };
-    fake.query("DELETE t")
+    fake.when_query_match("DELETE t")
         .returns_dml(BigQueryStatementType::Delete, deleted)?;
 
     let outcome = fake.db().fluent().query("DELETE t").execute().await?;
@@ -1264,10 +1266,12 @@ async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
 #[tokio::test]
 async fn failed_query_is_the_status_of_the_query_call() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
-    let refusal = fake.query("SELEC 1").fails(BigQueryFakeFault::status(
-        BigQueryFakeCode::InvalidArgument,
-        "Syntax error: Unexpected identifier \"SELEC\" at [1:1]",
-    ))?;
+    let refusal = fake
+        .when_query_match("SELEC 1")
+        .fails(BigQueryFakeFault::status(
+            BigQueryFakeCode::InvalidArgument,
+            "Syntax error: Unexpected identifier \"SELEC\" at [1:1]",
+        ))?;
 
     match fake.db().fluent().query("SELEC 1").execute().await {
         Err(BigQueryError::DatabaseError(err)) => {
@@ -1283,7 +1287,7 @@ async fn failed_query_is_the_status_of_the_query_call() -> BigQueryResult<()> {
 #[tokio::test]
 async fn job_error_result_is_a_job_error() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
-    fake.query("SELECT ERROR('boom')")
+    fake.when_query_match("SELECT ERROR('boom')")
         .fails_job(BigQueryFakeJobFailure::new("invalidQuery", "boom"))?;
 
     match fake
@@ -1315,7 +1319,7 @@ async fn base_variant_skips_rows_that_fail_to_decode() -> BigQueryResult<()> {
             name: Some("Åsa 2".to_string()),
         },
     ];
-    fake.query(PEOPLE)
+    fake.when_query_match(PEOPLE)
         .returns_rows(|columns| columns.from_type::<MaybeNamed>(), &rows)?;
     let people = || fake.db().fluent().query(PEOPLE).obj::<Person>();
 
@@ -1340,7 +1344,7 @@ async fn destination_table_query_runs_as_a_job_and_reads_its_table() -> BigQuery
     const ORDERS_COPY: crate::BigQueryTableId = crate::BigQueryTableId::from_static("orders_copy");
     let fake = BigQueryFake::start().await?;
     fake.create_dataset(SHOP)?;
-    fake.query(PEOPLE).returns_rows(
+    fake.when_query_match(PEOPLE).returns_rows(
         |columns| columns.from_type::<Person>(),
         [person(1), person(2)],
     )?;
@@ -1375,16 +1379,17 @@ async fn destination_table_query_runs_as_a_job_and_reads_its_table() -> BigQuery
 #[tokio::test]
 async fn already_existing_other_job_on_a_retry_stays_an_error() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
-    fake.query("SELECT once")
+    fake.when_query_match("SELECT once")
         .times(1)
         .fails(BigQueryFakeFault::status(
             BigQueryFakeCode::Unavailable,
             "backend went away",
         ))?;
-    fake.query("SELECT once").fails(BigQueryFakeFault::status(
-        BigQueryFakeCode::AlreadyExists,
-        "Already Exists: Job fake-project:US.bigquery_rs_someone_else",
-    ))?;
+    fake.when_query_match("SELECT once")
+        .fails(BigQueryFakeFault::status(
+            BigQueryFakeCode::AlreadyExists,
+            "Already Exists: Job fake-project:US.bigquery_rs_someone_else",
+        ))?;
 
     let result = fake
         .db()
@@ -1404,10 +1409,12 @@ async fn already_existing_other_job_on_a_retry_stays_an_error() -> BigQueryResul
 #[tokio::test]
 async fn already_existing_job_on_a_first_attempt_is_a_conflict() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
-    let taken = fake.query("SELECT once").fails(BigQueryFakeFault::status(
-        BigQueryFakeCode::AlreadyExists,
-        "Already Exists: Job fake-project:US.taken",
-    ))?;
+    let taken = fake
+        .when_query_match("SELECT once")
+        .fails(BigQueryFakeFault::status(
+            BigQueryFakeCode::AlreadyExists,
+            "Already Exists: Job fake-project:US.taken",
+        ))?;
 
     let result = fake
         .db()
@@ -1429,7 +1436,7 @@ async fn already_existing_job_on_a_first_attempt_is_a_conflict() -> BigQueryResu
 async fn dry_run_with_a_destination_is_a_dry_run_job() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
     fake.create_dataset(SHOP)?;
-    fake.query(PEOPLE)
+    fake.when_query_match(PEOPLE)
         .bytes_processed(1234)
         .returns_rows(|columns| columns.from_type::<Person>(), [person(1)])?;
 
@@ -1478,7 +1485,7 @@ async fn a_skipped_row_log_line_names_the_row_and_field_and_not_the_cell() -> Bi
             name: CELL.to_string(),
         },
     ];
-    fake.query(PEOPLE)
+    fake.when_query_match(PEOPLE)
         .returns_rows(|columns| columns.from_type::<Person>(), &rows)?;
     let subscriptions = || fake.db().fluent().query(PEOPLE).obj::<Subscription>();
 

@@ -666,12 +666,12 @@ async fn a_label_replacement_and_a_cleared_description_apply_in_order() -> BigQu
 async fn an_update_refused_on_its_etag_is_a_data_conflict_sent_once() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
     fake.create_dataset(SHOP)?;
-    let refusal = fake
-        .fault(BigQueryFakeRpc::UpdateDataset)
-        .fails(BigQueryFakeFault::status(
-            BigQueryFakeCode::FailedPrecondition,
-            "Precondition check failed.",
-        ))?;
+    let refusal =
+        fake.when_fault(BigQueryFakeRpc::UpdateDataset)
+            .fails(BigQueryFakeFault::status(
+                BigQueryFakeCode::FailedPrecondition,
+                "Precondition check failed.",
+            ))?;
 
     let result = fake
         .db()

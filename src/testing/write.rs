@@ -319,7 +319,7 @@ impl FakeShared {
             connection.remember_writer_schema(&request);
             let fault = self
                 .rules()
-                .fault(BigQueryFakeRpc::AppendRows, Some(&table));
+                .answer_fault(BigQueryFakeRpc::AppendRows, Some(&table));
             let response = match fault {
                 Some(BigQueryFakeFault::Status { code, message }) => {
                     in_band(plain_status(code.grpc_code(), message))
@@ -352,7 +352,7 @@ impl FakeShared {
     /// in-band error when the request is refused and nothing is written.
     ///
     /// # Errors
-    /// An internal failure of the fake, such as a panicking `reject_rows` predicate.
+    /// An internal failure of the fake, such as a panicking `when_rows_rejected` predicate.
     fn append(
         &self,
         connection: &AppendConnection,
@@ -371,19 +371,19 @@ impl FakeShared {
             }
             Err(RowsRefusal::Rows(row_errors)) => return Ok(row_errors_response(row_errors)),
         };
-        if let Some(refused) = self.reject_rows(table, &decoded.rows)? {
+        if let Some(refused) = self.rejected_rows(table, &decoded.rows)? {
             return Ok(refused);
         }
         Ok(self.state().append(table, request, decoded))
     }
 
-    /// The answer of the `reject_rows` rules of `table` to `rows`: row errors if any rule
+    /// The answer of the `when_rows_rejected` rules of `table` to `rows`: row errors if any rule
     /// refuses a row, counting each rule that does, and `None` if none does. The predicates run
     /// outside the locks.
     ///
     /// # Errors
     /// A predicate that panicked, or rows that do not read as its type.
-    fn reject_rows(
+    fn rejected_rows(
         &self,
         table: &TableKey,
         rows: &RecordBatch,
@@ -392,9 +392,9 @@ impl FakeShared {
         let mut row_errors: Vec<RowError> = Vec::new();
         for rule in rules {
             let refused = catch_unwind(AssertUnwindSafe(|| (rule.rejects)(rows)))
-                .map_err(|_| format!("the reject_rows predicate on {table} panicked"))?
+                .map_err(|_| format!("the when_rows_rejected predicate on {table} panicked"))?
                 .map_err(|err| {
-                    format!("reject_rows on {table} cannot read an appended row: {err}")
+                    format!("when_rows_rejected on {table} cannot read an appended row: {err}")
                 })?;
             let mut counted = false;
             for index in refused {
@@ -818,7 +818,7 @@ mod tests {
     async fn exactly_once_keeps_one_copy_of_a_request_sent_again() -> BigQueryResult<()> {
         let fake = fake_with_orders().await?;
         let lost = fake
-            .fault(BigQueryFakeRpc::AppendRows)
+            .when_fault(BigQueryFakeRpc::AppendRows)
             .times(1)
             .fails(BigQueryFakeFault::ConnectionDropped)?;
 
@@ -938,9 +938,10 @@ mod tests {
     #[tokio::test]
     async fn rejected_rows_fail_their_request_and_write_nothing() -> BigQueryResult<()> {
         let fake = fake_with_orders().await?;
-        let rejected = fake.reject_rows(SHOP.table(ORDERS), "customer is banned", |row: &Order| {
-            row.customer == "Bob"
-        });
+        let rejected =
+            fake.when_rows_rejected(SHOP.table(ORDERS), "customer is banned", |row: &Order| {
+                row.customer == "Bob"
+            });
 
         let written = fake
             .db()
@@ -967,13 +968,13 @@ mod tests {
     #[tokio::test]
     async fn an_append_fault_is_retried() -> BigQueryResult<()> {
         let fake = fake_with_orders().await?;
-        let aborted =
-            fake.fault(BigQueryFakeRpc::AppendRows)
-                .times(1)
-                .fails(BigQueryFakeFault::status(
-                    BigQueryFakeCode::Aborted,
-                    "transaction aborted",
-                ))?;
+        let aborted = fake
+            .when_fault(BigQueryFakeRpc::AppendRows)
+            .times(1)
+            .fails(BigQueryFakeFault::status(
+                BigQueryFakeCode::Aborted,
+                "transaction aborted",
+            ))?;
 
         fake.db()
             .fluent()

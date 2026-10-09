@@ -94,7 +94,7 @@ impl FakeShared {
         rpc: BigQueryFakeRpc,
         table: Option<&TableKey>,
     ) -> Option<FakeCall> {
-        let fault = self.rules().fault(rpc, table);
+        let fault = self.rules().answer_fault(rpc, table);
         match fault {
             Some(fault) => {
                 fault.answer(call).await;
