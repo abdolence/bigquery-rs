@@ -71,15 +71,26 @@ impl BigQueryFakeRule {
 
     /// Counts one call if the rule has calls left, and says whether it did.
     fn claim(&self) -> bool {
-        let times = self.counter.times;
-        self.counter
-            .calls
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |calls| {
-                times
-                    .is_none_or(|times| calls < times.get())
-                    .then_some(calls + 1)
-            })
-            .is_ok()
+        let calls = &self.counter.calls;
+        let mut current = calls.load(Ordering::SeqCst);
+        loop {
+            if self
+                .counter
+                .times
+                .is_some_and(|times| current >= times.get())
+            {
+                return false;
+            }
+            match calls.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Counts one call whatever the rule's limit.
