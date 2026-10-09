@@ -47,7 +47,7 @@ Cargo.toml:
 
 ```toml
 [dependencies]
-bigquery = "0.7"
+bigquery = "0.8"
 ```
 
 ```rust,no_run

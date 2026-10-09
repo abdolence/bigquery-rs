@@ -4,7 +4,7 @@ Cargo.toml:
 
 ```toml
 [dependencies]
-bigquery = "0.7"
+bigquery = "0.8"
 ```
 
 The default feature `tls-roots` uses the native TLS roots of your system. Use
@@ -12,7 +12,7 @@ The default feature `tls-roots` uses the native TLS roots of your system. Use
 
 ```toml
 [dependencies]
-bigquery = { version = "0.7", default-features = false, features = ["tls-webpki-roots"] }
+bigquery = { version = "0.8", default-features = false, features = ["tls-webpki-roots"] }
 ```
 
 ## Crypto provider error
