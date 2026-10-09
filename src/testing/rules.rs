@@ -83,7 +83,6 @@ impl BigQueryFakeRule {
     }
 
     /// Counts one call whatever the rule's limit.
-    #[allow(dead_code, reason = "used by the Storage Write RPCs")]
     pub(super) fn count(&self) {
         self.counter.calls.fetch_add(1, Ordering::SeqCst);
     }
@@ -429,7 +428,6 @@ pub(super) type RowRejection =
     Box<dyn Fn(&RecordBatch) -> BigQueryResult<Vec<usize>> + Send + Sync>;
 
 /// One `reject_rows` rule.
-#[allow(dead_code, reason = "used by the Storage Write RPCs")]
 pub(super) struct RejectRule {
     pub table: TableKey,
     /// The message of each row error.
@@ -516,7 +514,6 @@ impl FakeRules {
     }
 
     /// The `reject_rows` rules of `table`, in registration order, to apply outside the lock.
-    #[allow(dead_code, reason = "used by the Storage Write RPCs")]
     pub(super) fn rejections(&self, table: &TableKey) -> Vec<Arc<RejectRule>> {
         self.rejections
             .iter()

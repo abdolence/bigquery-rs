@@ -84,7 +84,7 @@
 //!
 //! A writer whose rows are captured:
 //!
-//! ```rust,no_run
+//! ```rust
 //! # use bigquery::*;
 //! # use serde::{Deserialize, Serialize};
 //! # #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

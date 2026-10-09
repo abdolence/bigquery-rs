@@ -50,7 +50,6 @@ pub(super) struct DecodedRows {
     /// The rows, in the read layout of the table.
     pub rows: RecordBatch,
     /// Each row's change, when the rows carried the CDC pseudo-columns.
-    #[allow(dead_code, reason = "used by the Storage Write RPCs")]
     pub changes: Option<Vec<FakeChange>>,
 }
 
@@ -93,7 +92,6 @@ impl ProtoBatchBuilder {
     /// # Errors
     /// [`UnknownField`](BigQueryCodecErrorKind::UnknownField) for a field that names no column
     /// of the table.
-    #[allow(dead_code, reason = "used by the Storage Write RPCs")]
     pub(super) fn from_descriptor(
         schema: &BigQueryTableSchema,
         descriptor: &DescriptorProto,

@@ -125,7 +125,6 @@ impl TableKey {
     }
 
     /// The Storage API resource name, `projects/{p}/datasets/{d}/tables/{t}`.
-    #[allow(dead_code, reason = "used by the Storage Read and Write RPCs")]
     pub(super) fn path(&self) -> String {
         BigQueryTableRef::from(self).table_path(&self.dataset.project)
     }
@@ -278,7 +277,6 @@ pub(super) struct FakeChange {
 
 /// One write stream.
 #[derive(Clone, Debug)]
-#[allow(dead_code, reason = "used by the Storage Write RPCs")]
 pub(super) struct FakeWriteStream {
     pub table: TableKey,
     /// Which decides when the stream's rows become visible.
@@ -294,7 +292,6 @@ pub(super) struct FakeWriteStream {
 }
 
 impl FakeWriteStream {
-    #[allow(dead_code, reason = "used by the Storage Write RPCs")]
     pub(super) fn new(table: TableKey, mode: BigQueryWriteMode) -> Self {
         Self {
             table,
@@ -342,7 +339,6 @@ pub(super) struct FakeState {
     pub datasets: BTreeMap<DatasetKey, FakeDataset>,
     pub tables: BTreeMap<TableKey, FakeTable>,
     /// By stream name, `projects/{p}/datasets/{d}/tables/{t}/streams/{s}`.
-    #[allow(dead_code, reason = "used by the Storage Write RPCs")]
     pub write_streams: HashMap<BigQueryWriteStreamName, FakeWriteStream>,
     /// By stream name, as `CreateReadSession` returned it.
     pub read_streams: BTreeMap<String, FakeReadStream>,
