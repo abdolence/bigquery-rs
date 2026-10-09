@@ -199,6 +199,10 @@ BigQuery makes them visible for each write mode:
 - a buffered stream: up to the last flushed offset;
 - a pending stream: at its commit, and never without one.
 
+Rows are matched to the table's columns by name, ignoring case, and the fields of a RECORD column
+the same way. Rows written before a column or a RECORD field was added, and flushed or committed
+after, read it as NULL, as do the rows the table already holds.
+
 A table read is served the table's rows, projected to the selected columns. The fake evaluates
 no filter, so a read with a row restriction needs a rule,
 `fake.when_read(table).row_restriction(..)`, with the rows it returns.
@@ -441,9 +445,10 @@ The fake does not provide:
 - failures in the middle of a read stream, and partial acknowledgements of an append;
 - polling of running jobs, other than for `fails_job` and queries with a destination table;
 - CDC changes applied to the table's rows;
-- Arrow appends in Arrow types other than the table's own, and the precision check of their
-  decimal values;
-- the server side checks of `STRING(n)`, default values, request limits and quotas;
+- Arrow appends in Arrow types other than the table's own. A decimal is the exception: it is
+  rescaled to the scale of its `NUMERIC(p,s)` or `BIGNUMERIC(p,s)` column and checked against its
+  precision;
+- the length checks of `STRING(n)` and `BYTES(n)`, default values, request limits and quotas;
 - a read that selects a field of a STRUCT column, such as `.fields(["address.city"])`;
 - `ListJobs`, `DeleteJob`, models, routines, row access policies, table snapshots and copies.
 
