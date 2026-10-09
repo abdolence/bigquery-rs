@@ -283,7 +283,7 @@ fn array_of<T>(len: i64, f: impl Fn(i64) -> T) -> Vec<T> {
 
 /// Twelve rows: every third has NULLs, and arrays of zero to two elements. Values are those
 /// BigQuery gives back as written: canonical NUMERIC and WKT text, JSON without floats, and
-/// REQUIRED RANGEs with both ends, since an unbounded end of a REQUIRED RANGE reads back as
+/// REQUIRED RANGEs with both ends, since some unbounded bounds of a REQUIRED RANGE read back as
 /// the epoch.
 fn every_type_rows() -> Vec<EveryType> {
     let names = ["Åsa", "Björn", "Linnéa", "Örjan", "Märta", "Göran"];
@@ -422,6 +422,44 @@ async fn round_trip_every_type_and_mode_through_the_writer() -> TestResult {
                     .query()
                     .await?;
             got.sort_by_key(|r| r.id);
+            assert_eq!(got, expected);
+            Ok(())
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn round_trip_bytes_as_json_value_arrays() -> TestResult {
+    with_scratch(
+        "round_trip_bytes_as_json_value_arrays",
+        async |s: &Scratch| {
+            run_sql(
+                s,
+                &format!(
+                    "CREATE TABLE {} (id INT64 NOT NULL, payload BYTES NOT NULL)",
+                    s.table_sql("payloads")
+                ),
+            )
+            .await?;
+            let expected = vec![
+                serde_json::json!({"id": 1, "payload": [0, 127, 255]}),
+                serde_json::json!({"id": 2, "payload": []}),
+            ];
+            s.db.fluent()
+                .insert()
+                .into(s.dataset_ref()?.table(s.table_id("payloads")))
+                .objects(&expected)
+                .execute()
+                .await?;
+            let mut got: Vec<serde_json::Value> =
+                s.db.fluent()
+                    .select()
+                    .from(s.table("payloads"))
+                    .obj()
+                    .query()
+                    .await?;
+            got.sort_by_key(|row| row["id"].as_i64());
             assert_eq!(got, expected);
             Ok(())
         },

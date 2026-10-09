@@ -4,9 +4,17 @@ pub(crate) const TAG_RANGE: &str = "BigQueryRange";
 
 /// A RANGE value of DATE, DATETIME or TIMESTAMP.
 ///
-/// `T` is any Rust form of the element type, the temporal wrappers included. A `None` end is
-/// unbounded, except in a REQUIRED RANGE column, where BigQuery sends an unbounded end as the
-/// epoch and the read path cannot tell it from a real epoch bound.
+/// `T` is any Rust form of the element type, the temporal wrappers included. A `None` bound is
+/// unbounded.
+///
+/// A REQUIRED RANGE column carries no validity for its bounds, and BigQuery sends an unbounded
+/// bound of it as the epoch (1970-01-01, at 00:00:00 for DATETIME and TIMESTAMP). Since BigQuery keeps
+/// `start < end`, the read path reads an epoch bound as `None` when the pair would break that
+/// order otherwise: an epoch end at or below the start, an epoch start at or above the end.
+/// Four cases cannot be told apart from a real epoch bound. An unbounded start with an end
+/// after the epoch, and an unbounded end with a start before it, read as the epoch.
+/// `[1970-01-01, UNBOUNDED)` and `[UNBOUNDED, 1970-01-01)` arrive as two epoch bounds, the same
+/// as `[UNBOUNDED, UNBOUNDED)`, and read as both `None`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BigQueryRange<T> {
     /// The inclusive start, `None` when unbounded.

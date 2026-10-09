@@ -787,10 +787,81 @@ fn numeric_reads_into_integers_only_when_whole() {
     );
 }
 
-/// A characterisation of BigQuery's input: a REQUIRED RANGE column has no validity buffer for
-/// its children, so an unbounded end arrives as the epoch value and cannot be told apart.
+/// BigQuery sends an unbounded bound of a REQUIRED RANGE as the epoch, with no validity for it.
+/// A pair that breaks `start < end` can only hold that sentinel, so the epoch side is unbounded,
+/// for every element type and column mode.
 #[test]
-fn required_range_unbounded_end_reads_as_epoch() {
+fn range_epoch_bound_that_breaks_start_before_end_is_unbounded() {
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Booking {
+        booked: BigQueryRange<i64>,
+        history: Vec<BigQueryRange<i64>>,
+    }
+    let unbounded_end = BigQueryRange {
+        start: Some(10),
+        end: None,
+    };
+    let unbounded_start = BigQueryRange {
+        start: None,
+        end: Some(-10),
+    };
+    let unbounded = BigQueryRange {
+        start: None,
+        end: None,
+    };
+    for element in [
+        BigQueryRangeElementType::Date,
+        BigQueryRangeElementType::DateTime,
+        BigQueryRangeElementType::Timestamp,
+    ] {
+        let ranges = || {
+            StructArray::new(
+                Fields::from(vec![
+                    Field::new("start", range_child_type(element), true),
+                    Field::new("end", range_child_type(element), true),
+                ]),
+                vec![
+                    range_child(element, vec![Some(10), Some(0), Some(0)]),
+                    range_child(element, vec![Some(0), Some(-10), Some(0)]),
+                ],
+                None,
+            )
+        };
+        let required = ranges();
+        let batch = batch(vec![
+            (
+                Field::new("booked", required.data_type().clone(), false)
+                    .with_metadata(range_metadata()),
+                Arc::new(required) as ArrayRef,
+            ),
+            list_with(
+                "history",
+                vec![0, 3, 3, 3],
+                Arc::new(ranges()),
+                range_metadata(),
+            ),
+        ]);
+        let booked: Vec<_> = (0..3)
+            .map(|index| row::<Booking>(&batch, index).map(|booking| booking.booked))
+            .collect();
+        assert_eq!(
+            booked,
+            [Ok(unbounded_end), Ok(unbounded_start), Ok(unbounded)],
+            "{element:?}"
+        );
+        assert_eq!(
+            row::<Booking>(&batch, 0).map(|booking| booking.history),
+            Ok(vec![unbounded_end, unbounded_start, unbounded]),
+            "{element:?}"
+        );
+    }
+}
+
+/// An unbounded start before a real end after the epoch keeps `start < end`, so the sentinel
+/// cannot be told from a real epoch start and stays one. A NULLABLE RANGE carries validity for
+/// its ends and reads an unbounded start as `None`.
+#[test]
+fn range_epoch_start_before_a_later_end_stays_the_epoch() {
     let children = |nulls: Option<Vec<bool>>| {
         let start = Date32Array::new(vec![0, 10].into(), nulls.clone().map(NullBuffer::from));
         let end = Date32Array::new(vec![5, 0].into(), None);
@@ -1090,20 +1161,92 @@ fn json_null_elements_of_an_array_into_options_are_none() {
 }
 
 #[test]
-fn bytes_column_into_json_value_is_an_error() {
+fn bytes_column_into_json_value_is_an_array_of_bytes() {
     let batch = batch(vec![column(
         "payload",
-        BinaryArray::from_vec(vec![&b"\x01"[..]]),
+        BinaryArray::from_vec(vec![&b"\x01\xff"[..], b""]),
     )]);
-    #[derive(Deserialize, Debug)]
+    #[derive(Deserialize, Debug, PartialEq)]
     struct JsonPayload {
-        #[allow(dead_code, reason = "decoded only to see it fail")]
         payload: serde_json::Value,
     }
-    let error = row_error::<JsonPayload>(&batch, 0);
     assert_eq!(
-        (error.path.as_str(), error.kind),
-        ("payload", BigQueryCodecErrorKind::TypeMismatch)
+        row::<JsonPayload>(&batch, 0),
+        Ok(JsonPayload {
+            payload: serde_json::json!([1, 255])
+        })
+    );
+    assert_eq!(
+        row::<JsonPayload>(&batch, 1),
+        Ok(JsonPayload {
+            payload: serde_json::json!([])
+        })
+    );
+}
+
+/// A BYTES value read into `serde_json::Value` is written back by the writer as the same bytes.
+#[test]
+fn bytes_read_into_json_value_write_back_as_the_same_bytes() {
+    use crate::write::descriptor::WritePlan;
+    use crate::write::encoder::Encoder;
+    #[derive(serde::Serialize)]
+    struct Attachment<'a> {
+        #[serde(with = "serde_bytes")]
+        payload: &'a [u8],
+    }
+    let payload = b"\x00\x7f\xff";
+    let batch = batch(vec![column(
+        "payload",
+        BinaryArray::from_vec(vec![&payload[..]]),
+    )]);
+    let read: serde_json::Value = row(&batch, 0).expect("the row decodes");
+    let plan = Arc::new(WritePlan::new(
+        &crate::BigQueryTableSchema {
+            fields: vec![crate::types::testkit::field(
+                "payload",
+                crate::BigQueryFieldType::Bytes { max_length: None },
+                crate::BigQueryFieldMode::Required,
+            )],
+        },
+        false,
+    ));
+    let mut from_value = Vec::new();
+    Encoder::new(plan.clone())
+        .encode(&read, &mut from_value)
+        .expect("the value encodes");
+    let mut from_bytes = Vec::new();
+    Encoder::new(plan)
+        .encode(&Attachment { payload }, &mut from_bytes)
+        .expect("the bytes encode");
+    assert_eq!(from_value, from_bytes);
+}
+
+/// `flatten` buffers a value through `deserialize_any`; a byte buffer behind it still gets the
+/// column's bytes.
+#[test]
+fn flattened_byte_buffer_reads_the_bytes() {
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Attachment {
+        payload: serde_bytes::ByteBuf,
+    }
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Message {
+        id: i64,
+        #[serde(flatten)]
+        attachment: Attachment,
+    }
+    let batch = batch(vec![
+        column("id", Int64Array::from(vec![7])),
+        column("payload", BinaryArray::from_vec(vec![&b"\x00\xff"[..]])),
+    ]);
+    assert_eq!(
+        row::<Message>(&batch, 0),
+        Ok(Message {
+            id: 7,
+            attachment: Attachment {
+                payload: serde_bytes::ByteBuf::from(vec![0, 255])
+            }
+        })
     );
 }
 

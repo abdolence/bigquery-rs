@@ -9,9 +9,11 @@
 
 mod ident;
 mod literal;
+mod parameters;
 
 pub(crate) use ident::*;
 pub(crate) use literal::*;
+pub(crate) use parameters::*;
 
 #[cfg(test)]
 pub(crate) mod tests;

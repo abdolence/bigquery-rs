@@ -7,7 +7,7 @@
 //! type.
 
 use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-use crate::sql::{dotted_path, SqlLiteral};
+use crate::sql::{dotted_path, is_identifier, SqlLiteral};
 use crate::types::civil;
 use crate::types::decimal::{
     decimal_string, parse_bignumeric, parse_numeric, BIGNUMERIC_SCALE, NUMERIC_SCALE, TAG_DECIMAL,
@@ -67,12 +67,7 @@ impl ParamLabel<'_> {
         let ParamLabel::Named(name) = self else {
             return Ok(self);
         };
-        let mut chars = name.chars();
-        let valid = chars
-            .next()
-            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-            && chars.all(|character| character.is_ascii_alphanumeric() || character == '_');
-        if valid {
+        if is_identifier(name.as_bytes()) {
             Ok(self)
         } else {
             Err(BigQueryError::invalid_parameters(

@@ -12,9 +12,9 @@ documentation = "https://docs.rs/bigquery"
 keywords = ["bigquery", "google", "client"]
 categories = ["api-bindings", "database"]
 readme = "README.md"
-# The published crate carries the library, the README, the licence and the book's pages, and
-# nothing else from the repository.
-include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE", "docs/src/**/*.md"]
+# The published crate carries the library, the README, the licence, the book's pages and the
+# `.sql` files its doctests embed, and nothing else from the repository.
+include = ["Cargo.toml", "src/**/*.rs", "src/**/*.sql", "README.md", "LICENSE", "docs/src/**/*.md"]
 
 [badges]
 maintenance = { status = "actively-developed" }

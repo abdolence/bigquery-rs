@@ -2,7 +2,7 @@
 //!
 //! Start from [`BigQueryDb::fluent()`](crate::BigQueryDb::fluent).
 
-use crate::{BigQueryDb, BigQueryQueryParams};
+use crate::{BigQueryDb, BigQuerySql};
 use crate::{BigQueryQuerySupport, BigQueryReadSupport, BigQueryWriteSupport};
 
 mod dataset_builder;
@@ -59,10 +59,11 @@ impl<'a, D> BigQueryExprBuilder<'a, D>
 where
     D: BigQueryQuerySupport + Clone + Send + Sync + 'static,
 {
-    /// Starts a GoogleSQL query. Continue with its parameters and settings, then a terminal.
+    /// Starts a GoogleSQL query: text, or a `.sql` file from [`sql_file!`](crate::sql_file!).
+    /// Continue with its parameters and settings, then a terminal.
     #[inline]
-    pub fn query(self, sql: impl Into<String>) -> BigQueryQueryBuilder<'a, D> {
-        BigQueryQueryBuilder::new(self.db, BigQueryQueryParams::new(sql.into()))
+    pub fn query(self, sql: impl Into<BigQuerySql>) -> BigQueryQueryBuilder<'a, D> {
+        BigQueryQueryBuilder::new(self.db, sql.into())
     }
 }
 

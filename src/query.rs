@@ -8,6 +8,9 @@
 mod ids;
 pub use ids::*;
 
+mod sql_file;
+pub use sql_file::BigQuerySql;
+
 mod statement;
 pub use statement::BigQueryStatementType;
 

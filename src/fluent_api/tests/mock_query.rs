@@ -244,4 +244,119 @@ mod tests {
         }
         assert!(take_calls().is_empty());
     }
+
+    #[derive(serde::Serialize)]
+    struct TopWordsFilter {
+        corpus: &'static str,
+        min_count: i64,
+    }
+
+    #[tokio::test]
+    async fn sql_file_query_sends_the_file_text_with_its_bound_parameters() -> BigQueryResult<()> {
+        let db = MockDatabase;
+        BigQueryExprBuilder::new(&db)
+            .query(crate::sql_file!(
+                "../../query/sql/top_words.sql",
+                corpus,
+                min_count
+            ))
+            .params(&TopWordsFilter {
+                corpus: "hamlet",
+                min_count: 100,
+            })
+            .execute()
+            .await?;
+        let expected =
+            BigQueryQueryParams::new(include_str!("../../query/sql/top_words.sql").into())
+                .with_query_parameters(vec![
+                    infer_param(ParamLabel::Named("corpus"), "hamlet")?,
+                    infer_param(ParamLabel::Named("min_count"), &100)?,
+                ]);
+        assert_eq!(take_calls(), vec![("execute_query", expected)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_file_parameters_bind_whatever_the_case_of_their_names() -> BigQueryResult<()> {
+        let db = MockDatabase;
+        BigQueryExprBuilder::new(&db)
+            .query(crate::sql_file!(
+                "../../query/sql/top_words.sql",
+                corpus,
+                min_count
+            ))
+            .param("Corpus", "hamlet")
+            .param("MIN_COUNT", 100)
+            .execute()
+            .await?;
+        assert_eq!(take_calls().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_file_parameter_bound_twice_in_different_case_fails_without_a_call() {
+        let db = MockDatabase;
+        let result = BigQueryExprBuilder::new(&db)
+            .query(crate::sql_file!(
+                "../../query/sql/top_words.sql",
+                corpus,
+                min_count
+            ))
+            .param("corpus", "hamlet")
+            .param("min_count", 100)
+            .param("Corpus", "macbeth")
+            .execute()
+            .await;
+        match result {
+            Err(BigQueryError::InvalidParametersError(err)) => {
+                assert_eq!(err.public.field, "Corpus")
+            }
+            other => panic!("expected `Corpus` to be refused, got {other:?}"),
+        }
+        assert!(take_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sql_file_parameter_left_unbound_fails_without_a_call() {
+        let db = MockDatabase;
+        let result = BigQueryExprBuilder::new(&db)
+            .query(crate::sql_file!(
+                "../../query/sql/top_words.sql",
+                corpus,
+                min_count
+            ))
+            .param("corpus", "hamlet")
+            .execute()
+            .await;
+        match result {
+            Err(BigQueryError::InvalidParametersError(err)) => {
+                assert_eq!(err.public.field, "min_count")
+            }
+            other => panic!("expected `min_count` to be refused, got {other:?}"),
+        }
+        assert!(take_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sql_file_parameter_bound_but_not_declared_fails_without_a_call() {
+        let db = MockDatabase;
+        let result = BigQueryExprBuilder::new(&db)
+            .query(crate::sql_file!(
+                "../../query/sql/top_words.sql",
+                corpus,
+                min_count
+            ))
+            .param("corpus", "hamlet")
+            .param("min_count", 100)
+            .param("limit", 10)
+            .dry_run()
+            .await;
+        match result {
+            Err(BigQueryError::InvalidParametersError(err)) => {
+                assert_eq!(err.public.field, "limit")
+            }
+            other => panic!("expected `limit` to be refused, got {other:?}"),
+        }
+        assert!(take_calls().is_empty());
+    }
 }

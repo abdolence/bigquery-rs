@@ -42,7 +42,7 @@ work in both directions too.
 | NUMERIC, BIGNUMERIC | `String` | integers, `f64` | `BigQueryDecimal<T>` |
 | BOOL | `bool` | | |
 | STRING | `String` | `Box<str>`, `char`, unit enums, any type serialized as a string | |
-| BYTES | `Vec<u8>` | `serde_bytes::ByteBuf`, `[u8; N]` | |
+| BYTES | `Vec<u8>` | `serde_bytes::ByteBuf`, `[u8; N]`, `serde_json::Value` (an array of byte numbers) | |
 | DATE | `jiff::civil::Date` | `String`, `i32` days | `BigQueryDate` |
 | TIME | `jiff::civil::Time` | `String`, `i64` microseconds of the day | `BigQueryTime` |
 | DATETIME | `jiff::civil::DateTime` | `String`, `i64` civil microseconds | `BigQueryDateTime` |
@@ -142,8 +142,8 @@ by BigQuery only.
 BYTES is `Vec<u8>`, `serde_bytes::ByteBuf`, or `[u8; N]` when the value has exactly N bytes. A string
 is not taken for BYTES on write, and bytes are not taken for STRING: BigQuery stores a string sent
 to BYTES as its raw UTF-8 bytes and does not decode base64, so a base64 text would be stored as
-text by accident. A `serde_json::Value` row cannot hold BYTES; select `TO_BASE64(b)` instead, or use
-a typed field.
+text by accident. A `serde_json::Value` reads BYTES as an array of byte numbers, such as
+`[0, 255]`, and the writer takes that array back for BYTES.
 
 ## GEOGRAPHY
 
@@ -325,9 +325,23 @@ struct Promotion {
 `BigQueryRange<T>` fails with `NullForNonOption`. Whether `start` comes before `end` is checked by
 BigQuery.
 
-Be aware of a REQUIRED RANGE column: BigQuery reads an unbounded end of it as `1970-01-01` (or the
-epoch for DATETIME and TIMESTAMP), and the library cannot tell it from a real epoch bound. NULLABLE
-and REPEATED RANGE columns keep unbounded ends as `None`.
+NULLABLE and REPEATED RANGE columns keep unbounded ends as `None`. A REQUIRED RANGE column has no
+NULL for its ends, so BigQuery sends an unbounded end of it as `1970-01-01` (or the epoch for
+DATETIME and TIMESTAMP). The library reads that epoch as `None` when it breaks `start < end`, which
+BigQuery keeps for every range:
+
+- an epoch end at or before the start is an unbounded end;
+- an epoch start at or after the end is an unbounded start;
+- `[UNBOUNDED, UNBOUNDED)` reads as both `None`.
+
+A real epoch bound looks the same as an unbounded one, so four cases read wrong:
+
+- an unbounded start with an end after the epoch reads the start as the epoch;
+- an unbounded end with a start before the epoch reads the end as the epoch;
+- `[1970-01-01, UNBOUNDED)` reads as both `None`, the same as `[UNBOUNDED, UNBOUNDED)`;
+- `[UNBOUNDED, 1970-01-01)` reads as both `None` too.
+
+Use a NULLABLE RANGE column where these values matter.
 
 ## STRUCT
 
