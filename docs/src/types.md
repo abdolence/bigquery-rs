@@ -42,7 +42,7 @@ work in both directions too.
 | NUMERIC, BIGNUMERIC | `String` | integers, `f64` | `BigQueryDecimal<T>` |
 | BOOL | `bool` | | |
 | STRING | `String` | `Box<str>`, `char`, unit enums, any type serialized as a string | |
-| BYTES | `Vec<u8>` | `serde_bytes::ByteBuf`, `[u8; N]` | |
+| BYTES | `Vec<u8>` | `serde_bytes::ByteBuf`, `[u8; N]`, `serde_json::Value` (an array of byte numbers) | |
 | DATE | `jiff::civil::Date` | `String`, `i32` days | `BigQueryDate` |
 | TIME | `jiff::civil::Time` | `String`, `i64` microseconds of the day | `BigQueryTime` |
 | DATETIME | `jiff::civil::DateTime` | `String`, `i64` civil microseconds | `BigQueryDateTime` |
