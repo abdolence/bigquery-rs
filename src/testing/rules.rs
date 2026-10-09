@@ -347,7 +347,6 @@ impl Debug for SqlMatcher {
 
 /// What a query rule answers with.
 #[derive(Debug)]
-#[allow(dead_code, reason = "used by the query job RPCs")]
 pub(super) enum QueryAnswer {
     /// A result of `schema`, whose rows are `rows`.
     Rows {

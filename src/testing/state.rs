@@ -24,7 +24,6 @@ use std::sync::Arc;
 
 /// The hidden dataset that holds the result table of each query job whose rows do not come
 /// inline. A dataset whose ID starts with `_` is hidden, as in BigQuery.
-#[allow(dead_code, reason = "used by the query job RPCs")]
 pub(super) const QUERY_RESULTS_DATASET: BigQueryDatasetId =
     BigQueryDatasetId::from_static("_fake_query_results");
 
@@ -325,7 +324,6 @@ pub(super) struct FakeReadStream {
 
 /// One query job.
 #[derive(Clone, Debug)]
-#[allow(dead_code, reason = "used by the query job RPCs")]
 pub(super) struct FakeJob {
     pub location: String,
     pub statement_type: BigQueryStatementType,
