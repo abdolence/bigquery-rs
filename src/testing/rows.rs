@@ -470,7 +470,7 @@ impl ChangeColumns {
             )
             .at_field(CHANGE_TYPE_COLUMN)
         })?;
-        let change_type = BigQueryChangeType::parse(text).ok_or_else(|| {
+        let change_type = text.parse::<BigQueryChangeType>().map_err(|_| {
             CodecError::invalid_text(format!("{text:?} is not UPSERT or DELETE"))
                 .at_field(CHANGE_TYPE_COLUMN)
         })?;

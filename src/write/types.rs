@@ -216,13 +216,24 @@ impl BigQueryChangeType {
             BigQueryChangeType::Delete => "DELETE",
         }
     }
+}
 
-    /// The change a `_CHANGE_TYPE` value names, exactly as [`name`](Self::name) writes it.
-    pub(crate) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "UPSERT" => Some(BigQueryChangeType::Upsert),
-            "DELETE" => Some(BigQueryChangeType::Delete),
-            _ => None,
+impl FromStr for BigQueryChangeType {
+    type Err = BigQueryError;
+
+    /// The change a `_CHANGE_TYPE` value names, exactly as BigQuery spells it: `UPSERT` or
+    /// `DELETE`.
+    ///
+    /// # Errors
+    /// [`BigQueryError::SerializeError`] with kind
+    /// [`InvalidText`](crate::errors::BigQueryCodecErrorKind::InvalidText) for any other text.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "UPSERT" => Ok(BigQueryChangeType::Upsert),
+            "DELETE" => Ok(BigQueryChangeType::Delete),
+            _ => Err(
+                CodecError::invalid_text(format!("{s:?} is not UPSERT or DELETE")).into_serialize(),
+            ),
         }
     }
 }
