@@ -109,7 +109,6 @@ impl TableKey {
     /// # Errors
     /// [`BigQueryError::InvalidParametersError`] for a name of another shape or an ID the
     /// client would never send.
-    #[allow(dead_code, reason = "used by the Storage Read and Write RPCs")]
     pub(super) fn from_path(path: &str) -> BigQueryResult<Self> {
         let mut segments = path.split('/');
         let mut take = |label: &str| match (segments.next(), segments.next()) {
@@ -207,7 +206,6 @@ impl FakeDataset {
 pub(super) struct FakeTable {
     pub schema: BigQueryTableSchema,
     /// The Arrow layout of `schema` that a read session sends, which every batch has.
-    #[allow(dead_code, reason = "used by the Storage Read RPCs")]
     pub arrow_schema: SchemaRef,
     /// The visible rows, in the order they were acknowledged.
     pub batches: Vec<RecordBatch>,
@@ -215,7 +213,6 @@ pub(super) struct FakeTable {
     /// applied to `batches`.
     pub changes: Vec<FakeChanges>,
     /// How many streams a read session of this table has.
-    #[allow(dead_code, reason = "used by the Storage Read RPCs")]
     pub read_streams: NonZeroUsize,
     pub generation: FakeGeneration,
     pub created: BigQueryInstant,
@@ -313,7 +310,6 @@ impl FakeWriteStream {
 
 /// One stream of a read session: the rows it serves, as the session projected them.
 #[derive(Clone, Debug)]
-#[allow(dead_code, reason = "used by the Storage Read RPCs")]
 pub(super) struct FakeReadStream {
     pub table: TableKey,
     pub arrow_schema: SchemaRef,
@@ -349,7 +345,6 @@ pub(super) struct FakeState {
     #[allow(dead_code, reason = "used by the Storage Write RPCs")]
     pub write_streams: HashMap<BigQueryWriteStreamName, FakeWriteStream>,
     /// By stream name, as `CreateReadSession` returned it.
-    #[allow(dead_code, reason = "used by the Storage Read RPCs")]
     pub read_streams: BTreeMap<String, FakeReadStream>,
     pub jobs: BTreeMap<BigQueryJobId, FakeJob>,
     last_id: u64,

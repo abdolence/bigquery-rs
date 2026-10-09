@@ -406,7 +406,6 @@ impl QueryRule {
 }
 
 /// One rule for read sessions.
-#[allow(dead_code, reason = "used by the Storage Read RPCs")]
 pub(super) struct ReadRule {
     pub table: TableKey,
     /// `None` matches a session without a row restriction.
@@ -484,7 +483,6 @@ impl FakeRules {
 
     /// The rows of the first read rule with calls left for `table` and exactly
     /// `row_restriction`, counting the call.
-    #[allow(dead_code, reason = "used by the Storage Read RPCs")]
     pub(super) fn answer_read(
         &self,
         table: &TableKey,
