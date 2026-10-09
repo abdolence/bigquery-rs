@@ -11,10 +11,13 @@ use crate::db::fake::FakeCall;
 use crate::testing::rules::{BigQueryFakeRpc, QueryAnswer, QueryReply, ShownParameters};
 use crate::testing::server::FakeShared;
 use crate::testing::state::{
-    DatasetKey, FakeJob, FakeState, FakeTable, TableKey, DEFAULT_LOCATION, QUERY_RESULTS_DATASET,
+    fit_to_layout, location_or_default, DatasetKey, FakeJob, FakeState, FakeTable, TableKey,
+    QUERY_RESULTS_DATASET,
 };
-use crate::BigQueryTableSchema;
-use crate::{BigQueryDmlStats, BigQueryJobId, BigQueryStatementType, BigQueryTableId};
+use crate::{
+    BigQueryDmlStats, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryJobId,
+    BigQueryStatementType, BigQueryTableId, BigQueryTableSchema,
+};
 use arrow_array::RecordBatch;
 use gcloud_sdk::google::cloud::bigquery::v2::query_request::{
     JobCreationMode, ResultsFormatSerializationOptions,
@@ -114,7 +117,7 @@ impl FakeShared {
         query: &QueryRequest,
         reply: &QueryReply,
     ) -> Result<QueryResponse, String> {
-        let location = job_location(&query.location);
+        let location = location_or_default(&query.location);
         let job = FakeJob::ran(location.clone(), reply);
         let mut response = QueryResponse {
             location,
@@ -156,7 +159,7 @@ impl FakeShared {
                 job.destination = Some(table);
             }
         }
-        response.job_reference = Some(job_reference(project, &job_id, &response.location));
+        response.job_reference = Some(job_id.reference(project, &response.location));
         Ok(response)
     }
 
@@ -178,12 +181,10 @@ impl FakeShared {
         } else {
             reference.project_id
         };
-        let location = job_location(reference.location.as_deref().unwrap_or_default());
+        let location = location_or_default(reference.location.as_deref().unwrap_or_default());
         let job_id = BigQueryJobId::reported(reference.job_id);
         if self.state().jobs.contains_key(&job_id) {
-            let status = Status::already_exists(format!(
-                "Already Exists: Job {project}:{location}.{job_id}"
-            ));
+            let status = job_id.already_exists(&project, &location);
             return call.fail(status.code(), status.message());
         }
         let destination = match query
@@ -205,7 +206,7 @@ impl FakeShared {
         else {
             return;
         };
-        let mut job = FakeJob::ran(location, reply.as_ref());
+        let mut job = FakeJob::ran(location.clone(), reply.as_ref());
         if configuration.dry_run == Some(true) {
             let mut resource = job.resource(&project, &job_id);
             if let Some(statistics) = resource
@@ -218,6 +219,12 @@ impl FakeShared {
             return call.reply(&resource);
         }
         let mut state = self.state();
+        // A call with the same job ID can have passed the check above while this one waited.
+        if state.jobs.contains_key(&job_id) {
+            drop(state);
+            let status = job_id.already_exists(&project, &location);
+            return call.fail(status.code(), status.message());
+        }
         if let (Some(table), QueryAnswer::Rows { schema, rows }) = (&destination, &reply.answer) {
             let written =
                 state.write_query_result(table, &query.write_disposition, schema, rows.clone());
@@ -239,19 +246,24 @@ impl FakeShared {
         let Some((call, request)) = self.first_request::<GetQueryResultsRequest>(call).await else {
             return;
         };
-        let fault = self.rules().fault(BigQueryFakeRpc::GetQueryResults, None);
-        if let Some(fault) = fault {
-            return fault.answer(call).await;
-        }
+        let rpc = BigQueryFakeRpc::GetQueryResults;
+        let Some(call) = self.unfaulted(call, rpc, None).await else {
+            return;
+        };
         let job_id = BigQueryJobId::reported(request.job_id);
-        let response = self.state().jobs.get_mut(&job_id).map(|job| {
-            job.complete = true;
-            job.results(&request.project_id, &job_id)
-        });
+        let response = self
+            .state()
+            .jobs
+            .get_mut(&job_id)
+            .filter(|job| job.is_in(&request.location))
+            .map(|job| {
+                job.complete = true;
+                job.results(&request.project_id, &job_id)
+            });
         match response {
             Some(response) => call.reply(&response),
             None => {
-                let status = job_not_found(&request.project_id, &request.location, &job_id);
+                let status = job_id.not_found(&request.project_id, &request.location);
                 call.fail(status.code(), status.message());
             }
         }
@@ -262,20 +274,20 @@ impl FakeShared {
         let Some((call, request)) = self.first_request::<GetJobRequest>(call).await else {
             return;
         };
-        let fault = self.rules().fault(BigQueryFakeRpc::GetJob, None);
-        if let Some(fault) = fault {
-            return fault.answer(call).await;
-        }
+        let Some(call) = self.unfaulted(call, BigQueryFakeRpc::GetJob, None).await else {
+            return;
+        };
         let job_id = BigQueryJobId::reported(request.job_id);
         let job = self
             .state()
             .jobs
             .get(&job_id)
+            .filter(|job| job.is_in(&request.location))
             .map(|job| job.resource(&request.project_id, &job_id));
         match job {
             Some(job) => call.reply(&job),
             None => {
-                let status = job_not_found(&request.project_id, &request.location, &job_id);
+                let status = job_id.not_found(&request.project_id, &request.location);
                 call.fail(status.code(), status.message());
             }
         }
@@ -287,25 +299,29 @@ impl FakeShared {
         let Some((call, request)) = self.first_request::<CancelJobRequest>(call).await else {
             return;
         };
-        let fault = self.rules().fault(BigQueryFakeRpc::CancelJob, None);
-        if let Some(fault) = fault {
-            return fault.answer(call).await;
-        }
+        let Some(call) = self.unfaulted(call, BigQueryFakeRpc::CancelJob, None).await else {
+            return;
+        };
         let job_id = BigQueryJobId::reported(request.job_id);
-        let job = self.state().jobs.get_mut(&job_id).map(|job| {
-            if !job.complete {
-                job.complete = true;
-                job.cancelled = true;
-            }
-            job.resource(&request.project_id, &job_id)
-        });
+        let job = self
+            .state()
+            .jobs
+            .get_mut(&job_id)
+            .filter(|job| job.is_in(&request.location))
+            .map(|job| {
+                if !job.complete {
+                    job.complete = true;
+                    job.cancelled = true;
+                }
+                job.resource(&request.project_id, &job_id)
+            });
         match job {
             Some(job) => call.reply(&JobCancelResponse {
                 kind: "bigquery#jobCancelResponse".to_string(),
                 job: Some(job),
             }),
             None => {
-                let status = job_not_found(&request.project_id, &request.location, &job_id);
+                let status = job_id.not_found(&request.project_id, &request.location);
                 call.fail(status.code(), status.message());
             }
         }
@@ -323,6 +339,13 @@ impl QueryAnswer {
 }
 
 impl FakeJob {
+    /// Whether a call that names `location` reaches the job: one that names none does, and
+    /// one that names another location than the job's does not, as BigQuery looks a job up
+    /// only where it runs.
+    fn is_in(&self, location: &str) -> bool {
+        location.is_empty() || location.eq_ignore_ascii_case(&self.location)
+    }
+
     /// The job of a statement that ran as `reply` scripts it, without a destination. A job that
     /// is to fail has not finished yet: it fails once `GetQueryResults` sees it done.
     fn ran(location: String, reply: &QueryReply) -> Self {
@@ -383,7 +406,7 @@ impl FakeJob {
         let error_result = self.error_result();
         Job {
             kind: "bigquery#job".to_string(),
-            job_reference: Some(job_reference(project, job_id, &self.location)),
+            job_reference: Some(job_id.reference(project, &self.location)),
             configuration: Some(JobConfiguration {
                 job_type: "QUERY".to_string(),
                 query: Some(JobConfigurationQuery {
@@ -416,7 +439,7 @@ impl FakeJob {
     fn results(&self, project: &str, job_id: &BigQueryJobId) -> GetQueryResultsResponse {
         GetQueryResultsResponse {
             kind: "bigquery#getQueryResultsResponse".to_string(),
-            job_reference: Some(job_reference(project, job_id, &self.location)),
+            job_reference: Some(job_id.reference(project, &self.location)),
             job_complete: Some(self.complete),
             total_rows: self.total_rows,
             total_bytes_processed: self.bytes_processed,
@@ -454,12 +477,14 @@ impl FakeState {
     }
 
     /// Writes a query's result into its destination `table` as the job's `write_disposition`
-    /// says, creating the table in its existing dataset if it does not exist.
+    /// says, creating the table in its existing dataset if it does not exist. `WRITE_TRUNCATE`
+    /// replaces the table's schema and rows; `WRITE_APPEND`, and `WRITE_EMPTY` into an empty
+    /// table, keep its schema and take the result as [`FakeTable::appended`] does.
     ///
     /// # Errors
     /// `NotFound` for a table whose dataset does not exist, `AlreadyExists` for `WRITE_EMPTY`
-    /// into a table that holds rows, and `InvalidArgument` for a result whose columns differ
-    /// from those of the table it is appended to.
+    /// into a table that holds rows, and `InvalidArgument` for a result the table's columns do
+    /// not take.
     fn write_query_result(
         &mut self,
         table: &TableKey,
@@ -489,24 +514,98 @@ impl FakeState {
                 existing.arrow_schema = replaced.arrow_schema;
                 existing.batches = replaced.batches;
             }
-            "WRITE_APPEND" if existing.schema == *schema => existing.batches.push(rows),
             "WRITE_APPEND" => {
-                return Err(Status::invalid_argument(format!(
-                    "Invalid schema update. The result's columns differ from those of table {}",
-                    table.legacy_id()
-                )))
+                let appended = existing.appended(table, schema, &rows)?;
+                existing.batches.push(appended);
             }
-            _ if existing.num_rows() > 0 => {
-                return Err(Status::already_exists(format!(
-                    "Already Exists: Table {}",
-                    table.legacy_id()
-                )))
-            }
-            _ => existing.batches = vec![rows],
+            _ if existing.num_rows() > 0 => return Err(table.already_exists()),
+            _ => existing.batches = vec![existing.appended(table, schema, &rows)?],
         }
         existing.generation = generation;
         Ok(())
     }
+}
+
+impl FakeTable {
+    /// `rows`, a query result of `schema`, in this table's layout, as BigQuery appends a
+    /// result to a table: each result column goes to the table's column of its name, ignoring
+    /// case, and a column the result leaves out is NULL. Descriptions, default values and the
+    /// other column settings play no part.
+    ///
+    /// # Errors
+    /// `InvalidArgument`, as [`append_refusal`] says, for a result the table's columns do not
+    /// take.
+    fn appended(
+        &self,
+        table: &TableKey,
+        schema: &BigQueryTableSchema,
+        rows: &RecordBatch,
+    ) -> Result<RecordBatch, Status> {
+        let refused = |problem: String| {
+            Status::invalid_argument(format!(
+                "Invalid schema update. Table {}: {problem}",
+                table.legacy_id()
+            ))
+        };
+        if let Some(problem) = append_refusal(&self.schema.fields, &schema.fields) {
+            return Err(refused(problem));
+        }
+        fit_to_layout(rows, &self.arrow_schema).map_err(refused)
+    }
+}
+
+/// Why columns `table` do not take a query result of the columns `result`, or `None` if they
+/// do. Each result column must name a column of the table, ignoring case, of the same type, a
+/// RECORD being checked field by field. A REPEATED column takes only a REPEATED result, and a
+/// REQUIRED one only a REQUIRED result; a REQUIRED column the result leaves out is refused.
+fn append_refusal(table: &[BigQueryFieldSchema], result: &[BigQueryFieldSchema]) -> Option<String> {
+    for column in result {
+        let Some(target) = table
+            .iter()
+            .find(|target| target.name.eq_ignore_ascii_case(&column.name))
+        else {
+            return Some(format!("the table has no field {}", column.name));
+        };
+        let nested = match (&target.field_type, &column.field_type) {
+            (BigQueryFieldType::Struct(target_fields), BigQueryFieldType::Struct(fields)) => {
+                append_refusal(target_fields, fields)
+            }
+            (target_type, column_type) if target_type != column_type => {
+                Some(format!("field {} has changed type", column.name))
+            }
+            _ => None,
+        };
+        if nested.is_some() {
+            return nested;
+        }
+        let mode_taken = match target.mode {
+            BigQueryFieldMode::Repeated => column.mode == BigQueryFieldMode::Repeated,
+            BigQueryFieldMode::Required => column.mode == BigQueryFieldMode::Required,
+            BigQueryFieldMode::Nullable => column.mode != BigQueryFieldMode::Repeated,
+        };
+        if !mode_taken {
+            return Some(format!(
+                "field {} has changed mode from {} to {}",
+                column.name,
+                target.mode.name(),
+                column.mode.name()
+            ));
+        }
+    }
+    table
+        .iter()
+        .find(|target| {
+            target.mode == BigQueryFieldMode::Required
+                && !result
+                    .iter()
+                    .any(|column| column.name.eq_ignore_ascii_case(&target.name))
+        })
+        .map(|missing| {
+            format!(
+                "the result has no value for REQUIRED field {}",
+                missing.name
+            )
+        })
 }
 
 impl BigQueryDmlStats {
@@ -516,41 +615,28 @@ impl BigQueryDmlStats {
     }
 }
 
-/// The counts as BigQuery reports them.
-impl From<BigQueryDmlStats> for DmlStats {
-    fn from(stats: BigQueryDmlStats) -> Self {
-        Self {
-            inserted_row_count: Some(stats.inserted),
-            deleted_row_count: Some(stats.deleted),
-            updated_row_count: Some(stats.updated),
-            ..Default::default()
+impl BigQueryJobId {
+    /// The v2 `JobReference` of this job, run in `project` at `location`.
+    fn reference(&self, project: &str, location: &str) -> JobReference {
+        JobReference {
+            project_id: project.to_string(),
+            job_id: self.to_string(),
+            location: Some(location.to_string()),
         }
     }
-}
 
-/// The location a call names, or BigQuery's default for none.
-fn job_location(location: &str) -> String {
-    if location.is_empty() {
-        DEFAULT_LOCATION.to_string()
-    } else {
-        location.to_string()
+    /// The `NotFound` BigQuery answers for a job of `project` it does not find at `location`.
+    fn not_found(&self, project: &str, location: &str) -> Status {
+        Status::not_found(format!(
+            "Not found: Job {project}:{}.{self}",
+            location_or_default(location)
+        ))
     }
-}
 
-fn job_reference(project: &str, job_id: &BigQueryJobId, location: &str) -> JobReference {
-    JobReference {
-        project_id: project.to_string(),
-        job_id: job_id.to_string(),
-        location: Some(location.to_string()),
+    /// The `AlreadyExists` BigQuery answers for inserting a job whose ID is taken.
+    fn already_exists(&self, project: &str, location: &str) -> Status {
+        Status::already_exists(format!("Already Exists: Job {project}:{location}.{self}"))
     }
-}
-
-/// The `NotFound` BigQuery answers for a job that does not exist.
-fn job_not_found(project: &str, location: &str, job_id: &BigQueryJobId) -> Status {
-    Status::not_found(format!(
-        "Not found: Job {project}:{}.{job_id}",
-        job_location(location)
-    ))
 }
 
 /// The rows of the first page: all of them unless the call's `max_results` allows fewer.
@@ -606,13 +692,19 @@ mod tests {
     };
     use crate::{
         BigQueryDatasetId, BigQueryDmlStats, BigQueryJobId, BigQueryJobRef, BigQueryJobState,
-        BigQueryJobType, BigQueryResult, BigQuerySchemaColumns, BigQuerySchemaColumnsBuilder,
-        BigQueryStatementType, BigQueryTableId,
+        BigQueryJobType, BigQueryLocation, BigQueryResult, BigQuerySchemaColumns,
+        BigQuerySchemaColumnsBuilder, BigQueryStatementType, BigQueryTableId,
     };
     use arrow_array::RecordBatch;
     use futures::TryStreamExt;
-    use gcloud_sdk::google::cloud::bigquery::v2::{PostQueryRequest, QueryRequest};
+    use gcloud_sdk::google::cloud::bigquery::v2::{
+        GetQueryResultsRequest, InsertJobRequest, Job, JobConfiguration, JobConfigurationQuery,
+        JobReference, PostQueryRequest, QueryRequest,
+    };
+    use gcloud_sdk::tonic::Code;
     use serde::{Deserialize, Serialize};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct Order {
@@ -693,29 +785,6 @@ mod tests {
             Some(BigQueryStatementType::CreateTable)
         );
         assert_eq!((outcome.total_rows, outcome.dml_stats), (None, None));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn a_failed_job_is_a_job_error() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        fake.query(BEST_ORDERS).fails_job(invalid_query())?;
-
-        let failed = fake
-            .db()
-            .fluent()
-            .query(BEST_ORDERS)
-            .obj::<Order>()
-            .query()
-            .await;
-
-        match &failed {
-            Err(BigQueryError::JobError(err)) => {
-                assert_eq!(err.public.code, "invalidQuery");
-                assert!(err.job.is_some());
-            }
-            other => panic!("expected a job error, got {other:?}"),
-        }
         Ok(())
     }
 
@@ -967,6 +1036,150 @@ mod tests {
             "{read:?}"
         );
         assert_eq!(fault.calls(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_job_named_in_another_location_is_not_found() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.query(CLOSE_ORDERS)
+            .returns_statement(BigQueryStatementType::Update)?;
+        let outcome = fake
+            .db()
+            .fluent()
+            .query(CLOSE_ORDERS)
+            .job_creation_required()
+            .execute()
+            .await?;
+        let job = outcome.job.expect("a required job");
+        let elsewhere = BigQueryJobRef {
+            location: Some(BigQueryLocation::from_static("EU")),
+            ..job.clone()
+        };
+
+        let read = fake.db().get_job(&elsewhere).await.map(drop);
+        let cancelled = fake.db().cancel_job(&elsewhere).await;
+        let waited = fake
+            .db()
+            .job_client()
+            .get_query_results(GetQueryResultsRequest {
+                project_id: job.project_id.clone(),
+                job_id: job.job_id.to_string(),
+                location: "EU".to_string(),
+                ..Default::default()
+            })
+            .await
+            .map(drop)
+            .map_err(BigQueryError::from);
+
+        for answer in [read, cancelled, waited] {
+            assert!(
+                matches!(answer, Err(BigQueryError::DataNotFoundError(_))),
+                "{answer:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Customer {
+        name: String,
+    }
+
+    #[tokio::test]
+    async fn write_empty_into_an_empty_table_of_other_columns_is_refused() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(TOP_ORDERS), |columns| {
+            columns.from_type::<Customer>()
+        })
+        .create()?;
+        fake.query(BEST_ORDERS)
+            .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
+
+        let refused = fake
+            .db()
+            .fluent()
+            .query(BEST_ORDERS)
+            .destination_table(SHOP.table(TOP_ORDERS))
+            .execute()
+            .await;
+
+        assert!(
+            matches!(&refused, Err(err) if err.has_code(Code::InvalidArgument)),
+            "{refused:?}"
+        );
+        assert_eq!(fake.rows::<Customer>(SHOP.table(TOP_ORDERS))?, Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_append_ignores_descriptions_and_takes_required_into_nullable() -> BigQueryResult<()>
+    {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(TOP_ORDERS), |columns| {
+            columns.from_type::<Order>().with("customer", |customer| {
+                customer.nullable().description("who ordered")
+            })
+        })
+        .create()?;
+        fake.query(BEST_ORDERS)
+            .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
+
+        fake.db()
+            .fluent()
+            .query(BEST_ORDERS)
+            .append_to_destination_table(SHOP.table(TOP_ORDERS))
+            .execute()
+            .await?;
+
+        assert_eq!(fake.rows::<Order>(SHOP.table(TOP_ORDERS))?, best_orders());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_insert_jobs_of_one_id_create_it_once() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let first = AtomicBool::new(true);
+        // The first call holds the rules while the second passes its own checks, so both
+        // are in flight at once.
+        fake.query_matching(move |sql| {
+            if first.swap(false, Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            sql == CLOSE_ORDERS
+        })
+        .returns_statement(BigQueryStatementType::Update)?;
+        let insert = || async {
+            let mut jobs = fake.db().job_client();
+            jobs.insert_job(InsertJobRequest {
+                project_id: "fake-project".to_string(),
+                job: Some(Job {
+                    job_reference: Some(JobReference {
+                        project_id: "fake-project".to_string(),
+                        job_id: "close-orders".to_string(),
+                        location: None,
+                    }),
+                    configuration: Some(JobConfiguration {
+                        query: Some(JobConfigurationQuery {
+                            query: CLOSE_ORDERS.to_string(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            })
+            .await
+        };
+
+        let (one, other) = tokio::join!(insert(), insert());
+
+        let refused: Vec<Code> = [one, other]
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|status| status.code())
+            .collect();
+        assert_eq!(refused, [Code::AlreadyExists]);
         Ok(())
     }
 }

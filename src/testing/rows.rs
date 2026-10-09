@@ -191,6 +191,33 @@ impl ProtoBatchBuilder {
         })
     }
 
+    /// The rows of `rows`, described by `descriptor`, that hold a value outside the range of
+    /// its column, by index, each with its error. Each row is decoded on its own, as a batch
+    /// refuses an out of range value only once all its rows are in.
+    ///
+    /// # Errors
+    /// The error [`from_descriptor`](Self::from_descriptor) returns for `descriptor`.
+    pub(super) fn out_of_range_rows(
+        schema: &BigQueryTableSchema,
+        descriptor: &DescriptorProto,
+        rows: &[Vec<u8>],
+    ) -> Result<Vec<(usize, CodecError)>, CodecError> {
+        let mut out_of_range = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            let mut builder = Self::from_descriptor(schema, descriptor)?;
+            let decoded = match builder.push(row) {
+                Ok(()) => builder.finish().map(drop),
+                Err(err) => Err(err),
+            };
+            if let Err(err) = decoded {
+                if err.kind() == BigQueryCodecErrorKind::OutOfRange {
+                    out_of_range.push((index, err));
+                }
+            }
+        }
+        Ok(out_of_range)
+    }
+
     /// Encodes `rows` with the write path's encoder and decodes them into one batch in the read
     /// layout of `schema`. Errors number the rows from `first_row`.
     ///
@@ -443,13 +470,10 @@ impl ChangeColumns {
             )
             .at_field(CHANGE_TYPE_COLUMN)
         })?;
-        let change_type = [BigQueryChangeType::Upsert, BigQueryChangeType::Delete]
-            .into_iter()
-            .find(|change_type| change_type.name() == text)
-            .ok_or_else(|| {
-                CodecError::invalid_text(format!("{text:?} is not UPSERT or DELETE"))
-                    .at_field(CHANGE_TYPE_COLUMN)
-            })?;
+        let change_type = BigQueryChangeType::parse(text).ok_or_else(|| {
+            CodecError::invalid_text(format!("{text:?} is not UPSERT or DELETE"))
+                .at_field(CHANGE_TYPE_COLUMN)
+        })?;
         let sequence_number = self
             .sequence_number
             .as_deref()

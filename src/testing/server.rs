@@ -4,8 +4,8 @@
 use crate::db::fake::{FakeCall, FakeServer};
 use crate::db::RetryBackoff;
 use crate::errors::BigQueryError;
-use crate::testing::rules::{BigQueryFakeFault, FakeRules};
-use crate::testing::state::FakeState;
+use crate::testing::rules::{BigQueryFakeFault, BigQueryFakeRpc, FakeRules};
+use crate::testing::state::{FakeState, TableKey};
 use crate::testing::BigQueryFake;
 use crate::{BigQueryDbOptions, BigQueryResult};
 use gcloud_sdk::prost::Message;
@@ -83,6 +83,24 @@ impl FakeShared {
                 self.unmatched(call, &described, &[]);
                 None
             }
+        }
+    }
+
+    /// The call back unless a fault of `rpc` on `table` answered it. Faults answer before
+    /// every other rule and before the state.
+    pub(super) async fn unfaulted(
+        &self,
+        call: FakeCall,
+        rpc: BigQueryFakeRpc,
+        table: Option<&TableKey>,
+    ) -> Option<FakeCall> {
+        let fault = self.rules().fault(rpc, table);
+        match fault {
+            Some(fault) => {
+                fault.answer(call).await;
+                None
+            }
+            None => Some(call),
         }
     }
 

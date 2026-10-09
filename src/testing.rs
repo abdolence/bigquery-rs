@@ -176,7 +176,7 @@ pub use rules::{
 
 use crate::db::fake::FakeServer;
 use crate::errors::BigQueryError;
-use crate::query::ParamList;
+use crate::query::{parameter_mode, ParamList};
 use crate::read::BigQueryBatchRows;
 use crate::testing::rows::ProtoBatchBuilder;
 use crate::testing::rules::{
@@ -251,7 +251,8 @@ impl BigQueryFake {
     /// Creates the dataset, unless it exists. A dataset without a project is in the client's.
     pub fn create_dataset(&self, dataset: impl Into<BigQueryDatasetRef>) {
         let key = DatasetKey::resolve(&dataset.into(), self.shared.project());
-        self.shared.state().create_dataset(key);
+        // An existing dataset is kept as it is.
+        let _ = self.shared.state().create_dataset(key);
     }
 
     /// Starts a table with the columns `columns` declares, as
@@ -548,6 +549,11 @@ impl BigQueryFakeQueryBuilder<'_> {
     /// is still running, and the job reports the failure once it is done, which the client
     /// returns as [`BigQueryError::JobError`].
     ///
+    /// A statement BigQuery refuses at validation, such as one with a syntax error, never runs
+    /// as a job. Script it with
+    /// [`fails`](Self::fails)`(BigQueryFakeFault::status(BigQueryFakeCode::InvalidArgument, ..))`,
+    /// which fails `dry_run()` as well.
+    ///
     /// # Errors
     /// The parameter or `times` error the builder kept.
     pub fn fails_job(self, failure: BigQueryFakeJobFailure) -> BigQueryResult<BigQueryFakeRule> {
@@ -556,6 +562,7 @@ impl BigQueryFakeQueryBuilder<'_> {
 
     fn register(self, answer: QueryAnswer) -> BigQueryResult<BigQueryFakeRule> {
         let parameters = self.parameters.into_parameters()?;
+        parameter_mode(&parameters)?;
         let mut description = self.sql.to_string();
         if !parameters.is_empty() {
             description.push_str(&format!(" with {}", ShownParameters(&parameters)));
@@ -876,6 +883,51 @@ mod tests {
         assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
 
         assert_eq!((for_alice.calls(), for_anyone.calls()), (1, 1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rule_mixing_named_and_positional_parameters_is_refused() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+
+        let registered = fake
+            .query(ORDERS_OF)
+            .param("customer", "Alice")
+            .positional_param(1)
+            .returns_rows(|columns| columns.from_type::<Order>(), Vec::<Order>::new());
+
+        match registered {
+            Err(BigQueryError::InvalidParametersError(err)) => {
+                assert_eq!(err.public.field, "query_parameters");
+            }
+            other => panic!("expected the rule to be refused, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn named_parameters_must_equal_the_rule_as_a_set() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.query(ORDERS_OF)
+            .param("customer", "Alice")
+            .param("customer", "Alice")
+            .returns_rows(|columns| columns.from_type::<Order>(), Vec::<Order>::new())?;
+
+        let unmatched: BigQueryResult<Vec<Order>> = fake
+            .db()
+            .fluent()
+            .query(ORDERS_OF)
+            .param("customer", "Alice")
+            .param("since", 2020)
+            .obj()
+            .query()
+            .await;
+
+        match &unmatched {
+            Err(BigQueryError::DatabaseError(err)) => assert_eq!(err.public.code, "Unimplemented"),
+            other => panic!("expected the call to go unmatched, got {other:?}"),
+        }
+        assert!(drop_panics(fake));
         Ok(())
     }
 }

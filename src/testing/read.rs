@@ -3,13 +3,14 @@
 //! A session is served a read rule's rows when one matches its table and row restriction, and
 //! the table's own rows otherwise, projected to its selected fields and spread over the
 //! table's read streams. The fake evaluates no filter, so a session with a row restriction
-//! needs a rule.
+//! needs a rule, and one with a sample percentage or a snapshot time is served the current
+//! rows.
 
 use crate::db::fake::wire::{IpcCompression, IpcMessages};
 use crate::db::fake::FakeCall;
 use crate::testing::rules::BigQueryFakeRpc;
 use crate::testing::server::FakeShared;
-use crate::testing::state::{FakeReadStream, TableKey};
+use crate::testing::state::{fit_to_layout, FakeReadStream, TableKey, DEFAULT_LOCATION};
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::table_read_options::OutputFormatSerializationOptions;
@@ -26,9 +27,6 @@ use std::sync::Arc;
 /// fields do not exist" in it.
 const SELECTED_FIELDS_DO_NOT_EXIST: &str =
     "The following selected fields do not exist in the table schema";
-
-/// The location a session's name carries, BigQuery's default.
-const SESSION_LOCATION: &str = "US";
 
 impl FakeShared {
     pub(super) async fn serve_read(&self, call: FakeCall) {
@@ -58,19 +56,13 @@ impl FakeShared {
                 return;
             }
         };
-        let fault = self
-            .rules()
-            .fault(BigQueryFakeRpc::CreateReadSession, Some(&key));
-        if let Some(fault) = fault {
-            return fault.answer(call).await;
-        }
+        let rpc = BigQueryFakeRpc::CreateReadSession;
+        let Some(call) = self.unfaulted(call, rpc, Some(&key)).await else {
+            return;
+        };
         let options = session.read_options.clone().unwrap_or_default();
-        if session.data_format() != DataFormat::Arrow || options.sample_percentage.is_some() {
-            let described = format!(
-                "CreateReadSession of {key} in {:?} with sample_percentage {:?}",
-                session.data_format(),
-                options.sample_percentage
-            );
+        if session.data_format() != DataFormat::Arrow {
+            let described = format!("CreateReadSession of {key} in {:?}", session.data_format());
             self.unmatched(call, &described, &[]);
             return;
         }
@@ -103,7 +95,13 @@ impl FakeShared {
         let restriction = Some(options.row_restriction.as_str()).filter(|r| !r.is_empty());
         let ruled = self.rules().answer_read(&key, restriction);
         let batches = match (ruled, restriction) {
-            (Some(rows), _) => vec![rows],
+            (Some(rows), _) => match fit_to_layout(&rows, &arrow_schema) {
+                Ok(rows) => vec![rows],
+                Err(err) => {
+                    self.internal(call, &format!("the read rule's rows of {key}: {err}"));
+                    return;
+                }
+            },
             (None, None) => table_batches,
             (None, Some(restriction)) => {
                 let described = format!("CreateReadSession of {key} where {restriction:?}");
@@ -139,7 +137,7 @@ impl FakeShared {
         let row_count: usize = batches.iter().map(RecordBatch::num_rows).sum();
         let mut state = self.state();
         let name = format!(
-            "projects/{}/locations/{SESSION_LOCATION}/sessions/fake-session-{}",
+            "projects/{}/locations/{DEFAULT_LOCATION}/sessions/fake-session-{}",
             key.dataset.project,
             state.next_id()
         );
@@ -180,17 +178,14 @@ impl FakeShared {
     /// Answers `ReadRows` with one response per batch of the stream, from the request's
     /// offset on.
     async fn read_rows(&self, call: FakeCall) {
-        let Some((mut call, request)) = self.first_request::<ReadRowsRequest>(call).await else {
+        let Some((call, request)) = self.first_request::<ReadRowsRequest>(call).await else {
             return;
         };
         let stream = self.state().read_streams.get(&request.read_stream).cloned();
-        let fault = self.rules().fault(
-            BigQueryFakeRpc::ReadRows,
-            stream.as_ref().map(|stream| &stream.table),
-        );
-        if let Some(fault) = fault {
-            return fault.answer(call).await;
-        }
+        let table = stream.as_ref().map(|stream| &stream.table);
+        let Some(mut call) = self.unfaulted(call, BigQueryFakeRpc::ReadRows, table).await else {
+            return;
+        };
         let Some(stream) = stream else {
             let described = format!("ReadRows of the unknown stream {:?}", request.read_stream);
             self.unmatched(call, &described, &[]);
@@ -234,7 +229,7 @@ impl FakeShared {
     }
 }
 
-/// The columns a session's `selected_fields` names.
+/// The columns a session's `selected_fields` names, ignoring case as BigQuery does.
 enum SelectedColumns {
     /// Their indexes in table order, as BigQuery sends them whatever order they were named in;
     /// every column when none is named.
@@ -250,14 +245,20 @@ impl SelectedColumns {
         if selected.is_empty() {
             return Self::Indexes((0..schema.fields().len()).collect());
         }
+        let has_column = |name: &str| {
+            schema
+                .fields()
+                .iter()
+                .any(|field| field.name().eq_ignore_ascii_case(name))
+        };
         let unknown: Vec<String> = selected
             .iter()
-            .filter(|name| schema.index_of(name).is_err())
+            .filter(|name| !has_column(name))
             .cloned()
             .collect();
         if let Some(nested) = unknown.iter().find(|name| {
             name.split_once('.')
-                .is_some_and(|(column, _)| schema.index_of(column).is_ok())
+                .is_some_and(|(column, _)| has_column(column))
         }) {
             return Self::Nested(nested.clone());
         }
@@ -266,7 +267,12 @@ impl SelectedColumns {
         }
         Self::Indexes(
             (0..schema.fields().len())
-                .filter(|&index| selected.contains(schema.field(index).name()))
+                .filter(|&index| {
+                    let column = schema.field(index).name();
+                    selected
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(column))
+                })
                 .collect(),
         )
     }
@@ -591,6 +597,95 @@ mod tests {
         }
 
         assert_eq!(row_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_sampled_read_is_served_the_current_rows() -> BigQueryResult<()> {
+        let rows = vec![order(1, "Alice"), order(2, "Bob")];
+        let fake = fake_with(&rows, 1).await?;
+
+        let mut read: Vec<Order> = fake
+            .db()
+            .fluent()
+            .select()
+            .from(orders())
+            .sample_percentage(50.0)
+            .obj()
+            .query()
+            .await?;
+
+        read.sort_by_key(|row| row.id);
+        assert_eq!(read, rows);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_fields_match_columns_ignoring_case() -> BigQueryResult<()> {
+        let fake = fake_with(&[order(1, "Alice")], 1).await?;
+
+        let read: Vec<OrderCustomer> = fake
+            .db()
+            .fluent()
+            .select()
+            .fields(["CUSTOMER", "Id"])
+            .from(orders())
+            .obj()
+            .query()
+            .await?;
+
+        let expected = vec![OrderCustomer {
+            id: 1,
+            customer: "Alice".into(),
+        }];
+        assert_eq!(read, expected);
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct NotedOrder {
+        id: i64,
+        customer: String,
+        total: f64,
+        paid: bool,
+        receipt: Option<Vec<u8>>,
+        note: Option<String>,
+    }
+
+    #[tokio::test]
+    async fn a_read_rule_takes_a_column_added_after_it() -> BigQueryResult<()> {
+        let fake = fake_with(&[], 1).await?;
+        let bob = order(2, "Bob");
+        fake.read(orders())
+            .row_restriction("customer = 'Bob'")
+            .returns_rows([&bob])?;
+        fake.db()
+            .fluent()
+            .schema()
+            .table(orders())
+            .columns(|columns| columns.from_type::<NotedOrder>())
+            .sync()
+            .await?;
+
+        let read: Vec<NotedOrder> = fake
+            .db()
+            .fluent()
+            .select()
+            .from(orders())
+            .filter_sql("customer = 'Bob'")
+            .obj()
+            .query()
+            .await?;
+
+        let expected = NotedOrder {
+            id: bob.id,
+            customer: bob.customer,
+            total: bob.total,
+            paid: bob.paid,
+            receipt: bob.receipt,
+            note: None,
+        };
+        assert_eq!(read, vec![expected]);
         Ok(())
     }
 }

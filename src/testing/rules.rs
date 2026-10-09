@@ -412,10 +412,12 @@ impl QueryRule {
             .iter()
             .partition(|parameter| !parameter.name.is_empty());
         Ok(expected_positional == positional
-            && expected_named.len() == named.len()
             && expected_named
                 .iter()
-                .all(|parameter| named.contains(parameter)))
+                .all(|parameter| named.contains(parameter))
+            && named
+                .iter()
+                .all(|parameter| expected_named.contains(parameter)))
     }
 }
 

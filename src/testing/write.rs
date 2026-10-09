@@ -7,13 +7,14 @@
 
 use crate::db::fake::wire::storage_error_status;
 use crate::db::fake::FakeCall;
+use crate::errors::BigQueryCodecErrorKind;
 use crate::read::ArrowIpcDecoder;
 use crate::testing::rows::{DecodedRows, ProtoBatchBuilder};
 use crate::testing::rules::{BigQueryFakeFault, BigQueryFakeRpc};
 use crate::testing::server::FakeShared;
-use crate::testing::state::{FakeChanges, FakeState, FakeWriteStream, TableKey};
+use crate::testing::state::{fit_to_layout, FakeChanges, FakeState, FakeWriteStream, TableKey};
 use crate::{BigQueryInstant, BigQueryTableSchema, BigQueryWriteMode, BigQueryWriteStreamName};
-use arrow_array::{new_null_array, RecordBatch, RecordBatchOptions};
+use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use gcloud_sdk::google::rpc;
@@ -74,11 +75,9 @@ impl FakeShared {
         table: &TableKey,
         answer: impl FnOnce(&mut FakeState) -> Result<M, Status>,
     ) {
-        let fault = self.rules().fault(rpc, Some(table));
-        if let Some(fault) = fault {
-            fault.answer(call).await;
+        let Some(call) = self.unfaulted(call, rpc, Some(table)).await else {
             return;
-        }
+        };
         let answered = answer(&mut self.state());
         match answered {
             Ok(message) => call.reply(&message),
@@ -184,7 +183,12 @@ impl FakeShared {
                 .tables
                 .get_mut(&table)
                 .ok_or_else(|| table.not_found())?;
-            table.batches.extend(stream.flush_to(offset));
+            for batch in stream.flush_to(offset) {
+                let visible = fit_to_layout(&batch, &table.arrow_schema).map_err(|err| {
+                    Status::internal(format!("bigquery fake: the rows of {name}: {err}"))
+                })?;
+                table.batches.push(visible);
+            }
             Ok(FlushRowsResponse { offset })
         })
         .await;
@@ -224,14 +228,13 @@ impl FakeShared {
         };
         let rpc = BigQueryFakeRpc::BatchCommitWriteStreams;
         self.answer_write(call, rpc, &table, |state| {
-            if !state.tables.contains_key(&table) {
-                return Err(table.not_found());
+            let mut names: Vec<BigQueryWriteStreamName> = Vec::new();
+            for name in &request.write_streams {
+                let name = BigQueryWriteStreamName::reported(name.clone());
+                if !names.contains(&name) {
+                    names.push(name);
+                }
             }
-            let names: Vec<BigQueryWriteStreamName> = request
-                .write_streams
-                .iter()
-                .map(|name| BigQueryWriteStreamName::reported(name.clone()))
-                .collect();
             let stream_errors: Vec<StorageError> = names
                 .iter()
                 .filter_map(|name| {
@@ -252,11 +255,25 @@ impl FakeShared {
                     stream_errors,
                 });
             }
+            let layout = state
+                .tables
+                .get(&table)
+                .ok_or_else(|| table.not_found())?
+                .arrow_schema
+                .clone();
             let mut committed = Vec::new();
+            for name in &names {
+                if let Some(stream) = state.write_streams.get(name) {
+                    for batch in &stream.appended {
+                        committed.push(fit_to_layout(batch, &layout).map_err(|err| {
+                            Status::internal(format!("bigquery fake: the rows of {name}: {err}"))
+                        })?);
+                    }
+                }
+            }
             for name in &names {
                 if let Some(stream) = state.write_streams.get_mut(name) {
                     stream.committed = true;
-                    committed.extend(stream.appended.iter().cloned());
                 }
             }
             if let Some(table) = state.tables.get_mut(&table) {
@@ -349,7 +366,10 @@ impl FakeShared {
         };
         let decoded = match connection.decode(&schema, &layout, request) {
             Ok(decoded) => decoded,
-            Err(refused) => return Ok(in_band(plain_status(Code::InvalidArgument, refused))),
+            Err(RowsRefusal::Request(refused)) => {
+                return Ok(in_band(plain_status(Code::InvalidArgument, refused)))
+            }
+            Err(RowsRefusal::Rows(row_errors)) => return Ok(row_errors_response(row_errors)),
         };
         if let Some(refused) = self.reject_rows(table, &decoded.rows)? {
             return Ok(refused);
@@ -396,14 +416,28 @@ impl FakeShared {
         if row_errors.is_empty() {
             return Ok(None);
         }
-        row_errors.sort_by_key(|error| error.index);
-        Ok(Some(AppendRowsResponse {
-            row_errors,
-            ..in_band(plain_status(
-                Code::InvalidArgument,
-                "Errors found while processing rows.".to_string(),
-            ))
-        }))
+        Ok(Some(row_errors_response(row_errors)))
+    }
+}
+
+/// Why BigQuery refuses the rows of an append request.
+enum RowsRefusal {
+    /// The request as a whole, for the reason given.
+    Request(String),
+    /// Some of its rows, each with its own error, as BigQuery refuses a value outside the
+    /// range of its column. Nothing in the request is written.
+    Rows(Vec<RowError>),
+}
+
+impl From<String> for RowsRefusal {
+    fn from(reason: String) -> Self {
+        Self::Request(reason)
+    }
+}
+
+impl From<&str> for RowsRefusal {
+    fn from(reason: &str) -> Self {
+        Self::Request(reason.to_string())
     }
 }
 
@@ -616,22 +650,44 @@ impl AppendConnection {
         schema: &BigQueryTableSchema,
         layout: &SchemaRef,
         request: &AppendRowsRequest,
-    ) -> Result<DecodedRows, String> {
+    ) -> Result<DecodedRows, RowsRefusal> {
         match &request.rows {
             Some(Rows::ProtoRows(data)) => {
                 let descriptor = self
                     .proto
                     .as_ref()
                     .ok_or("the connection has sent no proto writer schema")?;
+                let rows: &[Vec<u8>] = data.rows.as_ref().map_or(&[], |rows| &rows.serialized_rows);
                 let mut builder = ProtoBatchBuilder::from_descriptor(schema, descriptor)
                     .map_err(|err| err.to_string())?;
-                let rows = data.rows.as_ref().map(|rows| &rows.serialized_rows);
-                for (index, row) in rows.into_iter().flatten().enumerate() {
+                for (index, row) in rows.iter().enumerate() {
                     builder
                         .push(row)
                         .map_err(|err| format!("row {index}: {err}"))?;
                 }
-                builder.finish().map_err(|err| err.to_string())
+                match builder.finish() {
+                    Ok(decoded) => Ok(decoded),
+                    Err(err) if err.kind() == BigQueryCodecErrorKind::OutOfRange => {
+                        let out_of_range =
+                            ProtoBatchBuilder::out_of_range_rows(schema, descriptor, rows)
+                                .map_err(|err| err.to_string())?;
+                        if out_of_range.is_empty() {
+                            return Err(err.to_string().into());
+                        }
+                        let row_errors = out_of_range
+                            .into_iter()
+                            .map(|(index, err)| {
+                                Ok(RowError {
+                                    index: i64::try_from(index).map_err(|err| err.to_string())?,
+                                    code: RowErrorCode::FieldsError.into(),
+                                    message: err.to_string(),
+                                })
+                            })
+                            .collect::<Result<_, String>>()?;
+                        Err(RowsRefusal::Rows(row_errors))
+                    }
+                    Err(err) => Err(err.to_string().into()),
+                }
             }
             Some(Rows::ArrowRows(data)) => {
                 let ipc_schema = self
@@ -646,59 +702,13 @@ impl AppendConnection {
                     .and_then(|mut decoder| decoder.decode(&record_batch.serialized_record_batch))
                     .map_err(|err| err.to_string())?;
                 Ok(DecodedRows {
-                    rows: arrow_rows(&batch, layout)?,
+                    rows: fit_to_layout(&batch, layout)?,
                     changes: None,
                 })
             }
-            None => Err("the request carries no rows".to_string()),
+            None => Err("the request carries no rows".into()),
         }
     }
-}
-
-/// `batch` in `layout`, its columns matched to the table's by name, ignoring case as BigQuery
-/// does. A column the batch leaves out is NULL.
-///
-/// # Errors
-/// A column the table does not have, one whose Arrow type is not the table's, or a REQUIRED
-/// column with NULLs or left out.
-fn arrow_rows(batch: &RecordBatch, layout: &SchemaRef) -> Result<RecordBatch, String> {
-    let batch_schema = batch.schema();
-    if let Some(extra) = batch_schema.fields().iter().find(|field| {
-        !layout
-            .fields()
-            .iter()
-            .any(|column| column.name().eq_ignore_ascii_case(field.name()))
-    }) {
-        return Err(format!(
-            "the table has no column for the Arrow field {}",
-            extra.name()
-        ));
-    }
-    let columns = layout
-        .fields()
-        .iter()
-        .map(|column| {
-            let found = batch_schema
-                .fields()
-                .iter()
-                .position(|field| field.name().eq_ignore_ascii_case(column.name()));
-            match found {
-                Some(index) if batch.column(index).data_type() == column.data_type() => {
-                    Ok(batch.column(index).clone())
-                }
-                Some(index) => Err(format!(
-                    "the Arrow field {} is {}, and its column takes {}",
-                    column.name(),
-                    batch.column(index).data_type(),
-                    column.data_type()
-                )),
-                None => Ok(new_null_array(column.data_type(), batch.num_rows())),
-            }
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
-    RecordBatch::try_new_with_options(layout.clone(), columns, &options)
-        .map_err(|err| format!("the Arrow rows do not fit the table: {err}"))
 }
 
 /// The `WriteStream` the stream RPCs answer with.
@@ -733,6 +743,19 @@ fn plain_status(code: Code, message: String) -> rpc::Status {
 fn storage_status(code: Code, storage: StorageErrorCode, entity: &str) -> rpc::Status {
     let message = format!("{}: {entity}", storage.as_str_name());
     storage_error_status(code, storage, entity, &message)
+}
+
+/// The answer to an append request whose rows `row_errors` refuses: the row errors, in row
+/// order, under BigQuery's in-band `InvalidArgument`.
+fn row_errors_response(mut row_errors: Vec<RowError>) -> AppendRowsResponse {
+    row_errors.sort_by_key(|error| error.index);
+    AppendRowsResponse {
+        row_errors,
+        ..in_band(plain_status(
+            Code::InvalidArgument,
+            "Errors found while processing rows.".to_string(),
+        ))
+    }
 }
 
 fn in_band(status: rpc::Status) -> AppendRowsResponse {
@@ -962,6 +985,124 @@ mod tests {
 
         assert_eq!(fake.rows::<Order>(SHOP.table(ORDERS))?, orders());
         assert_eq!(aborted.calls(), 1);
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Payment {
+        id: i64,
+        amount: String,
+    }
+
+    #[tokio::test]
+    async fn a_numeric_beyond_its_precision_is_a_row_error() -> BigQueryResult<()> {
+        const PAYMENTS: BigQueryTableId = BigQueryTableId::from_static("payments");
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(PAYMENTS), |columns| {
+            columns
+                .from_type::<Payment>()
+                .with("amount", |amount| amount.numeric_with(10, 2))
+        })
+        .create()?;
+        let payments =
+            [("1.50", 1), ("123456789.00", 2), ("2.00", 3)].map(|(amount, id)| Payment {
+                id,
+                amount: amount.to_string(),
+            });
+
+        let written = fake
+            .db()
+            .fluent()
+            .insert()
+            .into(SHOP.table(PAYMENTS))
+            .objects(payments)
+            .execute()
+            .await;
+
+        match written {
+            Err(BigQueryError::RowErrors(errors)) => {
+                let rows: Vec<u64> = errors.errors.iter().map(|error| error.row).collect();
+                assert_eq!(rows, vec![1]);
+            }
+            other => panic!("expected row errors, got {other:?}"),
+        }
+        assert_eq!(fake.rows::<Payment>(SHOP.table(PAYMENTS))?, Vec::new());
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct NotedOrder {
+        id: i64,
+        customer: String,
+        total: f64,
+        note: Option<String>,
+    }
+
+    impl From<Order> for NotedOrder {
+        fn from(order: Order) -> Self {
+            Self {
+                id: order.id,
+                customer: order.customer,
+                total: order.total,
+                note: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_rows_take_a_column_added_before_their_commit() -> BigQueryResult<()> {
+        let fake = fake_with_orders().await?;
+        let (mut writer, _responses) = fake
+            .db()
+            .create_streaming_writer_with_options::<Order>(
+                SHOP.table(ORDERS),
+                options(BigQueryWriteMode::Pending),
+            )
+            .await?;
+        writer.write_all(&orders()).await?;
+        let finalized = writer.finalize().await?;
+        fake.db()
+            .fluent()
+            .schema()
+            .table(SHOP.table(ORDERS))
+            .columns(|columns| columns.from_type::<NotedOrder>())
+            .sync()
+            .await?;
+
+        fake.db().commit_write_streams(vec![finalized]).await?;
+
+        let mut read: Vec<NotedOrder> = fake
+            .db()
+            .fluent()
+            .select()
+            .from(SHOP.table(ORDERS))
+            .obj()
+            .query()
+            .await?;
+        read.sort_by_key(|order| order.id);
+        let expected: Vec<NotedOrder> = orders().into_iter().map(NotedOrder::from).collect();
+        assert_eq!(read, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stream_listed_twice_is_committed_once() -> BigQueryResult<()> {
+        let fake = fake_with_orders().await?;
+        let (mut writer, _responses) = fake
+            .db()
+            .create_streaming_writer_with_options::<Order>(
+                SHOP.table(ORDERS),
+                options(BigQueryWriteMode::Pending),
+            )
+            .await?;
+        writer.write_all(&orders()).await?;
+        let finalized = writer.finalize().await?;
+
+        fake.db()
+            .commit_write_streams(vec![finalized.clone(), finalized])
+            .await?;
+
+        assert_eq!(fake.rows::<Order>(SHOP.table(ORDERS))?, orders());
         Ok(())
     }
 }

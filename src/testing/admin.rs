@@ -9,10 +9,9 @@ use crate::db::fake::FakeCall;
 use crate::testing::rules::BigQueryFakeRpc;
 use crate::testing::server::FakeShared;
 use crate::testing::state::{
-    DatasetKey, FakeDataset, FakeGeneration, FakeState, FakeTable, TableKey,
+    fit_to_layout, DatasetKey, FakeDataset, FakeGeneration, FakeState, FakeTable, TableKey,
 };
 use crate::{BigQueryFieldMode, BigQueryFieldType, BigQueryTableSchema};
-use arrow_array::{new_null_array, RecordBatch};
 use gcloud_sdk::google::cloud::bigquery::v2;
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Status;
@@ -68,23 +67,6 @@ impl FakeShared {
             Ok(message) => call.reply(&message),
             Err(AdminRefusal::Status(status)) => call.fail(status.code(), status.message()),
             Err(AdminRefusal::Unsupported(described)) => self.unmatched(call, &described, &[]),
-        }
-    }
-
-    /// The call back unless a fault of `rpc` on `table` answered it.
-    async fn unfaulted(
-        &self,
-        call: FakeCall,
-        rpc: BigQueryFakeRpc,
-        table: Option<&TableKey>,
-    ) -> Option<FakeCall> {
-        let fault = self.rules().fault(rpc, table);
-        match fault {
-            Some(fault) => {
-                fault.answer(call).await;
-                None
-            }
-            None => Some(call),
         }
     }
 
@@ -374,9 +356,8 @@ impl FakeState {
         let mut table = FakeTable::new(schema, Vec::new(), NonZeroUsize::MIN, generation);
         table.resource = body;
         let resource = table.resource(key);
-        self.create_table(key.clone(), table).map_err(|_| {
-            Status::already_exists(format!("Already Exists: Table {}", key.legacy_id()))
-        })?;
+        self.create_table(key.clone(), table)
+            .map_err(|_| key.already_exists())?;
         Ok(resource)
     }
 
@@ -443,15 +424,7 @@ impl FakeState {
     /// # Errors
     /// `AlreadyExists` for a dataset that exists.
     fn insert_dataset(&mut self, key: &DatasetKey, body: v2::Dataset) -> AdminResult<v2::Dataset> {
-        if self.datasets.contains_key(key) {
-            return Err(Status::already_exists(format!(
-                "Already Exists: Dataset {}",
-                key.legacy_id()
-            ))
-            .into());
-        }
-        self.create_dataset(key.clone());
-        let dataset = self.datasets.get_mut(key).ok_or_else(|| key.not_found())?;
+        let dataset = self.create_dataset(key.clone())?;
         dataset.resource = body;
         Ok(dataset.resource(key))
     }
@@ -570,7 +543,11 @@ impl FakeTable {
             )))
         };
         for old in &self.schema.fields {
-            let Some(new) = schema.fields.iter().find(|new| new.name == old.name) else {
+            let Some(new) = schema
+                .fields
+                .iter()
+                .find(|new| new.name.eq_ignore_ascii_case(&old.name))
+            else {
                 return Err(refused(format!(
                     "Field {} is missing in new schema",
                     old.name
@@ -591,7 +568,11 @@ impl FakeTable {
         }
         let added_required = schema.fields.iter().find(|new| {
             new.mode == BigQueryFieldMode::Required
-                && !self.schema.fields.iter().any(|old| old.name == new.name)
+                && !self
+                    .schema
+                    .fields
+                    .iter()
+                    .any(|old| old.name.eq_ignore_ascii_case(&new.name))
         });
         if let Some(added) = added_required {
             return Err(refused(format!(
@@ -607,22 +588,11 @@ impl FakeTable {
             .batches
             .iter()
             .map(|batch| {
-                let columns = arrow_schema
-                    .fields()
-                    .iter()
-                    .map(|field| match batch.column_by_name(field.name()) {
-                        Some(column) if column.data_type() == field.data_type() => {
-                            Ok(column.clone())
-                        }
-                        Some(_) => Err(unsupported(format!(
-                            "holds rows, changes the nested columns of {}",
-                            field.name()
-                        ))),
-                        None => Ok(new_null_array(field.data_type(), batch.num_rows())),
-                    })
-                    .collect::<AdminResult<Vec<_>>>()?;
-                RecordBatch::try_new(arrow_schema.clone(), columns)
-                    .map_err(|err| unsupported(format!("cannot carry its rows over: {err}")))
+                fit_to_layout(batch, &arrow_schema).map_err(|err| {
+                    unsupported(format!(
+                        "holds rows, cannot carry them over, as a nested column changed: {err}"
+                    ))
+                })
             })
             .collect::<AdminResult<Vec<_>>>()?;
         self.schema = schema;
@@ -723,7 +693,8 @@ mod tests {
     use crate::testing::BigQueryFake;
     use crate::{
         BigQueryDataset, BigQueryDatasetId, BigQueryResult, BigQuerySchemaChange,
-        BigQuerySchemaColumn, BigQuerySchemaColumnsBuilder, BigQueryTableId, BigQueryTableRef,
+        BigQuerySchemaColumn, BigQuerySchemaColumns, BigQuerySchemaColumnsBuilder, BigQueryTableId,
+        BigQueryTableRef,
     };
     use futures::TryStreamExt;
     use gcloud_sdk::google::cloud::bigquery::v2;
@@ -1046,6 +1017,47 @@ mod tests {
             matches!(synced, Err(BigQueryError::DataNotFoundError(_))),
             "{synced:?}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_schema_change_matches_columns_ignoring_case() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let alice = Order {
+            id: 1,
+            customer: Some("Alice".into()),
+        };
+        fake.table(SHOP.table(ORDERS), order_columns)
+            .rows([alice])
+            .create()?;
+        let columns = BigQuerySchemaColumnsBuilder;
+        let shouted: BigQuerySchemaColumns = columns
+            .fields([
+                columns.field("ID").int64().required(),
+                columns.field("CUSTOMER").string(),
+                columns.field("note").string(),
+            ])
+            .into();
+        let schema = shouted.table_schema()?;
+
+        let patched = fake
+            .db()
+            .table_client()
+            .patch_table(v2::UpdateOrPatchTableRequest {
+                project_id: "fake-project".to_string(),
+                dataset_id: SHOP.to_string(),
+                table_id: ORDERS.to_string(),
+                table: Some(v2::Table {
+                    schema: Some(v2::TableSchema::from(&schema)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .map_err(BigQueryError::from)?
+            .into_inner();
+
+        assert_eq!(patched.num_rows, Some(1));
         Ok(())
     }
 }

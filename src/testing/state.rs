@@ -13,7 +13,7 @@ use crate::{
     BigQueryTableId, BigQueryTableRef, BigQueryTableSchema, BigQueryWriteMode,
     BigQueryWriteStreamName,
 };
-use arrow_array::RecordBatch;
+use arrow_array::{new_null_array, RecordBatch, RecordBatchOptions};
 use arrow_schema::SchemaRef;
 use gcloud_sdk::google::cloud::bigquery::v2;
 use gcloud_sdk::tonic::Status;
@@ -27,8 +27,18 @@ use std::sync::Arc;
 pub(super) const QUERY_RESULTS_DATASET: BigQueryDatasetId =
     BigQueryDatasetId::from_static("_fake_query_results");
 
-/// The location a dataset or a job reports when its call names none, BigQuery's default.
+/// The location a dataset, a job or a read session reports when its call names none,
+/// BigQuery's default.
 pub(super) const DEFAULT_LOCATION: &str = "US";
+
+/// The location a call names, or [`DEFAULT_LOCATION`] for an empty one.
+pub(super) fn location_or_default(location: &str) -> String {
+    if location.is_empty() {
+        DEFAULT_LOCATION.to_string()
+    } else {
+        location.to_string()
+    }
+}
 
 /// A dataset, with its project resolved.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -78,6 +88,11 @@ impl DatasetKey {
     /// The `NotFound` BigQuery answers for a dataset that does not exist.
     pub(super) fn not_found(&self) -> Status {
         Status::not_found(format!("Not found: Dataset {}", self.legacy_id()))
+    }
+
+    /// The `AlreadyExists` BigQuery answers for creating a dataset that exists.
+    pub(super) fn already_exists(&self) -> Status {
+        Status::already_exists(format!("Already Exists: Dataset {}", self.legacy_id()))
     }
 }
 
@@ -159,6 +174,11 @@ impl TableKey {
     pub(super) fn not_found(&self) -> Status {
         Status::not_found(format!("Not found: Table {}", self.legacy_id()))
     }
+
+    /// The `AlreadyExists` BigQuery answers for creating a table that exists.
+    pub(super) fn already_exists(&self) -> Status {
+        Status::already_exists(format!("Already Exists: Table {}", self.legacy_id()))
+    }
 }
 
 /// The table, naming its project.
@@ -213,10 +233,7 @@ impl FakeDataset {
     /// The dataset as `GetDataset` returns it, in BigQuery's default location unless it was
     /// created in another.
     pub(super) fn resource(&self, key: &DatasetKey) -> v2::Dataset {
-        let location = match self.resource.location.as_str() {
-            "" => DEFAULT_LOCATION.to_string(),
-            location => location.to_string(),
-        };
+        let location = location_or_default(&self.resource.location);
         v2::Dataset {
             kind: "bigquery#dataset".into(),
             id: key.legacy_id(),
@@ -389,12 +406,16 @@ impl FakeState {
         FakeGeneration(self.next_id())
     }
 
-    /// Creates the dataset unless it exists.
-    pub(super) fn create_dataset(&mut self, key: DatasetKey) {
-        if !self.datasets.contains_key(&key) {
-            let dataset = FakeDataset::new(self.next_generation());
-            self.datasets.insert(key, dataset);
+    /// Creates the dataset.
+    ///
+    /// # Errors
+    /// `AlreadyExists` if the dataset exists.
+    pub(super) fn create_dataset(&mut self, key: DatasetKey) -> Result<&mut FakeDataset, Status> {
+        if self.datasets.contains_key(&key) {
+            return Err(key.already_exists());
         }
+        let dataset = FakeDataset::new(self.next_generation());
+        Ok(self.datasets.entry(key).or_insert(dataset))
     }
 
     /// Creates the table, and its dataset unless it exists.
@@ -403,12 +424,11 @@ impl FakeState {
     /// [`BigQueryError::DataConflictError`] if the table exists.
     pub(super) fn create_table(&mut self, key: TableKey, table: FakeTable) -> BigQueryResult<()> {
         if self.tables.contains_key(&key) {
-            return Err(BigQueryError::from(Status::already_exists(format!(
-                "Already Exists: Table {}",
-                key.legacy_id()
-            ))));
+            return Err(BigQueryError::from(key.already_exists()));
         }
-        self.create_dataset(key.dataset.clone());
+        if !self.datasets.contains_key(&key.dataset) {
+            self.create_dataset(key.dataset.clone())?;
+        }
         self.tables.insert(key, table);
         Ok(())
     }
@@ -430,4 +450,54 @@ impl FakeState {
         self.jobs.insert(job_id.clone(), job);
         job_id
     }
+}
+
+/// `batch` in `layout`, a table's read layout, its columns matched to the table's by name,
+/// ignoring case as BigQuery does. A column the batch leaves out is NULL. Rows written or
+/// scripted under an earlier schema of a table read the columns added since as NULL this way.
+///
+/// # Errors
+/// A column the table does not have, one whose Arrow type is not the table's, or a REQUIRED
+/// column with NULLs or left out.
+pub(super) fn fit_to_layout(
+    batch: &RecordBatch,
+    layout: &SchemaRef,
+) -> Result<RecordBatch, String> {
+    let batch_schema = batch.schema();
+    if let Some(extra) = batch_schema.fields().iter().find(|field| {
+        !layout
+            .fields()
+            .iter()
+            .any(|column| column.name().eq_ignore_ascii_case(field.name()))
+    }) {
+        return Err(format!(
+            "the table has no column for the Arrow field {}",
+            extra.name()
+        ));
+    }
+    let columns = layout
+        .fields()
+        .iter()
+        .map(|column| {
+            let found = batch_schema
+                .fields()
+                .iter()
+                .position(|field| field.name().eq_ignore_ascii_case(column.name()));
+            match found {
+                Some(index) if batch.column(index).data_type() == column.data_type() => {
+                    Ok(batch.column(index).clone())
+                }
+                Some(index) => Err(format!(
+                    "the Arrow field {} is {}, and its column takes {}",
+                    column.name(),
+                    batch.column(index).data_type(),
+                    column.data_type()
+                )),
+                None => Ok(new_null_array(column.data_type(), batch.num_rows())),
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    RecordBatch::try_new_with_options(layout.clone(), columns, &options)
+        .map_err(|err| format!("the Arrow rows do not fit the table: {err}"))
 }

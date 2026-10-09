@@ -216,6 +216,15 @@ impl BigQueryChangeType {
             BigQueryChangeType::Delete => "DELETE",
         }
     }
+
+    /// The change a `_CHANGE_TYPE` value names, exactly as [`name`](Self::name) writes it.
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "UPSERT" => Some(BigQueryChangeType::Upsert),
+            "DELETE" => Some(BigQueryChangeType::Delete),
+            _ => None,
+        }
+    }
 }
 
 /// A CDC `_CHANGE_SEQUENCE_NUMBER`, which orders changes to one key. `From<u64>` writes it in

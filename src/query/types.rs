@@ -253,6 +253,18 @@ impl From<gcloud_sdk::google::cloud::bigquery::v2::JobReference> for BigQueryJob
     }
 }
 
+/// The counts as BigQuery reports them.
+impl From<BigQueryDmlStats> for gcloud_sdk::google::cloud::bigquery::v2::DmlStats {
+    fn from(stats: BigQueryDmlStats) -> Self {
+        Self {
+            inserted_row_count: Some(stats.inserted),
+            deleted_row_count: Some(stats.deleted),
+            updated_row_count: Some(stats.updated),
+            ..Default::default()
+        }
+    }
+}
+
 impl From<gcloud_sdk::google::cloud::bigquery::v2::DmlStats> for BigQueryDmlStats {
     /// BigQuery leaves out the counts of the kinds a statement did not do, so a count missing
     /// from reported stats is zero.

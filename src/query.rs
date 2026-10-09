@@ -24,7 +24,7 @@ mod support;
 
 #[cfg(test)]
 pub(crate) use params::{infer_param, typed_param, ParamLabel};
-pub(crate) use params::{literal_of, ParamList};
+pub(crate) use params::{literal_of, parameter_mode, ParamList};
 
 #[cfg(test)]
 mod tests;
