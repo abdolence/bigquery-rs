@@ -294,6 +294,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sql_file_parameter_bound_twice_in_different_case_fails_without_a_call() {
+        let db = MockDatabase;
+        let result = BigQueryExprBuilder::new(&db)
+            .query(crate::sql_file!(
+                "../../query/sql/top_words.sql",
+                corpus,
+                min_count
+            ))
+            .param("corpus", "hamlet")
+            .param("min_count", 100)
+            .param("Corpus", "macbeth")
+            .execute()
+            .await;
+        match result {
+            Err(BigQueryError::InvalidParametersError(err)) => {
+                assert_eq!(err.public.field, "Corpus")
+            }
+            other => panic!("expected `Corpus` to be refused, got {other:?}"),
+        }
+        assert!(take_calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn sql_file_parameter_left_unbound_fails_without_a_call() {
         let db = MockDatabase;
         let result = BigQueryExprBuilder::new(&db)

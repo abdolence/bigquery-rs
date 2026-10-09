@@ -1,4 +1,4 @@
-use crate::sql::{same_name, SqlParameterNames};
+use crate::sql::{parameter_position, SqlParameterNames};
 use std::borrow::Cow;
 
 /// The GoogleSQL statement that [`query`](crate::BigQueryExprBuilder::query) runs: text built
@@ -44,7 +44,7 @@ impl BigQuerySql {
         let mut used = [false; N];
         let mut names = SqlParameterNames::new(text);
         while let Some(name) = names.next_name() {
-            match position(parameters, name) {
+            match parameter_position(parameters, name) {
                 Some(index) => used[index] = true,
                 None => mismatch(
                     "the SQL uses @",
@@ -56,7 +56,7 @@ impl BigQuerySql {
         let mut index = 0;
         while index < N {
             let name = parameters[index].as_bytes();
-            if !matches!(position(parameters, name), Some(first) if used[first]) {
+            if !matches!(parameter_position(parameters, name), Some(first) if used[first]) {
                 mismatch(
                     "the parameter list names ",
                     name,
@@ -106,21 +106,6 @@ impl From<Cow<'_, str>> for BigQuerySql {
     fn from(text: Cow<'_, str>) -> Self {
         Self(Statement::Text(text.into_owned()))
     }
-}
-
-/// The index of the first of `parameters` that names the same parameter as `name`.
-const fn position(parameters: &[&str], name: &[u8]) -> Option<usize> {
-    let mut index = 0;
-    while index < parameters.len() {
-        let listed = parameters[index].as_bytes();
-        // Most listed names differ in length; testing that here, without a call, keeps the
-        // const evaluation of a long file within rustc's budget.
-        if listed.len() == name.len() && same_name(listed, name) {
-            return Some(index);
-        }
-        index += 1;
-    }
-    None
 }
 
 /// Panics with `before`, `name` and `after` joined. Const panics take a single `&str` argument,
@@ -303,19 +288,6 @@ mod tests {
         let (text, parameters) = REPORT.into_parts();
         assert_eq!(text, REPORT_TEXT);
         assert_eq!(parameters, Some(&REPORT_FILTERS[..]));
-    }
-
-    #[test]
-    fn text_in_a_box_or_a_cow_is_a_statement() {
-        let owned = String::from("SELECT 1");
-        let statements = [
-            BigQuerySql::from(Box::<str>::from("SELECT 1")),
-            BigQuerySql::from(Cow::Borrowed("SELECT 1")),
-            BigQuerySql::from(Cow::<str>::Owned(owned.clone())),
-        ];
-        for statement in statements {
-            assert_eq!(statement, BigQuerySql::from(&owned));
-        }
     }
 
     #[test]

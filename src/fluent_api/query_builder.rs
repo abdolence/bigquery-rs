@@ -1,6 +1,6 @@
 use crate::errors::BigQueryError;
 use crate::query::{infer_param, struct_params, typed_param, ParamLabel};
-use crate::sql::same_name;
+use crate::sql::parameter_position;
 use crate::{
     BigQueryDatasetRef, BigQueryDestinationWrite, BigQueryDryRunResult, BigQueryJobCreation,
     BigQueryJobStats, BigQueryParamType, BigQueryQueryDestination, BigQueryQueryOutcome,
@@ -291,29 +291,36 @@ where
     /// Refuses named parameters that differ from the names a [`sql_file!`](crate::sql_file!)
     /// statement declares: the macro checks the file against its list when the caller compiles,
     /// and this checks the `.param` calls against the same list. Names compare ignoring ASCII
-    /// case, as BigQuery compares them.
+    /// case, as BigQuery compares them, so a name bound twice in different case is refused too:
+    /// BigQuery answers it as a duplicate parameter.
     fn check_bound_names(declared: &[&str], bound: &[QueryParameter]) -> BigQueryResult<()> {
         let named: Vec<&str> = bound
             .iter()
             .map(|param| param.name.as_str())
             .filter(|name| !name.is_empty())
             .collect();
-        let lists = |names: &[&str], name: &str| {
-            names
-                .iter()
-                .any(|listed| same_name(listed.as_bytes(), name.as_bytes()))
-        };
-        if let Some(unbound) = declared.iter().find(|name| !lists(&named, name)) {
+        if let Some(unbound) = declared
+            .iter()
+            .find(|name| parameter_position(&named, name.as_bytes()).is_none())
+        {
             return Err(BigQueryError::invalid_parameters(
                 *unbound,
                 format!("the SQL file uses @{unbound}, and no value is bound to it"),
             ));
         }
-        if let Some(undeclared) = named.iter().find(|name| !lists(declared, name)) {
-            return Err(BigQueryError::invalid_parameters(
-                *undeclared,
-                format!("a value is bound to {undeclared}, which the SQL file does not use"),
-            ));
+        for (index, name) in named.iter().enumerate() {
+            if parameter_position(declared, name.as_bytes()).is_none() {
+                return Err(BigQueryError::invalid_parameters(
+                    *name,
+                    format!("a value is bound to {name}, which the SQL file does not use"),
+                ));
+            }
+            if parameter_position(&named, name.as_bytes()) != Some(index) {
+                return Err(BigQueryError::invalid_parameters(
+                    *name,
+                    format!("a value is bound to {name} more than once"),
+                ));
+            }
         }
         Ok(())
     }

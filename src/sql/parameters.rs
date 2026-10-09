@@ -47,14 +47,13 @@ impl<'a> SqlParameterNames<'a> {
                             let end = identifier_end(bytes, start);
                             (start, end, end)
                         }
-                        b'`' => {
-                            let end = quoted_end(bytes, start);
-                            if end < start + 2 || bytes[end - 1] != b'`' {
+                        b'`' => match quoted_close(bytes, start) {
+                            Some(end) if end >= start + 3 => (start + 1, end - 1, end),
+                            _ => {
                                 self.rest = &[];
                                 return None;
                             }
-                            (start + 1, end - 1, end)
-                        }
+                        },
                         _ => {
                             at += 1;
                             continue;
@@ -71,20 +70,27 @@ impl<'a> SqlParameterNames<'a> {
     }
 }
 
-/// Whether two parameter names name the same parameter. BigQuery compares names ignoring ASCII
-/// case; `eq_ignore_ascii_case` on slices is not `const` at the crate's MSRV.
-pub(crate) const fn same_name(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
+/// The index of the first of `names` that names the same parameter as `name`. BigQuery compares
+/// names ignoring ASCII case; `eq_ignore_ascii_case` on slices is not `const` at the crate's
+/// MSRV.
+pub(crate) const fn parameter_position(names: &[&str], name: &[u8]) -> Option<usize> {
     let mut index = 0;
-    while index < left.len() {
-        if !left[index].eq_ignore_ascii_case(&right[index]) {
-            return false;
-        }
+    'names: while index < names.len() {
+        let listed = names[index].as_bytes();
         index += 1;
+        if listed.len() != name.len() {
+            continue;
+        }
+        let mut at = 0;
+        while at < name.len() {
+            if !listed[at].eq_ignore_ascii_case(&name[at]) {
+                continue 'names;
+            }
+            at += 1;
+        }
+        return Some(index - 1);
     }
-    true
+    None
 }
 
 /// Whether `name` is a GoogleSQL identifier that needs no quoting: ASCII letters, digits and
@@ -113,9 +119,18 @@ const fn identifier_end(bytes: &[u8], mut at: usize) -> usize {
     at
 }
 
-/// The end of the quoted token that opens at `start`: one quote character, or three of `'` or
-/// `"`.
+/// The end of the quoted token that opens at `start`, or the end of the text when the token is
+/// not closed.
 const fn quoted_end(bytes: &[u8], start: usize) -> usize {
+    match quoted_close(bytes, start) {
+        Some(end) => end,
+        None => bytes.len(),
+    }
+}
+
+/// The end of the quoted token that opens at `start`, just past its closing quote: one quote
+/// character, or three of `'` or `"`. `None` when the text ends before the token closes.
+const fn quoted_close(bytes: &[u8], start: usize) -> Option<usize> {
     let quote = bytes[start];
     let triple =
         quote != b'`' && byte_at(bytes, start + 1) == quote && byte_at(bytes, start + 2) == quote;
@@ -126,14 +141,14 @@ const fn quoted_end(bytes: &[u8], start: usize) -> usize {
         } else if bytes[at] != quote {
             at += 1;
         } else if !triple {
-            return at + 1;
+            return Some(at + 1);
         } else if byte_at(bytes, at + 1) == quote && byte_at(bytes, at + 2) == quote {
-            return at + 3;
+            return Some(at + 3);
         } else {
             at += 1;
         }
     }
-    bytes.len()
+    None
 }
 
 /// The end of the line comment that opens at `start`, at its line break.
@@ -247,6 +262,16 @@ mod tests {
         assert_eq!(names("SELECT @a /* @b"), ["a"]);
         assert_eq!(names("SELECT @a, '''x ' @b"), ["a"]);
         assert_eq!(names("SELECT @a, '\\"), ["a"]);
+    }
+
+    #[test]
+    fn an_empty_quoted_name_ends_the_scan() {
+        assert_eq!(names("SELECT @a, @``, @b"), ["a"]);
+    }
+
+    #[test]
+    fn a_quoted_name_whose_closing_backtick_is_escaped_runs_to_the_end() {
+        assert_eq!(names("SELECT @a, @`b\\`"), ["a"]);
     }
 
     /// One piece of a generated statement: either text that holds no `@` and no token opener,
