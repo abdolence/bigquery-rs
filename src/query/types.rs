@@ -9,14 +9,16 @@ use crate::{
 use crate::{BigQueryJobId, BigQueryLabels, BigQueryLocation, BigQueryQueryId, BigQueryRequestId};
 use gcloud_sdk::google::cloud::bigquery::v2::QueryParameter;
 use rsb_derive::Builder;
+use std::borrow::Cow;
 use std::time::Duration;
 
 /// What a query sends: the statement, its parameters and the job settings, as
 /// [`BigQueryQueryBuilder`](crate::BigQueryQueryBuilder) collects them.
 #[derive(Debug, PartialEq, Clone, Builder)]
 pub struct BigQueryQueryParams {
-    /// The GoogleSQL statement.
-    pub sql: String,
+    /// The GoogleSQL statement. Borrowed when it comes from
+    /// [`sql_file!`](crate::sql_file!), so the file's text is copied only into each request.
+    pub sql: Cow<'static, str>,
     /// The parameters, encoded. Named ones carry their name, positional ones an empty name.
     #[default = "Vec::new()"]
     pub(crate) query_parameters: Vec<QueryParameter>,

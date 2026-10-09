@@ -1,5 +1,6 @@
 //! Runs GoogleSQL queries with parameters: named ones, positional ones, an ARRAY, a STRUCT and
-//! an ARRAY of STRUCTs. Values travel as query parameters, never as SQL text.
+//! an ARRAY of STRUCTs, and a statement kept in a `.sql` file. Values travel as query
+//! parameters, never as SQL text.
 //!
 //! Run with `PROJECT_ID=<your-project> cargo run --example query`.
 
@@ -260,6 +261,33 @@ async fn run_queries(
     println!("Reading list:");
     for entry in &reading_list {
         println!("  {} reads {}", entry.reader, entry.title);
+    }
+
+    // A statement kept in a .sql file, its parameter names checked against the file when this
+    // example compiles and against the bound values before the query is sent
+    let twentieth_century = PublicationYears {
+        earliest: 1900,
+        latest: 1999,
+    };
+    let long_shelves: Vec<AuthorShelf> = db
+        .fluent()
+        .query(bigquery::sql_file!(
+            "sql/author_shelves.sql",
+            years,
+            min_pages
+        ))
+        .default_dataset(dataset.clone())
+        .param("years", &twentieth_century)
+        .param("min_pages", 200)
+        .obj()
+        .query()
+        .await?;
+    println!("Authors by pages, counting 20th century books of 200 pages and more:");
+    for shelf in &long_shelves {
+        println!(
+            "  {}: {} pages over {} of their books",
+            shelf.author, shelf.total_pages, shelf.books
+        );
     }
 
     Ok(())

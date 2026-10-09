@@ -175,7 +175,7 @@ impl BigQueryDb {
     }
 
     async fn run_ddl(&self, sql: String) -> BigQueryResult<()> {
-        self.execute_query(BigQueryQueryParams::new(sql))
+        self.execute_query(BigQueryQueryParams::new(sql.into()))
             .await
             .map(|_| ())
     }

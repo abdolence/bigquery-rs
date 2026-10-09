@@ -3,7 +3,7 @@ use crate::query::{infer_param, struct_params, typed_param, ParamLabel};
 use crate::{
     BigQueryDatasetRef, BigQueryDestinationWrite, BigQueryDryRunResult, BigQueryJobCreation,
     BigQueryJobStats, BigQueryParamType, BigQueryQueryDestination, BigQueryQueryOutcome,
-    BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions, BigQueryResult,
+    BigQueryQueryParams, BigQueryQuerySupport, BigQueryReadOptions, BigQueryResult, BigQuerySql,
     BigQueryTableRef,
 };
 use crate::{BigQueryLabels, BigQueryLocation, BigQueryRequestId};
@@ -32,17 +32,22 @@ where
     db: &'a D,
     params: BigQueryQueryParams,
     failure: Option<BigQueryError>,
+    /// The parameter names a statement from [`sql_file!`](crate::sql_file!) declares, which
+    /// the bound named parameters must match.
+    declared_parameters: Option<&'static [&'static str]>,
 }
 
 impl<'a, D> BigQueryQueryBuilder<'a, D>
 where
     D: BigQueryQuerySupport,
 {
-    pub(crate) fn new(db: &'a D, params: BigQueryQueryParams) -> Self {
+    pub(crate) fn new(db: &'a D, sql: BigQuerySql) -> Self {
+        let (text, declared_parameters) = sql.into_parts();
         Self {
             db,
-            params,
+            params: BigQueryQueryParams::new(text),
             failure: None,
+            declared_parameters,
         }
     }
 
@@ -273,10 +278,37 @@ where
     }
 
     fn checked(self) -> BigQueryResult<(&'a D, BigQueryQueryParams)> {
-        match self.failure {
-            Some(failure) => Err(failure),
-            None => Ok((self.db, self.params)),
+        if let Some(failure) = self.failure {
+            return Err(failure);
         }
+        if let Some(declared) = self.declared_parameters {
+            Self::check_bound_names(declared, &self.params.query_parameters)?;
+        }
+        Ok((self.db, self.params))
+    }
+
+    /// Refuses named parameters that differ from the names a [`sql_file!`](crate::sql_file!)
+    /// statement declares: the macro checks the file against its list when the caller compiles,
+    /// and this checks the `.param` calls against the same list.
+    fn check_bound_names(declared: &[&str], bound: &[QueryParameter]) -> BigQueryResult<()> {
+        let named: Vec<&str> = bound
+            .iter()
+            .map(|param| param.name.as_str())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if let Some(unbound) = declared.iter().find(|name| !named.contains(name)) {
+            return Err(BigQueryError::invalid_parameters(
+                *unbound,
+                format!("the SQL file uses @{unbound}, and no value is bound to it"),
+            ));
+        }
+        if let Some(undeclared) = named.iter().find(|name| !declared.contains(name)) {
+            return Err(BigQueryError::invalid_parameters(
+                *undeclared,
+                format!("a value is bound to {undeclared}, which the SQL file does not use"),
+            ));
+        }
+        Ok(())
     }
 
     /// Reads the result rows as `T`, with serde. A DML or DDL statement has no rows.

@@ -245,7 +245,7 @@ impl BigQueryDb {
     ) -> BigQueryResult<InsertJobRequest> {
         let project_id = self.options().google_project_id.clone();
         let query = JobConfigurationQuery {
-            query: params.sql.clone(),
+            query: params.sql.to_string(),
             destination_table: Some(destination.table.table_reference(&project_id)),
             create_disposition: "CREATE_IF_NEEDED".to_string(),
             write_disposition: destination.write.disposition().to_string(),
@@ -349,7 +349,7 @@ impl BigQueryDb {
         Ok(PostQueryRequest {
             project_id,
             query_request: Some(QueryRequest {
-                query: params.sql.clone(),
+                query: params.sql.to_string(),
                 max_results,
                 default_dataset,
                 timeout_ms: Some(params.timeout_ms()?),
