@@ -34,10 +34,10 @@ impl<'a> BigQueryFakeQuery<'a> {
     /// into a row field: a STRUCT as a struct or map, an ARRAY as a sequence, a RANGE as a
     /// [`BigQueryRange`](crate::BigQueryRange), NUMERIC as its wrapper, text, a float or a
     /// whole number, JSON as its document or text, INTERVAL as its wrapper or text, and the
-    /// temporal types as their wrappers or text. Two reads differ from a column's: a temporal
-    /// parameter does not read as an integer, and JSON `null` read as an `Option` of a type
-    /// that cannot hold `null` makes the whole read `None`. Names compare ignoring ASCII case,
-    /// as in BigQuery.
+    /// temporal types as their wrappers or text. Four reads differ from a column's: a temporal
+    /// parameter does not read as an integer, an INT64 parameter also reads as a float, BYTES
+    /// does not read as text, and JSON `null` read as an `Option` of a type that cannot hold
+    /// `null` makes the whole read `None`. Names compare ignoring ASCII case, as in BigQuery.
     ///
     /// `None` when the call has no such parameter, and when its value does not read as `T`.
     pub fn param<T: DeserializeOwned>(&self, name: &str) -> Option<T> {
@@ -219,10 +219,15 @@ impl ParamValue {
             return self.deserialize_any(visitor);
         };
         match Self::whole_decimal(text) {
-            Some(whole) => match i64::try_from(whole) {
-                Ok(integer) => visitor.visit_i64(integer),
-                Err(_) => visitor.visit_i128(whole),
-            },
+            Some(whole) => {
+                if let Ok(integer) = i64::try_from(whole) {
+                    visitor.visit_i64(integer)
+                } else if let Ok(unsigned) = u64::try_from(whole) {
+                    visitor.visit_u64(unsigned)
+                } else {
+                    visitor.visit_i128(whole)
+                }
+            }
             None => self.deserialize_any(visitor),
         }
     }
@@ -281,7 +286,7 @@ impl<'de> Deserializer<'de> for ParamValue {
         visitor.visit_newtype_struct(self)
     }
 
-    /// A unit variant from its name, as a STRING parameter carries a serialized enum.
+    /// An enum from a STRING parameter's variant name, or from the document a JSON one holds.
     fn deserialize_enum<V: Visitor<'de>>(
         self,
         name: &'static str,
@@ -514,5 +519,11 @@ mod tests {
         assert_eq!(round_trip(&BigQueryDecimal(12.5_f64)), Some(12.5_f64));
         assert_eq!(round_trip(&BigQueryDecimal(12_i64)), Some(12_i64));
         assert_eq!(round_trip::<_, i64>(&BigQueryDecimal(12.5_f64)), None);
+    }
+
+    #[test]
+    fn a_whole_numeric_beyond_i64_reads_into_u64() {
+        let beyond_i64 = BigQueryDecimal("9223372036854775808".to_string());
+        assert_eq!(round_trip(&beyond_i64), Some(9_223_372_036_854_775_808_u64));
     }
 }
