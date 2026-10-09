@@ -126,7 +126,11 @@ pub enum BigQueryFakeFault {
     /// [`DatabaseError`](crate::errors::BigQueryError::DatabaseError), and anything else one
     /// that is not retried.
     ///
-    /// On `AppendRows` it is instead the in-band error of the append request that drew it.
+    /// On `AppendRows` it is instead the in-band error of the append request that drew it,
+    /// which the writer handles by its own rules: it sends the request again after `Internal`,
+    /// `Aborted` or `OutOfRange`, takes `AlreadyExists` on a stream written at offsets as the
+    /// request already written, and fails the request's rows on any other code, `Unavailable`
+    /// and `ResourceExhausted` included.
     Status {
         /// The gRPC code.
         code: BigQueryFakeCode,

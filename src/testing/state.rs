@@ -314,7 +314,8 @@ pub(super) struct FakeWriteStream {
     pub appended: Vec<RecordBatch>,
     /// The rows of `appended`: the offset the next append must carry.
     pub length: i64,
-    /// The offset `FlushRows` last made visible, of a buffered stream.
+    /// How many rows of a buffered stream `FlushRows` has made visible: the rows before this
+    /// offset are visible.
     pub flushed: i64,
     pub finalized: bool,
     pub committed: bool,
@@ -419,17 +420,6 @@ impl FakeState {
     pub(super) fn table(&self, key: &TableKey) -> BigQueryResult<&FakeTable> {
         self.tables
             .get(key)
-            .ok_or_else(|| BigQueryError::from(key.not_found()))
-    }
-
-    /// The table at `key`, to change.
-    ///
-    /// # Errors
-    /// [`BigQueryError::DataNotFoundError`] if there is none.
-    #[allow(dead_code, reason = "used by the Storage Write and table RPCs")]
-    pub(super) fn table_mut(&mut self, key: &TableKey) -> BigQueryResult<&mut FakeTable> {
-        self.tables
-            .get_mut(key)
             .ok_or_else(|| BigQueryError::from(key.not_found()))
     }
 

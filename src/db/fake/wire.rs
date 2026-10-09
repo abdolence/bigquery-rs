@@ -77,13 +77,6 @@ impl IpcMessages {
 
 /// A Storage Write status under `code`, carrying a `StorageError` of `storage` on `entity`, the
 /// write stream or table it is about, as the writer reads it.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "bigquery::testing answers in-band AppendRows errors with it"
-    )
-)]
 pub(crate) fn storage_error_status(
     code: Code,
     storage: StorageErrorCode,
