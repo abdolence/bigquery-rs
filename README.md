@@ -135,7 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .query()
         .await?;
 
-    // Query with parameters, and what the query cost
+    // Query with parameters, and what the query cost. A longer statement can live in its own
+    // .sql file instead, with `.query(sql_file!("sql/totals.sql", customer))`
     let (totals, stats): (Vec<CustomerTotal>, BigQueryJobStats) = db
         .fluent()
         .query(

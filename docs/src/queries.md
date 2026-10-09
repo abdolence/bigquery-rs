@@ -230,6 +230,63 @@ let outcome = db
 Parameter names must be GoogleSQL identifiers: ASCII letters, digits and `_`, not starting with a
 digit.
 
+### SQL files
+
+A longer statement can live in its own `.sql` file. `sql_file!(path, names...)` embeds the file
+into the binary at compile time and lists the names of its named parameters. The path is relative
+to the Rust file that calls the macro, the same as `include_str!`, and Cargo rebuilds the crate
+when the file changes.
+
+With `query/sql/top_words.sql`:
+
+```sql
+SELECT word, word_count
+FROM `bigquery-public-data.samples.shakespeare`
+WHERE corpus = @corpus
+  AND word_count >= @min_count
+ORDER BY word_count DESC
+LIMIT 10
+```
+
+the query takes the file in place of the text, and the values are bound with `.param` as usual:
+
+```rust,no_run
+use bigquery::*;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct WordCount {
+    word: String,
+    word_count: i64,
+}
+
+# async fn example(db: BigQueryDb) -> BigQueryResult<()> {
+let top_words: Vec<WordCount> = db
+    .fluent()
+    .query(bigquery::sql_file!("query/sql/top_words.sql", corpus, min_count))
+    .param("corpus", "hamlet")
+    .param("min_count", 100)
+    .obj()
+    .query()
+    .await?;
+# let _ = top_words;
+# Ok(())
+# }
+```
+
+The names are checked twice:
+
+- at compile time, against the file: a parameter the file uses and the list leaves out, or a
+  listed name the file never uses, fails the build;
+- at run time, against the `.param` and `.params` calls, before anything is sent: a listed name
+  with no value, or a value bound to a name the list does not have, fails the terminal with
+  `InvalidParametersError` naming the parameter.
+
+The check reads the file with GoogleSQL's lexical rules, so an `@` inside a string, a quoted
+identifier or a comment is not a parameter, and neither is a `@@` system variable. A STRUCT
+parameter read as `@window.earliest` is listed as `window`. Names are compared exactly, case
+included. Nothing is sent to BigQuery to check the statement itself; use a dry run for that.
+
 ### Positional parameters
 
 `.positional_param(value)` and `.positional_param_as(type, value)` add the next `?`, inferred or
