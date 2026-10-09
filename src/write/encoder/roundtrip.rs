@@ -261,9 +261,10 @@ impl Canonical {
             FieldType::Time => {
                 Canonical::Time(civil::unpack_time(value.as_i64().expect("an int64 field")))
             }
-            FieldType::DateTime => Canonical::DateTime(civil::unpack_datetime(
-                value.as_i64().expect("an int64 field"),
-            )),
+            FieldType::DateTime => Canonical::DateTime(
+                civil::unpack_datetime(value.as_i64().expect("an int64 field"))
+                    .expect("a packed DATETIME"),
+            ),
             FieldType::Timestamp => Canonical::Timestamp(value.as_i64().expect("an int64 field")),
             FieldType::Numeric(_) => Canonical::Numeric(
                 decimal::decimal_from_le_bytes(value.as_bytes().expect("a bytes field"))

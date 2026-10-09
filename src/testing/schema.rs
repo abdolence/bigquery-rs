@@ -71,7 +71,7 @@ impl BigQueryFieldSchema {
 impl BigQueryFieldType {
     /// The Arrow type of one value of this type, and the field metadata that tells the types
     /// sharing an Arrow type apart.
-    fn arrow_read_type(&self) -> (DataType, HashMap<String, String>) {
+    pub(super) fn arrow_read_type(&self) -> (DataType, HashMap<String, String>) {
         let extension =
             |name: &str| HashMap::from([(ARROW_EXTENSION_NAME.to_string(), name.to_string())]);
         match self {
@@ -152,6 +152,72 @@ impl BigQueryRangeElementType {
             BigQueryRangeElementType::Timestamp => {
                 DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::testkit::field;
+    use proptest::prelude::*;
+
+    fn mode() -> impl Strategy<Value = BigQueryFieldMode> {
+        prop_oneof![
+            Just(BigQueryFieldMode::Nullable),
+            Just(BigQueryFieldMode::Required),
+            Just(BigQueryFieldMode::Repeated),
+        ]
+    }
+
+    /// Every type, nested STRUCTs included, without the parameters Arrow cannot carry.
+    fn field_type() -> impl Strategy<Value = BigQueryFieldType> {
+        let leaf = prop_oneof![
+            Just(BigQueryFieldType::Int64),
+            Just(BigQueryFieldType::Float64),
+            Just(BigQueryFieldType::Bool),
+            Just(BigQueryFieldType::String { max_length: None }),
+            Just(BigQueryFieldType::Bytes { max_length: None }),
+            Just(BigQueryFieldType::Date),
+            Just(BigQueryFieldType::Time),
+            Just(BigQueryFieldType::DateTime),
+            Just(BigQueryFieldType::Timestamp),
+            Just(BigQueryFieldType::Numeric(None)),
+            Just(BigQueryFieldType::BigNumeric(None)),
+            Just(BigQueryFieldType::Geography),
+            Just(BigQueryFieldType::Json),
+            Just(BigQueryFieldType::Interval),
+            Just(BigQueryFieldType::Range(BigQueryRangeElementType::Date)),
+            Just(BigQueryFieldType::Range(BigQueryRangeElementType::DateTime)),
+            Just(BigQueryFieldType::Range(
+                BigQueryRangeElementType::Timestamp
+            )),
+        ];
+        leaf.prop_recursive(2, 12, 4, |inner| {
+            columns(inner).prop_map(BigQueryFieldType::Struct)
+        })
+    }
+
+    fn columns(
+        field_type: impl Strategy<Value = BigQueryFieldType>,
+    ) -> impl Strategy<Value = Vec<BigQueryFieldSchema>> {
+        proptest::collection::vec((field_type, mode()), 1..5).prop_map(|columns| {
+            columns
+                .into_iter()
+                .enumerate()
+                .map(|(index, (field_type, mode))| {
+                    field(&format!("column_{index}"), field_type, mode)
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn the_read_layout_reads_back_as_its_schema(fields in columns(field_type())) {
+            let schema = BigQueryTableSchema { fields };
+            let read_back = BigQueryTableSchema::from_arrow(&schema.arrow_read_schema());
+            prop_assert_eq!(read_back.ok(), Some(schema));
         }
     }
 }
