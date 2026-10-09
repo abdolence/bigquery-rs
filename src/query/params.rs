@@ -1178,8 +1178,25 @@ fn float_text(float: f64) -> String {
     }
 }
 
+/// The `f64` of a FLOAT64 parameter's text, as [`float_text`] writes it and BigQuery sends it,
+/// or `None` for text that is not one.
+pub(crate) fn float_from_text(text: &str) -> Option<f64> {
+    match text {
+        "NaN" => Some(f64::NAN),
+        "Infinity" => Some(f64::INFINITY),
+        "-Infinity" => Some(f64::NEG_INFINITY),
+        text => text.parse().ok(),
+    }
+}
+
 fn base64_text(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The bytes of a BYTES parameter's text, as [`base64_text`] writes it, or `None` for text
+/// that is not base64.
+pub(crate) fn bytes_from_base64(text: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
 }
 
 impl BigQueryInterval {

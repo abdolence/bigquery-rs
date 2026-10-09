@@ -1,9 +1,9 @@
 //! The call a `when_query` matcher sees, and the parameter values it reads back in serde
 //! terms.
 
+use crate::query::{bytes_from_base64, float_from_text};
 use crate::types::error::CodecError;
 use crate::BigQueryInterval;
-use base64::Engine;
 use gcloud_sdk::google::cloud::bigquery::v2::{
     QueryParameter, QueryParameterType, QueryParameterValue,
 };
@@ -166,15 +166,10 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for ParamValue {
                         .parse()
                         .map(ParamValue::Int64)
                         .map_err(|_| malformed(kind)),
-                    "FLOAT64" => match text {
-                        "NaN" => Ok(f64::NAN),
-                        "Infinity" => Ok(f64::INFINITY),
-                        "-Infinity" => Ok(f64::NEG_INFINITY),
-                        text => text.parse().map_err(|_| malformed(kind)),
-                    }
-                    .map(ParamValue::Float64),
-                    "BYTES" => base64::engine::general_purpose::STANDARD
-                        .decode(text)
+                    "FLOAT64" => float_from_text(text)
+                        .map(ParamValue::Float64)
+                        .ok_or_else(|| malformed(kind)),
+                    "BYTES" => bytes_from_base64(text)
                         .map(|bytes| {
                             ParamValue::Sequence(
                                 bytes
@@ -183,7 +178,7 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for ParamValue {
                                     .collect(),
                             )
                         })
-                        .map_err(|_| malformed(kind)),
+                        .ok_or_else(|| malformed(kind)),
                     "INTERVAL" => {
                         let interval = BigQueryInterval::parse_bq(text)?;
                         Ok(ParamValue::Struct(vec![
