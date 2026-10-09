@@ -27,6 +27,9 @@ use std::sync::Arc;
 pub(super) const QUERY_RESULTS_DATASET: BigQueryDatasetId =
     BigQueryDatasetId::from_static("_fake_query_results");
 
+/// The location a dataset or a job reports when its call names none, BigQuery's default.
+pub(super) const DEFAULT_LOCATION: &str = "US";
+
 /// A dataset, with its project resolved.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct DatasetKey {
@@ -60,12 +63,21 @@ impl DatasetKey {
     }
 
     /// The v2 `DatasetReference`.
-    #[allow(dead_code, reason = "used by the dataset and table RPCs")]
     pub(super) fn reference(&self) -> v2::DatasetReference {
         v2::DatasetReference {
             project_id: self.project.clone(),
             dataset_id: self.dataset.to_string(),
         }
+    }
+
+    /// `project:dataset`, as BigQuery names a dataset in a dataset's `id` and in its messages.
+    pub(super) fn legacy_id(&self) -> String {
+        format!("{}:{}", self.project, self.dataset)
+    }
+
+    /// The `NotFound` BigQuery answers for a dataset that does not exist.
+    pub(super) fn not_found(&self) -> Status {
+        Status::not_found(format!("Not found: Dataset {}", self.legacy_id()))
     }
 }
 
@@ -181,7 +193,6 @@ impl FakeGeneration {
 
 /// One dataset.
 #[derive(Clone, Debug)]
-#[allow(dead_code, reason = "used by the dataset and table RPCs")]
 pub(super) struct FakeDataset {
     pub generation: FakeGeneration,
     pub created: BigQueryInstant,
@@ -196,6 +207,24 @@ impl FakeDataset {
             generation,
             created: BigQueryInstant::now(),
             resource: v2::Dataset::default(),
+        }
+    }
+
+    /// The dataset as `GetDataset` returns it, in BigQuery's default location unless it was
+    /// created in another.
+    pub(super) fn resource(&self, key: &DatasetKey) -> v2::Dataset {
+        let location = match self.resource.location.as_str() {
+            "" => DEFAULT_LOCATION.to_string(),
+            location => location.to_string(),
+        };
+        v2::Dataset {
+            kind: "bigquery#dataset".into(),
+            id: key.legacy_id(),
+            dataset_reference: Some(key.reference()),
+            etag: self.generation.etag(),
+            creation_time: self.created.as_millisecond(),
+            location,
+            ..self.resource.clone()
         }
     }
 }

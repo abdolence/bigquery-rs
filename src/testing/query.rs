@@ -11,7 +11,7 @@ use crate::db::fake::FakeCall;
 use crate::testing::rules::{BigQueryFakeRpc, QueryAnswer, QueryReply, ShownParameters};
 use crate::testing::server::FakeShared;
 use crate::testing::state::{
-    DatasetKey, FakeJob, FakeState, FakeTable, TableKey, QUERY_RESULTS_DATASET,
+    DatasetKey, FakeJob, FakeState, FakeTable, TableKey, DEFAULT_LOCATION, QUERY_RESULTS_DATASET,
 };
 use crate::BigQueryTableSchema;
 use crate::{BigQueryDmlStats, BigQueryJobId, BigQueryStatementType, BigQueryTableId};
@@ -29,9 +29,6 @@ use gcloud_sdk::google::cloud::bigquery::v2::{
 use gcloud_sdk::tonic::Status;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-
-/// The location a job reports when the call names none, BigQuery's default.
-const DEFAULT_LOCATION: &str = "US";
 
 /// The page token of a result beyond its first page. The client never sends it back: it reads
 /// the whole result from the job's table.
