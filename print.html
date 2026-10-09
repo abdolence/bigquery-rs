@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-61fc53da.js";
+            window.path_to_searchindex_js = "searchindex-c9c102b6.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-403efbef.js"></script>
+        <script src="toc-0dc013e9.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -256,6 +256,9 @@ the SQL text. The typed filter and the generated DDL write values as escaped lit
 as quoted identifiers, tested against a corpus of hostile values and on BigQuery itself. The
 calls that lose data say so in their names: <code>dangerously_delete_with_contents()</code>,
 <code>dangerously_recreate_with_data_loss()</code>. No unsafe code.</li>
+<li><strong>Testing.</strong> A fake BigQuery for your tests, in <code>bigquery::testing</code>. The code under test runs
+its real client against a loopback gRPC server, which answers queries, serves table rows and
+fails calls as the test scripts it with your own structures. No credentials or network.</li>
 </ul>
 <h3 id="what-the-official-crate-provides-and-this-one-does-not"><a class="header" href="#what-the-official-crate-provides-and-this-one-does-not">What the official crate provides and this one does not</a></h3>
 <p>Checked against <code>google-cloud-bigquery</code> 0.18.0 and <code>google-cloud-bigquery-v2</code> 1.0.0:</p>
@@ -266,7 +269,8 @@ already 1.0;</li>
 <li>It uses the REST API for v2, which is GA. The v2 API over gRPC this crate uses works for every
 call the library makes, but Google does not document it and it is pre-GA, so be aware it can
 change without notice;</li>
-<li>It has stub traits to mock its clients in your tests. This crate has no public mocks.</li>
+<li>It has stub traits to mock its clients in your tests. This crate has no mocks of its clients
+and provides a fake BigQuery server instead, see <a href="#testing-with-the-fake">Testing with the fake</a>.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
@@ -3700,6 +3704,403 @@ task ends. <code>insert()</code> and the CDC writer go through the same writer, 
 <code>finalize()</code>, when the writer is dropped, and when it fails for good.</p>
 <p><code>BigQuery commit write streams</code> has only <code>/bigquery/table</code>; the commit time is in the result of the
 commit.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="testing-with-the-fake"><a class="header" href="#testing-with-the-fake">Testing with the fake</a></h1>
+<p>The library provides a fake BigQuery for your tests, in the <code>bigquery::testing</code> module.
+<code>BigQueryFake</code> runs a gRPC server on a loopback port and hands out a real <code>BigQueryDb</code> connected
+to it, so the code under test runs unchanged, through the same requests, codecs, retries and
+errors as against BigQuery. It needs no credentials and no network.</p>
+<p>A test scripts the fake with your own serde types:</p>
+<ul>
+<li>a query rule answers the statement it matches with rows, DML counts or a failure;</li>
+<li>a table holds rows, which reads serve and writes append to, and which the test reads back;</li>
+<li>a fault makes the calls of one RPC fail.</li>
+</ul>
+<p>The tests need an async runtime in your dev-dependencies:</p>
+<pre><code class="language-toml">[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+</code></pre>
+<p>The examples below share a row type and the code under test, and each of them is the body of a
+<code>#[tokio::test] async fn ...() -&gt; BigQueryResult&lt;()&gt;</code>:</p>
+<pre><code class="language-rust">use bigquery::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Order {
+    id: i64,
+    customer: String,
+    total: f64,
+}
+
+const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+const ORDERS_OF: &amp;str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+
+async fn orders_of(db: &amp;BigQueryDb, customer: &amp;str) -&gt; BigQueryResult&lt;Vec&lt;Order&gt;&gt; {
+    db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+}
+
+async fn save(db: &amp;BigQueryDb, orders: &amp;[Order]) -&gt; BigQueryResult&lt;BigQueryWriteSummary&gt; {
+    db.fluent().insert().into(SHOP.table(ORDERS)).objects(orders).execute().await
+}</code></pre>
+<h2 id="queries-1"><a class="header" href="#queries-1">Queries</a></h2>
+<p>There is no SQL engine in the fake. A query answers only as a rule scripts it:</p>
+<pre><code class="language-rust"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const ORDERS_OF: &amp;str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+</span><span class="boring">async fn orders_of(db: &amp;BigQueryDb, customer: &amp;str) -&gt; BigQueryResult&lt;Vec&lt;Order&gt;&gt; {
+</span><span class="boring">    db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+</span><span class="boring">}
+</span><span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>use bigquery::testing::BigQueryFake;
+
+let fake = BigQueryFake::start().await?;
+let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
+let rule = fake
+    .when_query_match(ORDERS_OF)
+    .param("customer", "Alice")
+    .returns_rows(|columns| columns.from_type::&lt;Order&gt;(), &amp;alice)?;
+
+assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
+assert_eq!(rule.calls(), 1);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>The rows are any <code>Serialize</code> type, and their columns are declared as a table schema declares them,
+here with <code>|columns| columns.from_type::&lt;Order&gt;()</code>. A rule matches:</p>
+<ul>
+<li>the SQL text exactly, with no whitespace or case folding;</li>
+<li>a statement from <code>sql_file!</code> by the text of its file;</li>
+<li>any parameters, unless the rule declares some with <code>.param(..)</code>, <code>.params(..)</code> or
+<code>.positional_param(..)</code>. Then the call’s named parameters must equal them as a set, and its
+positional ones in order.</li>
+</ul>
+<p>Rules are tried in the order they were registered, and the first that matches answers.
+<code>.times(n)</code> limits a rule to <code>n</code> calls, retries included, so a later rule answers the calls after
+them. Besides <code>returns_rows</code>, a rule answers with <code>returns_dml</code> for a DML statement and the rows it
+changed, <code>returns_statement</code> for DDL, <code>fails</code> for a refused call and <code>fails_job</code> for a job that
+fails once it runs. One rule answers every terminal of a call: the rows for <code>query()</code>, the stats
+for <code>execute()</code> and the schema for <code>dry_run()</code>, with <code>.bytes_processed(..)</code> if set.</p>
+<p><code>fake.when_query(|query| ...)</code> matches with your own code instead of the SQL text. The closure
+gets the call’s SQL and its parameters, read back as any <code>Deserialize</code> type:</p>
+<pre><code class="language-rust"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const ORDERS_OF: &amp;str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+</span><span class="boring">async fn orders_of(db: &amp;BigQueryDb, customer: &amp;str) -&gt; BigQueryResult&lt;Vec&lt;Order&gt;&gt; {
+</span><span class="boring">    db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+</span><span class="boring">}
+</span><span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>use bigquery::testing::BigQueryFake;
+
+let fake = BigQueryFake::start().await?;
+let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
+let rule = fake
+    .when_query(|query| {
+        query.sql().contains("FROM shop.orders")
+            &amp;&amp; query.param::&lt;String&gt;("customer").is_some_and(|name| name.starts_with('A'))
+    })
+    .returns_rows(|columns| columns.from_type::&lt;Order&gt;(), &amp;alice)?;
+
+assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
+assert_eq!(rule.calls(), 1);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p><code>query.param::&lt;T&gt;(name)</code> reads a named parameter, with the name compared ignoring case as
+BigQuery compares it, and <code>query.positional_param::&lt;T&gt;(index)</code> a positional one, the first at 0.
+Both return <code>None</code> when the call has no such parameter or its value does not read as <code>T</code>. A STRUCT
+reads as a struct or a map, an ARRAY as a <code>Vec</code>, and a RANGE as <code>BigQueryRange</code>. <code>.param(..)</code> and
+<code>.positional_param(..)</code> narrow a <code>when_query</code> rule as they narrow a SQL one.</p>
+<h2 id="tables-reads-and-writes"><a class="header" href="#tables-reads-and-writes">Tables, reads and writes</a></h2>
+<p>A table on the fake holds rows. <code>fake.table(..)</code> creates it with its columns, and its dataset if
+that is missing, and <code>.rows(..)</code> adds rows a read is served:</p>
+<pre><code class="language-rust"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>use bigquery::testing::BigQueryFake;
+
+let fake = BigQueryFake::start().await?;
+let orders = vec![
+    Order { id: 1, customer: "Alice".into(), total: 120.0 },
+    Order { id: 2, customer: "Bob".into(), total: 80.5 },
+];
+fake.table(SHOP.table(ORDERS), |columns| columns.from_type::&lt;Order&gt;())
+    .rows(&amp;orders)
+    .create()?;
+
+let read: Vec&lt;Order&gt; = fake.db().fluent().select().from(SHOP.table(ORDERS)).obj().query().await?;
+assert_eq!(read, orders);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Writes append to the table, and <code>fake.rows::&lt;T&gt;(table)</code> reads back the rows written:</p>
+<pre><code class="language-rust"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">async fn save(db: &amp;BigQueryDb, orders: &amp;[Order]) -&gt; BigQueryResult&lt;BigQueryWriteSummary&gt; {
+</span><span class="boring">    db.fluent().insert().into(SHOP.table(ORDERS)).objects(orders).execute().await
+</span><span class="boring">}
+</span><span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>use bigquery::testing::BigQueryFake;
+
+let fake = BigQueryFake::start().await?;
+fake.table(SHOP.table(ORDERS), |columns| columns.from_type::&lt;Order&gt;())
+    .create()?;
+let orders = vec![
+    Order { id: 1, customer: "Alice".into(), total: 120.0 },
+    Order { id: 2, customer: "Bob".into(), total: 80.5 },
+];
+
+let summary = save(fake.db(), &amp;orders).await?;
+
+assert_eq!(summary.rows_written, 2);
+let written: Vec&lt;Order&gt; = fake.rows(SHOP.table(ORDERS))?;
+assert_eq!(written, orders);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p><code>rows</code> returns the visible rows, in the order they were acknowledged. Rows become visible as
+BigQuery makes them visible for each write mode:</p>
+<ul>
+<li>the default and committed streams: when acknowledged;</li>
+<li>a buffered stream: up to the last flushed offset;</li>
+<li>a pending stream: at its commit, and never without one.</li>
+</ul>
+<p>Rows are matched to the table’s columns by name, ignoring case, and the fields of a RECORD column
+the same way. Rows written before a column or a RECORD field was added, and flushed or committed
+after, read it as NULL, as do the rows the table already holds.</p>
+<p>A table read is served the table’s rows, projected to the selected columns. The fake evaluates
+no filter, so a read with a row restriction needs a rule,
+<code>fake.when_read(table).row_restriction(..)</code>, with the rows it returns.
+<code>fake.when_rows_rejected::&lt;T&gt;(table, reason, |row| ...)</code> fails each append request that has a row
+the predicate accepts, with a row error per such row, and writes nothing of that request, as
+BigQuery does. A row written from a serde type fails the same way when it has
+a value beyond the precision of its <code>NUMERIC(p,s)</code> or <code>BIGNUMERIC(p,s)</code> column, and a value with
+more decimal places than the scale is rounded.</p>
+<p>A CDC writer’s rows are recorded as changes and not applied to the table’s rows.
+<code>fake.changes::&lt;T&gt;(table)</code> returns them, each with its change type and sequence number.</p>
+<p>Datasets and tables, from <code>fake.create_dataset(..)</code>, <code>fake.table(..)</code> or the code under test, are
+the fake’s state, and the admin calls are served from it.</p>
+<h2 id="faults-and-retries"><a class="header" href="#faults-and-retries">Faults and retries</a></h2>
+<p>A query rule’s <code>fails</code> scripts the failure of a query. <code>fake.when_fault(rpc).fails(..)</code> does the
+same for every other RPC, and <code>.on_table(..)</code> narrows it to the calls on one table. A fault answers
+before every rule and before the tables, as one of:</p>
+<ul>
+<li><code>BigQueryFakeFault::status(code, message)</code>, a gRPC status, which the client maps as it maps
+BigQuery’s own: <code>NotFound</code> is a <code>DataNotFoundError</code>, <code>Unavailable</code> a retryable
+<code>DatabaseError</code>, etc.;</li>
+<li><code>BigQueryFakeFault::ConnectionDropped</code>, a connection closed without an answer, which the
+client retries as a transport error;</li>
+<li><code>BigQueryFakeFault::Hang</code>, a call that never answers. The client waits until its own timeout,
+if it has one.</li>
+</ul>
+<p>Retries against the fake wait no backoff, so a test that scripts failures runs at full speed.
+A failure a retry gets past, then an outage the client gives up on:</p>
+<pre><code class="language-rust"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const ORDERS_OF: &amp;str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+</span><span class="boring">async fn orders_of(db: &amp;BigQueryDb, customer: &amp;str) -&gt; BigQueryResult&lt;Vec&lt;Order&gt;&gt; {
+</span><span class="boring">    db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+</span><span class="boring">}
+</span><span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>use bigquery::testing::{BigQueryFake, BigQueryFakeCode, BigQueryFakeFault};
+
+let fake = BigQueryFake::start().await?;
+let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
+let unavailable =
+    || BigQueryFakeFault::status(BigQueryFakeCode::Unavailable, "backend went away");
+let lost = fake.when_query_match(ORDERS_OF).times(1).fails(unavailable())?;
+let answer = fake
+    .when_query_match(ORDERS_OF)
+    .param("customer", "Alice")
+    .returns_rows(|columns| columns.from_type::&lt;Order&gt;(), &amp;alice)?;
+let outage = fake
+    .when_query_match(ORDERS_OF)
+    .param("customer", "Bob")
+    .fails(unavailable())?;
+
+assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
+assert_eq!((lost.calls(), answer.calls()), (1, 1));
+
+let failed = orders_of(fake.db(), "Bob").await;
+assert!(matches!(&amp;failed, Err(err) if err.retry_possible()), "{failed:?}");
+assert_eq!(outage.calls(), 4, "the first attempt and max_retries = 3 retries");
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>On <code>AppendRows</code>, <code>ConnectionDropped</code> writes the request and then drops the connection, as an
+acknowledgement lost in transit. The client sends the request again, so on the default stream,
+which is at least once, its rows are written twice. A write with <code>.exactly_once()</code> sends it with
+its offset, and the table keeps one copy:</p>
+<pre><code class="language-rust"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>use bigquery::testing::{BigQueryFake, BigQueryFakeFault, BigQueryFakeRpc};
+
+let fake = BigQueryFake::start().await?;
+fake.table(SHOP.table(ORDERS), |columns| columns.from_type::&lt;Order&gt;())
+    .create()?;
+let lost = fake
+    .when_fault(BigQueryFakeRpc::AppendRows)
+    .times(1)
+    .fails(BigQueryFakeFault::ConnectionDropped)?;
+let orders = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
+
+fake.db()
+    .fluent()
+    .insert()
+    .into(SHOP.table(ORDERS))
+    .objects(&amp;orders)
+    .exactly_once()
+    .execute()
+    .await?;
+
+assert_eq!(fake.rows::&lt;Order&gt;(SHOP.table(ORDERS))?, orders);
+assert_eq!(lost.calls(), 1);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<h2 id="unmatched-calls"><a class="header" href="#unmatched-calls">Unmatched calls</a></h2>
+<p>A call that nothing answers, such as a query no rule matches or an RPC the fake does not serve,
+fails with <code>Unimplemented</code>, which the client does not retry. The fake records it, and
+<code>fake.verify()</code> panics with every such call and the rules that were there to answer it. It also
+panics for a rule limited with <code>.times(n)</code> that did not answer exactly <code>n</code> calls.</p>
+<p><code>verify</code> runs when the fake is dropped, so a test fails on an unscripted call even when the code
+under test swallows its error:</p>
+<pre><code class="language-rust should_panic"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const ORDERS_OF: &amp;str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+</span><span class="boring">async fn orders_of(db: &amp;BigQueryDb, customer: &amp;str) -&gt; BigQueryResult&lt;Vec&lt;Order&gt;&gt; {
+</span><span class="boring">    db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+</span><span class="boring">}
+</span><span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>use bigquery::testing::BigQueryFake;
+
+let fake = BigQueryFake::start().await?;
+fake.when_query_match(ORDERS_OF)
+    .param("customer", "Alice")
+    .returns_rows(|columns| columns.from_type::&lt;Order&gt;(), Vec::&lt;Order&gt;::new())?;
+
+let unmatched = orders_of(fake.db(), "Bob").await;
+assert!(matches!(&amp;unmatched, Err(err) if !err.retry_possible()), "{unmatched:?}");
+
+drop(fake); // Panics: no rule answers the query for Bob
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>If the test is already panicking when the fake is dropped, the problems are logged with
+<code>tracing::error!</code> instead, so the first panic is the one the test reports.</p>
+<h2 id="choosing-the-fake-or-bigquery-at-startup"><a class="header" href="#choosing-the-fake-or-bigquery-at-startup">Choosing the fake or BigQuery at startup</a></h2>
+<p><code>fake.db()</code> is a real <code>BigQueryDb</code> connected to the fake’s loopback server, so the fake needs no
+trait shared with the real client. Code that takes a <code>BigQueryDb</code>, as an argument or a field of
+the application state, runs unchanged against either. This also makes it possible to run the
+whole application against the fake, with a factory that picks one at startup from the
+application’s own configuration, such as an environment variable. The library itself reads no
+variable for this.</p>
+<p>The factory returns an owner of the client. Dropping a <code>BigQueryFake</code> stops its server and runs
+<code>verify()</code>, so the owner keeps the fake alive next to the client it hands out:</p>
+<pre><code class="language-rust no_run"><span class="boring">use bigquery::*;
+</span><span class="boring">use serde::{Deserialize, Serialize};
+</span><span class="boring">#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+</span><span class="boring">struct Order { id: i64, customer: String, total: f64 }
+</span><span class="boring">const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+</span><span class="boring">const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+</span><span class="boring">const ORDERS_OF: &amp;str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+</span><span class="boring">async fn orders_of(db: &amp;BigQueryDb, customer: &amp;str) -&gt; BigQueryResult&lt;Vec&lt;Order&gt;&gt; {
+</span><span class="boring">    db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+</span><span class="boring">}
+</span>pub struct AppBigQuery {
+    db: BigQueryDb,
+    _fake: Option&lt;bigquery::testing::BigQueryFake&gt;,
+}
+
+impl AppBigQuery {
+    pub fn db(&amp;self) -&gt; &amp;BigQueryDb {
+        &amp;self.db
+    }
+}
+
+/// BigQuery in `project`, or a seeded fake when `APP_BIGQUERY=fake` is set.
+pub async fn bigquery_db(project: &amp;str) -&gt; BigQueryResult&lt;AppBigQuery&gt; {
+    if std::env::var("APP_BIGQUERY").as_deref() == Ok("fake") {
+        let fake = bigquery::testing::BigQueryFake::start().await?;
+        seed(&amp;fake)?;
+        return Ok(AppBigQuery {
+            db: fake.db().clone(),
+            _fake: Some(fake),
+        });
+    }
+    Ok(AppBigQuery {
+        db: BigQueryDb::new(project).await?,
+        _fake: None,
+    })
+}
+
+fn seed(fake: &amp;bigquery::testing::BigQueryFake) -&gt; BigQueryResult&lt;()&gt; {
+    let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
+    fake.table(SHOP.table(ORDERS), |columns| columns.from_type::&lt;Order&gt;())
+        .rows(&amp;alice)
+        .create()?;
+    fake.when_query_match(ORDERS_OF)
+        .returns_rows(|columns| columns.from_type::&lt;Order&gt;(), &amp;alice)?;
+    Ok(())
+}
+
+<span class="boring">#[tokio::main(flavor = "current_thread")]
+</span><span class="boring">async fn main() -&gt; BigQueryResult&lt;()&gt; {
+</span>// The rest of the application sees only the client
+let bigquery = bigquery_db("my-gcp-project-id").await?;
+let orders = orders_of(bigquery.db(), "Alice").await?;
+<span class="boring">let _ = orders;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>The fake answers a query only from a rule, so the fake branch seeds a rule for every query the
+application sends, besides the tables it reads and writes. An application run against the fake
+with <code>APP_BIGQUERY=fake cargo run</code> panics when the fake is dropped if a call went unanswered, as
+a test does. An application that wants the fake out of its production builds can put the fake
+branch behind a feature of its own.</p>
+<h2 id="limits-1"><a class="header" href="#limits-1">Limits</a></h2>
+<p>The fake binds its own port, so tests run in parallel, and a fake is <code>Send + Sync</code>, so a test can
+share it with the tasks it spawns. A call sees the rules registered before it arrives.</p>
+<p>Tokio’s paused time, <code>#[tokio::test(start_paused = true)]</code>, is not supported. A paused runtime
+jumps to its next timer whenever it is idle, and waiting on the fake’s loopback socket counts as
+idle.</p>
+<p>The fake does not provide:</p>
+<ul>
+<li>SQL evaluation. The DDL that <code>.sync()</code> sends for a rename, drop or widen reaches the query rules
+and does not change the table;</li>
+<li>read filters. A row restriction needs a read rule, and <code>sample_percentage</code> and <code>snapshot_time</code>
+are served the current rows;</li>
+<li>failures in the middle of a read stream, and partial acknowledgements of an append;</li>
+<li>polling of running jobs, other than for <code>fails_job</code> and queries with a destination table;</li>
+<li>CDC changes applied to the table’s rows;</li>
+<li>Arrow appends in Arrow types other than the table’s own. A decimal is the exception: it is
+rescaled to the scale of its <code>NUMERIC(p,s)</code> or <code>BIGNUMERIC(p,s)</code> column and checked against its
+precision;</li>
+<li>the length checks of <code>STRING(n)</code> and <code>BYTES(n)</code>, default values, request limits and quotas;</li>
+<li>a read that selects a field of a STRUCT column, such as <code>.fields(["address.city"])</code>;</li>
+<li><code>ListJobs</code>, <code>DeleteJob</code>, models, routines, row access policies, table snapshots and copies.</li>
+</ul>
+<p>Full example available <a href="https://github.com/abdolence/bigquery-rs/blob/master/examples/testing-fake.rs">here</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h1>
 <p>The library was compared with Google’s own clients on the same machine, region and data:</p>
