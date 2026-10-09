@@ -213,13 +213,6 @@ pub struct BigQueryFake {
     _server: FakeServer,
 }
 
-// A test shares the fake with the tasks it spawns, so a field that is not `Send + Sync` must
-// fail the build here rather than in a user's test.
-const _: fn() = || {
-    fn send_sync<T: Send + Sync>() {}
-    send_sync::<BigQueryFake>();
-};
-
 impl Debug for BigQueryFake {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BigQueryFake")
@@ -817,6 +810,32 @@ mod tests {
     /// Whether dropping `fake`, which verifies it, panics.
     fn drop_panics(fake: BigQueryFake) -> bool {
         catch_unwind(AssertUnwindSafe(move || drop(fake))).is_err()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawned_tasks_share_one_fake() -> BigQueryResult<()> {
+        let fake = Arc::new(BigQueryFake::start().await?);
+        let orders = vec![unpaid(1, "Alice", 12.0)];
+        let rule = fake
+            .when_query_match(ORDERS_OF)
+            .returns_rows(|columns| columns.from_type::<Order>(), &orders)?;
+
+        let spawned = tokio::spawn({
+            let fake = Arc::clone(&fake);
+            async move {
+                fake.db()
+                    .fluent()
+                    .query(ORDERS_OF)
+                    .param("customer", "Alice")
+                    .obj::<Order>()
+                    .query()
+                    .await
+            }
+        });
+
+        assert_eq!(spawned.await.expect("the task panicked")?, orders);
+        assert_eq!(rule.calls(), 1);
+        Ok(())
     }
 
     #[tokio::test]
