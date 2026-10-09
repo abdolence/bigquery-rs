@@ -85,4 +85,5 @@ Checked against `google-cloud-bigquery` 0.18.0 and `google-cloud-bigquery-v2` 1.
 - It uses the REST API for v2, which is GA. The v2 API over gRPC this crate uses works for every
   call the library makes, but Google does not document it and it is pre-GA, so be aware it can
   change without notice;
-- It has stub traits to mock its clients in your tests. This crate has no public mocks.
+- It has stub traits to mock its clients in your tests. This crate has no mocks of its clients
+  and provides a fake BigQuery server instead, see [Testing with the fake](./testing.md).

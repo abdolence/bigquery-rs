@@ -82,6 +82,10 @@ name = "write_codec"
 harness = false
 required-features = ["bench-internals"]
 
+[[example]]
+name = "testing-fake"
+required-features = ["testing"]
+
 [lints.clippy]
 unwrap_used = "deny"
 mod_module_files = "deny"
