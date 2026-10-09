@@ -11,8 +11,10 @@ pub(crate) const TAG_RANGE: &str = "BigQueryRange";
 /// bound of it as the epoch (1970-01-01, at 00:00:00 for DATETIME and TIMESTAMP). Since BigQuery keeps
 /// `start < end`, the read path reads an epoch bound as `None` when the pair would break that
 /// order otherwise: an epoch end at or below the start, an epoch start at or above the end.
-/// Two cases cannot be told from a real epoch bound and read as the epoch: an unbounded start
-/// with an end after the epoch, and an unbounded end with a start before it.
+/// Four cases cannot be told apart from a real epoch bound. An unbounded start with an end
+/// after the epoch, and an unbounded end with a start before it, read as the epoch.
+/// `[1970-01-01, UNBOUNDED)` and `[UNBOUNDED, 1970-01-01)` arrive as two epoch bounds, the same
+/// as `[UNBOUNDED, UNBOUNDED)`, and read as both `None`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BigQueryRange<T> {
     /// The inclusive start, `None` when unbounded.

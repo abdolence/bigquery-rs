@@ -334,8 +334,14 @@ BigQuery keeps for every range:
 - an epoch start at or after the end is an unbounded start;
 - `[UNBOUNDED, UNBOUNDED)` reads as both `None`.
 
-Be aware of the two cases left: an unbounded start with an end after the epoch, and an unbounded
-end with a start before it, read as the epoch, since a real epoch bound looks the same.
+A real epoch bound looks the same as an unbounded one, so four cases read wrong:
+
+- an unbounded start with an end after the epoch reads the start as the epoch;
+- an unbounded end with a start before the epoch reads the end as the epoch;
+- `[1970-01-01, UNBOUNDED)` reads as both `None`, the same as `[UNBOUNDED, UNBOUNDED)`;
+- `[UNBOUNDED, 1970-01-01)` reads as both `None` too.
+
+Use a NULLABLE RANGE column where these values matter.
 
 ## STRUCT
 
