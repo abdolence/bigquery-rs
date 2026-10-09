@@ -14,6 +14,7 @@ use crate::testing::state::{
     fit_to_layout, location_or_default, DatasetKey, FakeJob, FakeState, FakeTable, TableKey,
     QUERY_RESULTS_DATASET,
 };
+use crate::types::kind::FieldKind;
 use crate::{
     BigQueryDmlStats, BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryJobId,
     BigQueryStatementType, BigQueryTableId, BigQueryTableSchema,
@@ -556,7 +557,8 @@ impl FakeTable {
 
 /// Why columns `table` do not take a query result of the columns `result`, or `None` if they
 /// do. Each result column must name a column of the table, ignoring case, of the same type, a
-/// RECORD being checked field by field. A REPEATED column takes only a REPEATED result, and a
+/// RECORD being checked field by field. A declared length, precision or scale plays no part:
+/// BigQuery checks the values against it as it writes them. A REPEATED column takes only a REPEATED result, and a
 /// REQUIRED one only a REQUIRED result; a REQUIRED column the result leaves out is refused.
 fn append_refusal(table: &[BigQueryFieldSchema], result: &[BigQueryFieldSchema]) -> Option<String> {
     for column in result {
@@ -570,7 +572,14 @@ fn append_refusal(table: &[BigQueryFieldSchema], result: &[BigQueryFieldSchema])
             (BigQueryFieldType::Struct(target_fields), BigQueryFieldType::Struct(fields)) => {
                 append_refusal(target_fields, fields)
             }
-            (target_type, column_type) if target_type != column_type => {
+            (BigQueryFieldType::Range(target_element), BigQueryFieldType::Range(element))
+                if target_element != element =>
+            {
+                Some(format!("field {} has changed type", column.name))
+            }
+            (target_type, column_type)
+                if FieldKind::from(target_type) != FieldKind::from(column_type) =>
+            {
                 Some(format!("field {} has changed type", column.name))
             }
             _ => None,
@@ -1131,6 +1140,205 @@ mod tests {
             .await?;
 
         assert_eq!(fake.rows::<Order>(SHOP.table(TOP_ORDERS))?, best_orders());
+        Ok(())
+    }
+
+    const DELIVERIES: BigQueryTableId = BigQueryTableId::from_static("deliveries");
+    const RECENT_DELIVERIES: &str = "SELECT id, address FROM shop.deliveries LIMIT 1";
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Address {
+        city: String,
+        zip: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Delivery {
+        id: i64,
+        address: Address,
+    }
+
+    fn paris_delivery() -> Delivery {
+        Delivery {
+            id: 1,
+            address: Address {
+                city: "Paris".to_string(),
+                zip: Some("75001".to_string()),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn an_append_takes_a_required_nested_field_into_a_nullable_one() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(DELIVERIES), |columns| {
+            columns
+                .from_type::<Delivery>()
+                .with("address.city", |city| city.nullable())
+        })
+        .create()?;
+        fake.when_query_match(RECENT_DELIVERIES).returns_rows(
+            |columns| columns.from_type::<Delivery>(),
+            [paris_delivery()],
+        )?;
+
+        fake.db()
+            .fluent()
+            .query(RECENT_DELIVERIES)
+            .append_to_destination_table(SHOP.table(DELIVERIES))
+            .execute()
+            .await?;
+
+        assert_eq!(
+            fake.rows::<Delivery>(SHOP.table(DELIVERIES))?,
+            vec![paris_delivery()]
+        );
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ShoutedAddress {
+        #[serde(rename = "ZIP")]
+        zip: Option<String>,
+        #[serde(rename = "City")]
+        city: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ShoutedDelivery {
+        id: i64,
+        #[serde(rename = "ADDRESS")]
+        address: ShoutedAddress,
+    }
+
+    #[tokio::test]
+    async fn an_append_matches_nested_fields_by_name_ignoring_case_and_order() -> BigQueryResult<()>
+    {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(DELIVERIES), |columns| {
+            columns.from_type::<Delivery>()
+        })
+        .create()?;
+        let shouted = ShoutedDelivery {
+            id: 1,
+            address: ShoutedAddress {
+                zip: Some("75001".to_string()),
+                city: "Paris".to_string(),
+            },
+        };
+        fake.when_query_match(RECENT_DELIVERIES)
+            .returns_rows(|columns| columns.from_type::<ShoutedDelivery>(), [shouted])?;
+
+        fake.db()
+            .fluent()
+            .query(RECENT_DELIVERIES)
+            .append_to_destination_table(SHOP.table(DELIVERIES))
+            .execute()
+            .await?;
+
+        assert_eq!(
+            fake.rows::<Delivery>(SHOP.table(DELIVERIES))?,
+            vec![paris_delivery()]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_append_takes_a_string_into_a_string_of_declared_length() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(TOP_ORDERS), |columns| {
+            columns
+                .from_type::<Order>()
+                .with("customer", |customer| customer.string_with_max_length(10))
+        })
+        .create()?;
+        fake.when_query_match(BEST_ORDERS)
+            .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
+
+        fake.db()
+            .fluent()
+            .query(BEST_ORDERS)
+            .append_to_destination_table(SHOP.table(TOP_ORDERS))
+            .execute()
+            .await?;
+
+        assert_eq!(fake.rows::<Order>(SHOP.table(TOP_ORDERS))?, best_orders());
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Payment {
+        id: i64,
+        amount: String,
+    }
+
+    const PAYMENTS: BigQueryTableId = BigQueryTableId::from_static("payments");
+    const LARGE_PAYMENTS: &str = "SELECT id, amount FROM shop.ledger WHERE amount > 1";
+
+    fn payment(id: i64, amount: &str) -> Payment {
+        Payment {
+            id,
+            amount: amount.to_string(),
+        }
+    }
+
+    /// A fake whose `shop.payments` declares `amount` NUMERIC(10, 2), and whose query
+    /// [`LARGE_PAYMENTS`] returns `payments` with `amount` as plain NUMERIC.
+    async fn fake_with_large_payments(payments: Vec<Payment>) -> BigQueryResult<BigQueryFake> {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(PAYMENTS), |columns| {
+            columns
+                .from_type::<Payment>()
+                .with("amount", |amount| amount.numeric_with(10, 2))
+        })
+        .create()?;
+        fake.when_query_match(LARGE_PAYMENTS).returns_rows(
+            |columns| {
+                columns
+                    .from_type::<Payment>()
+                    .with("amount", |amount| amount.numeric())
+            },
+            payments,
+        )?;
+        Ok(fake)
+    }
+
+    #[tokio::test]
+    async fn an_append_rounds_a_numeric_to_the_declared_scale() -> BigQueryResult<()> {
+        let fake =
+            fake_with_large_payments(vec![payment(1, "1.505"), payment(2, "-2.004")]).await?;
+
+        fake.db()
+            .fluent()
+            .query(LARGE_PAYMENTS)
+            .append_to_destination_table(SHOP.table(PAYMENTS))
+            .execute()
+            .await?;
+
+        assert_eq!(
+            fake.rows::<Payment>(SHOP.table(PAYMENTS))?,
+            vec![payment(1, "1.51"), payment(2, "-2")]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_append_refuses_a_numeric_beyond_the_declared_precision() -> BigQueryResult<()> {
+        let fake = fake_with_large_payments(vec![payment(1, "123456789.5")]).await?;
+
+        let refused = fake
+            .db()
+            .fluent()
+            .query(LARGE_PAYMENTS)
+            .append_to_destination_table(SHOP.table(PAYMENTS))
+            .execute()
+            .await;
+
+        assert!(
+            matches!(&refused, Err(err) if err.has_code(Code::InvalidArgument)),
+            "{refused:?}"
+        );
+        assert_eq!(fake.rows::<Payment>(SHOP.table(PAYMENTS))?, Vec::new());
         Ok(())
     }
 

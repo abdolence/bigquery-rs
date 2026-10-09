@@ -688,4 +688,74 @@ mod tests {
         assert_eq!(read, vec![expected]);
         Ok(())
     }
+
+    const DELIVERIES: BigQueryTableId = BigQueryTableId::from_static("deliveries");
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Address {
+        city: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Delivery {
+        id: i64,
+        address: Address,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ZipAddress {
+        city: String,
+        zip: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ZipDelivery {
+        id: i64,
+        address: ZipAddress,
+    }
+
+    #[tokio::test]
+    async fn a_read_rule_takes_a_nested_field_added_after_it() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(DELIVERIES), |columns| {
+            columns.from_type::<Delivery>()
+        })
+        .create()?;
+        let paris = Delivery {
+            id: 1,
+            address: Address {
+                city: "Paris".to_string(),
+            },
+        };
+        fake.when_read(SHOP.table(DELIVERIES))
+            .row_restriction("address.city = 'Paris'")
+            .returns_rows([&paris])?;
+        fake.db()
+            .fluent()
+            .schema()
+            .table(SHOP.table(DELIVERIES))
+            .columns(|columns| columns.from_type::<ZipDelivery>())
+            .sync()
+            .await?;
+
+        let read: Vec<ZipDelivery> = fake
+            .db()
+            .fluent()
+            .select()
+            .from(SHOP.table(DELIVERIES))
+            .filter_sql("address.city = 'Paris'")
+            .obj()
+            .query()
+            .await?;
+
+        let expected = ZipDelivery {
+            id: paris.id,
+            address: ZipAddress {
+                city: paris.address.city,
+                zip: None,
+            },
+        };
+        assert_eq!(read, vec![expected]);
+        Ok(())
+    }
 }

@@ -11,7 +11,7 @@ use crate::testing::server::FakeShared;
 use crate::testing::state::{
     fit_to_layout, DatasetKey, FakeDataset, FakeGeneration, FakeState, FakeTable, TableKey,
 };
-use crate::{BigQueryFieldMode, BigQueryFieldType, BigQueryTableSchema};
+use crate::{BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryTableSchema};
 use gcloud_sdk::google::cloud::bigquery::v2;
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Status;
@@ -22,8 +22,8 @@ use std::sync::Arc;
 enum AdminRefusal {
     /// What BigQuery answers.
     Status(Status),
-    /// What the fake cannot do, answered and reported as unmatched.
-    Unsupported(String),
+    /// A failure of the fake itself, answered with `Internal` and reported by `verify`.
+    Internal(String),
 }
 
 impl From<Status> for AdminRefusal {
@@ -66,7 +66,7 @@ impl FakeShared {
         match answer {
             Ok(message) => call.reply(&message),
             Err(AdminRefusal::Status(status)) => call.fail(status.code(), status.message()),
-            Err(AdminRefusal::Unsupported(described)) => self.unmatched(call, &described, &[]),
+            Err(AdminRefusal::Internal(failure)) => self.internal(call, &failure),
         }
     }
 
@@ -528,69 +528,26 @@ impl FakeTable {
         }
     }
 
-    /// Takes `schema` in place of the table's, as BigQuery allows it in place: every column
-    /// kept with its type, a REQUIRED one possibly relaxed to NULLABLE, and new columns that
-    /// are not REQUIRED. The rows held read the new columns as NULL.
+    /// Takes `schema` in place of the table's, as BigQuery allows it in place, as
+    /// [`schema_change_refusal`] says. The rows held read the new columns and fields as NULL.
     ///
     /// # Errors
-    /// `InvalidArgument` for a change BigQuery refuses, and an unsupported change for a
-    /// nested column added to a table that holds rows.
+    /// `InvalidArgument` for a change BigQuery refuses.
     fn change_schema(&mut self, key: &TableKey, schema: BigQueryTableSchema) -> AdminResult<()> {
-        let refused = |problem: String| {
-            AdminRefusal::from(Status::invalid_argument(format!(
+        if let Some(problem) = schema_change_refusal(&self.schema.fields, &schema.fields, "") {
+            return Err(AdminRefusal::from(Status::invalid_argument(format!(
                 "Provided Schema does not match Table {}. {problem}",
                 key.legacy_id()
-            )))
-        };
-        for old in &self.schema.fields {
-            let Some(new) = schema
-                .fields
-                .iter()
-                .find(|new| new.name.eq_ignore_ascii_case(&old.name))
-            else {
-                return Err(refused(format!(
-                    "Field {} is missing in new schema",
-                    old.name
-                )));
-            };
-            let both_structs = matches!(
-                (&old.field_type, &new.field_type),
-                (BigQueryFieldType::Struct(_), BigQueryFieldType::Struct(_))
-            );
-            if old.field_type != new.field_type && !both_structs {
-                return Err(refused(format!("Field {} has changed type", old.name)));
-            }
-            let relaxed =
-                old.mode == BigQueryFieldMode::Required && new.mode == BigQueryFieldMode::Nullable;
-            if old.mode != new.mode && !relaxed {
-                return Err(refused(format!("Field {} has changed mode", old.name)));
-            }
-        }
-        let added_required = schema.fields.iter().find(|new| {
-            new.mode == BigQueryFieldMode::Required
-                && !self
-                    .schema
-                    .fields
-                    .iter()
-                    .any(|old| old.name.eq_ignore_ascii_case(&new.name))
-        });
-        if let Some(added) = added_required {
-            return Err(refused(format!(
-                "Cannot add required fields to an existing schema. (field: {})",
-                added.name
-            )));
+            ))));
         }
         let arrow_schema = Arc::new(schema.arrow_read_schema());
-        let unsupported = |problem: String| {
-            AdminRefusal::Unsupported(format!("a schema change of {key}, which {problem}"))
-        };
         let batches = self
             .batches
             .iter()
             .map(|batch| {
                 fit_to_layout(batch, &arrow_schema).map_err(|err| {
-                    unsupported(format!(
-                        "holds rows, cannot carry them over, as a nested column changed: {err}"
+                    AdminRefusal::Internal(format!(
+                        "the rows of {key} do not carry over to its new schema: {err}"
                     ))
                 })
             })
@@ -600,6 +557,65 @@ impl FakeTable {
         self.batches = batches;
         Ok(())
     }
+}
+
+/// Why BigQuery refuses the fields `new` in place of `old`, or `None` if it takes them: every
+/// field kept with its type, a REQUIRED one possibly relaxed to NULLABLE, and new fields that
+/// are not REQUIRED, the fields of a RECORD being checked the same way. Fields match by name,
+/// ignoring case. `parent` is the path of the RECORD that holds them, empty for columns.
+fn schema_change_refusal(
+    old: &[BigQueryFieldSchema],
+    new: &[BigQueryFieldSchema],
+    parent: &str,
+) -> Option<String> {
+    let path = |field: &BigQueryFieldSchema| {
+        if parent.is_empty() {
+            field.name.clone()
+        } else {
+            format!("{parent}.{}", field.name)
+        }
+    };
+    for old_field in old {
+        let Some(new_field) = new
+            .iter()
+            .find(|new_field| new_field.name.eq_ignore_ascii_case(&old_field.name))
+        else {
+            return Some(format!(
+                "Field {} is missing in new schema",
+                path(old_field)
+            ));
+        };
+        let nested = match (&old_field.field_type, &new_field.field_type) {
+            (BigQueryFieldType::Struct(old_fields), BigQueryFieldType::Struct(new_fields)) => {
+                schema_change_refusal(old_fields, new_fields, &path(old_field))
+            }
+            (old_type, new_type) if old_type != new_type => {
+                Some(format!("Field {} has changed type", path(old_field)))
+            }
+            _ => None,
+        };
+        if nested.is_some() {
+            return nested;
+        }
+        let relaxed = old_field.mode == BigQueryFieldMode::Required
+            && new_field.mode == BigQueryFieldMode::Nullable;
+        if old_field.mode != new_field.mode && !relaxed {
+            return Some(format!("Field {} has changed mode", path(old_field)));
+        }
+    }
+    new.iter()
+        .find(|new_field| {
+            new_field.mode == BigQueryFieldMode::Required
+                && !old
+                    .iter()
+                    .any(|old_field| old_field.name.eq_ignore_ascii_case(&new_field.name))
+        })
+        .map(|added| {
+            format!(
+                "Cannot add required fields to an existing schema. (field: {})",
+                path(added)
+            )
+        })
 }
 
 impl FakeDataset {
@@ -698,6 +714,7 @@ mod tests {
     };
     use futures::TryStreamExt;
     use gcloud_sdk::google::cloud::bigquery::v2;
+    use gcloud_sdk::tonic::Code;
     use serde::{Deserialize, Serialize};
     use tracing::Span;
 
@@ -1058,6 +1075,100 @@ mod tests {
             .into_inner();
 
         assert_eq!(patched.num_rows, Some(1));
+        Ok(())
+    }
+
+    const DELIVERIES: BigQueryTableId = BigQueryTableId::from_static("deliveries");
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Address {
+        city: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Delivery {
+        id: i64,
+        addresses: Vec<Address>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ZipAddress {
+        city: String,
+        zip: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ZipDelivery {
+        id: i64,
+        addresses: Vec<ZipAddress>,
+    }
+
+    #[tokio::test]
+    async fn sync_adds_a_nested_field_to_a_table_with_rows() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let paris = Address {
+            city: "Paris".to_string(),
+        };
+        fake.table(SHOP.table(DELIVERIES), |columns| {
+            columns.from_type::<Delivery>()
+        })
+        .rows([Delivery {
+            id: 1,
+            addresses: vec![paris.clone()],
+        }])
+        .create()?;
+
+        fake.db()
+            .fluent()
+            .schema()
+            .table(SHOP.table(DELIVERIES))
+            .columns(|columns| columns.from_type::<ZipDelivery>())
+            .sync()
+            .await?;
+
+        let rows: Vec<ZipDelivery> = fake.rows(SHOP.table(DELIVERIES))?;
+        assert_eq!(
+            rows,
+            [ZipDelivery {
+                id: 1,
+                addresses: vec![ZipAddress {
+                    city: paris.city,
+                    zip: None
+                }],
+            }]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_schema_change_that_drops_a_nested_field_is_refused() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(DELIVERIES), |columns| {
+            columns.from_type::<ZipDelivery>()
+        })
+        .create()?;
+        let columns = BigQuerySchemaColumnsBuilder.from_type::<Delivery>();
+        let schema = columns.table_schema()?;
+
+        let patched = fake
+            .db()
+            .table_client()
+            .patch_table(v2::UpdateOrPatchTableRequest {
+                project_id: "fake-project".to_string(),
+                dataset_id: SHOP.to_string(),
+                table_id: DELIVERIES.to_string(),
+                table: Some(v2::Table {
+                    schema: Some(v2::TableSchema::from(&schema)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await;
+
+        assert_eq!(
+            patched.map(|_| ()).map_err(|status| status.code()),
+            Err(Code::InvalidArgument)
+        );
         Ok(())
     }
 }

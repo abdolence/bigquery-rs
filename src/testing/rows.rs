@@ -821,7 +821,6 @@ impl FieldValue {
         let Some(params) = params else {
             return Ok(unscaled);
         };
-        let ten = i256::from_i128(10);
         let out_of_range = || {
             CodecError::out_of_range(format!(
                 "the value has more than {} digits, the precision of {}({}, {})",
@@ -831,35 +830,39 @@ impl FieldValue {
                 params.scale
             ))
         };
-        let limit = ten
-            .checked_pow(u32::from(params.precision))
-            .ok_or_else(out_of_range)?;
-        let scale = u32::from(params.scale);
         unscaled
             .into_iter()
             .map(|value| {
                 value
-                    .map(|value| {
-                        let rescaled = if scale < wire_scale {
-                            let divisor = ten.wrapping_pow(wire_scale - scale);
-                            let quotient = value.wrapping_div(divisor);
-                            let remainder = value.wrapping_rem(divisor).wrapping_abs();
-                            if remainder.wrapping_mul(i256::from_i128(2)) >= divisor {
-                                quotient.checked_add(value.signum())
-                            } else {
-                                Some(quotient)
-                            }
-                        } else {
-                            ten.checked_pow(scale - wire_scale)
-                                .and_then(|factor| value.checked_mul(factor))
-                        };
-                        rescaled
-                            .filter(|rescaled| rescaled.wrapping_abs() < limit)
-                            .ok_or_else(out_of_range)
-                    })
+                    .map(|value| params.rescale(value, wire_scale).ok_or_else(out_of_range))
                     .transpose()
             })
             .collect()
+    }
+}
+
+impl BigQueryDecimalParams {
+    /// `unscaled`, a decimal at `from_scale`, unscaled at this scale, as BigQuery writes a
+    /// value into a column of this precision and scale: rounded half away from zero, and
+    /// `None` when it has more digits than the precision.
+    pub(super) fn rescale(self, unscaled: i256, from_scale: u32) -> Option<i256> {
+        let ten = i256::from_i128(10);
+        let limit = ten.checked_pow(u32::from(self.precision))?;
+        let scale = u32::from(self.scale);
+        let rescaled = if scale < from_scale {
+            let divisor = ten.checked_pow(from_scale - scale)?;
+            let quotient = unscaled.wrapping_div(divisor);
+            let remainder = unscaled.wrapping_rem(divisor).wrapping_abs();
+            if remainder.wrapping_mul(i256::from_i128(2)) >= divisor {
+                quotient.checked_add(unscaled.signum())
+            } else {
+                Some(quotient)
+            }
+        } else {
+            ten.checked_pow(scale - from_scale)
+                .and_then(|factor| unscaled.checked_mul(factor))
+        };
+        rescaled.filter(|rescaled| rescaled.wrapping_abs() < limit)
     }
 }
 
