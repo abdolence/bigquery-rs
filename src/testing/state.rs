@@ -6,12 +6,13 @@
 
 use crate::db::fake::wire::IpcCompression;
 use crate::errors::BigQueryError;
+use crate::testing::rows::rescale_decimal;
 use crate::testing::BigQueryFakeJobFailure;
 use crate::{
     BigQueryChangeSequenceNumber, BigQueryChangeType, BigQueryDatasetId, BigQueryDatasetRef,
-    BigQueryDecimalParams, BigQueryDmlStats, BigQueryInstant, BigQueryJobId, BigQueryResult,
-    BigQueryStatementType, BigQueryTableId, BigQueryTableRef, BigQueryTableSchema,
-    BigQueryWriteMode, BigQueryWriteStreamName,
+    BigQueryDecimalParams, BigQueryDmlStats, BigQueryFieldSchema, BigQueryFieldType,
+    BigQueryInstant, BigQueryJobId, BigQueryResult, BigQueryStatementType, BigQueryTableId,
+    BigQueryTableRef, BigQueryTableSchema, BigQueryWriteMode, BigQueryWriteStreamName,
 };
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Decimal128Type, Decimal256Type};
@@ -457,8 +458,8 @@ impl FakeState {
     }
 }
 
-/// `batch` in `layout`, a table's read layout, its columns matched to the table's by name,
-/// ignoring case, as BigQuery does. A column the batch leaves out is NULL. Rows written or
+/// `batch` in `layout`, the read layout of `schema`, its columns matched to the table's by
+/// name, ignoring case, as BigQuery does. A column the batch leaves out is NULL. Rows written or
 /// scripted under an earlier schema of a table read the columns added since as NULL this way.
 /// The fields of a RECORD column, REPEATED or not, are matched the same way, at every depth.
 ///
@@ -467,16 +468,17 @@ impl FakeState {
 ///
 /// # Errors
 /// A column or field the table does not have, one whose Arrow type is not the table's, a
-/// decimal with more digits than its column's precision, or a REQUIRED column or field with
-/// NULLs or left out.
+/// decimal beyond its column's range, or a REQUIRED column or field with NULLs or left out.
 pub(super) fn fit_to_layout(
     batch: &RecordBatch,
+    schema: &BigQueryTableSchema,
     layout: &SchemaRef,
 ) -> Result<RecordBatch, String> {
     let columns = fit_fields(
         batch.schema().fields(),
         batch.columns(),
         layout.fields(),
+        &schema.fields,
         batch.num_rows(),
     )?;
     let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
@@ -484,12 +486,14 @@ pub(super) fn fit_to_layout(
         .map_err(|err| format!("the Arrow rows do not fit the table: {err}"))
 }
 
-/// `columns`, the values of `fields`, `rows` long, as the fields of `layout`, matched by
-/// name ignoring case. A field of `layout` that `fields` leaves out is NULL.
+/// `columns`, the values of `fields`, `rows` long, as the fields of `layout`, the read layout
+/// of `declared`, matched by name ignoring case. A field of `layout` that `fields` leaves out
+/// is NULL.
 fn fit_fields(
     fields: &Fields,
     columns: &[ArrayRef],
     layout: &Fields,
+    declared: &[BigQueryFieldSchema],
     rows: usize,
 ) -> Result<Vec<ArrayRef>, String> {
     if let Some(extra) = fields.iter().find(|field| {
@@ -504,25 +508,36 @@ fn fit_fields(
     }
     layout
         .iter()
-        .map(|column| {
+        .zip(declared)
+        .map(|(column, declared)| {
             let found = fields
                 .iter()
                 .position(|field| field.name().eq_ignore_ascii_case(column.name()));
             match found.and_then(|index| columns.get(index)) {
-                Some(values) => fit_values(values, column),
+                Some(values) => fit_values(values, column, &declared.field_type),
                 None => Ok(new_null_array(column.data_type(), rows)),
             }
         })
         .collect()
 }
 
-/// `values` as the values of `column`.
-fn fit_values(values: &ArrayRef, column: &Field) -> Result<ArrayRef, String> {
+/// `values` as the values of `column`, the read layout of a column of `field_type`.
+fn fit_values(
+    values: &ArrayRef,
+    column: &Field,
+    field_type: &BigQueryFieldType,
+) -> Result<ArrayRef, String> {
     let named = |err: ArrowError| format!("the Arrow field {}: {err}", column.name());
     let fitted: ArrayRef = match (values.data_type(), column.data_type()) {
         (DataType::Struct(fields), DataType::Struct(layout)) => {
             let record = values.as_struct();
-            let children = fit_fields(fields, record.columns(), layout, record.len())?;
+            let declared = field_type.message_fields().ok_or_else(|| {
+                format!(
+                    "the Arrow field {} is a struct of a {field_type}",
+                    column.name()
+                )
+            })?;
+            let children = fit_fields(fields, record.columns(), layout, &declared, record.len())?;
             Arc::new(
                 StructArray::try_new(layout.clone(), children, record.nulls().cloned())
                     .map_err(named)?,
@@ -530,7 +545,7 @@ fn fit_values(values: &ArrayRef, column: &Field) -> Result<ArrayRef, String> {
         }
         (DataType::List(_), DataType::List(item)) => {
             let list = values.as_list::<i32>();
-            let items = fit_values(list.values(), item)?;
+            let items = fit_values(list.values(), item, field_type)?;
             Arc::new(
                 ListArray::try_new(
                     item.clone(),
@@ -542,7 +557,7 @@ fn fit_values(values: &ArrayRef, column: &Field) -> Result<ArrayRef, String> {
             )
         }
         (DataType::Decimal128(_, from_scale), DataType::Decimal128(precision, scale)) => {
-            let rescale = decimal_rescale(column, *from_scale, *precision, *scale)?;
+            let rescale = decimal_rescale(column, *from_scale, Some(*precision), *scale)?;
             Arc::new(
                 values
                     .as_primitive::<Decimal128Type>()
@@ -556,7 +571,11 @@ fn fit_values(values: &ArrayRef, column: &Field) -> Result<ArrayRef, String> {
             )
         }
         (DataType::Decimal256(_, from_scale), DataType::Decimal256(precision, scale)) => {
-            let rescale = decimal_rescale(column, *from_scale, *precision, *scale)?;
+            // An undeclared BIGNUMERIC holds about ±5.79e38, more than the 38 whole digits
+            // its Arrow precision leaves at scale 38: every value that fits 256 bits.
+            let bound = matches!(field_type, BigQueryFieldType::BigNumeric(Some(_)));
+            let rescale =
+                decimal_rescale(column, *from_scale, bound.then_some(*precision), *scale)?;
             Arc::new(
                 values
                     .as_primitive::<Decimal256Type>()
@@ -576,12 +595,12 @@ fn fit_values(values: &ArrayRef, column: &Field) -> Result<ArrayRef, String> {
     Ok(fitted)
 }
 
-/// The rescaling of the decimals of `column`, from `from_scale` to its `precision` and
-/// `scale`, which fails for a value with more digits than `precision`.
+/// The rescaling of the decimals of `column`, from `from_scale` to its `scale`, which fails
+/// for a value with more digits than `precision`, or without one, beyond 256 bits.
 fn decimal_rescale(
     column: &Field,
     from_scale: i8,
-    precision: u8,
+    precision: Option<u8>,
     scale: i8,
 ) -> Result<impl Fn(i256) -> Result<i256, String> + '_, String> {
     let unsigned = |scale: i8| {
@@ -589,16 +608,17 @@ fn decimal_rescale(
             .map_err(|_| format!("the Arrow field {} has the scale {scale}", column.name()))
     };
     let from_scale = u32::from(unsigned(from_scale)?);
-    let params = BigQueryDecimalParams {
-        precision,
-        scale: unsigned(scale)?,
-    };
-    Ok(move |value: i256| {
-        params.rescale(value, from_scale).ok_or_else(|| {
-            format!(
-                "a value of {} has more than {precision} digits",
-                column.name()
-            )
-        })
+    let scale = unsigned(scale)?;
+    Ok(move |value: i256| match precision {
+        Some(precision) => BigQueryDecimalParams { precision, scale }
+            .rescale(value, from_scale)
+            .ok_or_else(|| {
+                format!(
+                    "a value of {} has more than {precision} digits",
+                    column.name()
+                )
+            }),
+        None => rescale_decimal(value, from_scale, u32::from(scale))
+            .ok_or_else(|| format!("a value of {} does not fit 256 bits", column.name())),
     })
 }

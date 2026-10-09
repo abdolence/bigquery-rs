@@ -11,7 +11,7 @@ use crate::errors::BigQueryCodecErrorKind;
 use crate::read::ArrowIpcDecoder;
 use crate::testing::rows::{DecodedRows, ProtoBatchBuilder};
 use crate::testing::rules::{BigQueryFakeFault, BigQueryFakeRpc};
-use crate::testing::server::FakeShared;
+use crate::testing::server::{FakeRefusal, FakeShared};
 use crate::testing::state::{fit_to_layout, FakeChanges, FakeState, FakeWriteStream, TableKey};
 use crate::{BigQueryInstant, BigQueryTableSchema, BigQueryWriteMode, BigQueryWriteStreamName};
 use arrow_array::RecordBatch;
@@ -74,17 +74,13 @@ impl FakeShared {
         call: FakeCall,
         rpc: BigQueryFakeRpc,
         table: &TableKey,
-        answer: impl FnOnce(&mut FakeState) -> Result<M, WriteRefusal>,
+        answer: impl FnOnce(&mut FakeState) -> Result<M, FakeRefusal>,
     ) {
         let Some(call) = self.unfaulted(call, rpc, Some(table)).await else {
             return;
         };
         let answered = answer(&mut self.state());
-        match answered {
-            Ok(message) => call.reply(&message),
-            Err(WriteRefusal::Status(status)) => call.fail(status.code(), status.message()),
-            Err(WriteRefusal::Internal(failure)) => self.internal(call, &failure),
-        }
+        self.answer(call, answered);
     }
 
     async fn get_write_stream(&self, call: FakeCall) {
@@ -190,9 +186,9 @@ impl FakeShared {
             let visible = stream
                 .unflushed_to(offset)
                 .iter()
-                .map(|batch| fit_to_layout(batch, &table.arrow_schema))
+                .map(|batch| fit_to_layout(batch, &table.schema, &table.arrow_schema))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| WriteRefusal::Internal(format!("the rows of {name}: {err}")))?;
+                .map_err(|err| FakeRefusal::Internal(format!("the rows of {name}: {err}")))?;
             table.batches.extend(visible);
             stream.flushed = stream.flushed.max(offset + 1);
             Ok(FlushRowsResponse { offset })
@@ -261,18 +257,14 @@ impl FakeShared {
                     stream_errors,
                 });
             }
-            let layout = state
-                .tables
-                .get(&table)
-                .ok_or_else(|| table.not_found())?
-                .arrow_schema
-                .clone();
+            let target = state.tables.get(&table).ok_or_else(|| table.not_found())?;
             let mut committed = Vec::new();
             for name in &names {
                 if let Some(stream) = state.write_streams.get(name) {
                     for batch in &stream.appended {
-                        committed.push(fit_to_layout(batch, &layout).map_err(|err| {
-                            WriteRefusal::Internal(format!("the rows of {name}: {err}"))
+                        let fitted = fit_to_layout(batch, &target.schema, &target.arrow_schema);
+                        committed.push(fitted.map_err(|err| {
+                            FakeRefusal::Internal(format!("the rows of {name}: {err}"))
                         })?);
                     }
                 }
@@ -423,20 +415,6 @@ impl FakeShared {
             return Ok(None);
         }
         Ok(Some(row_errors_response(row_errors)))
-    }
-}
-
-/// Why a unary write call is not answered with its response.
-enum WriteRefusal {
-    /// What BigQuery answers.
-    Status(Status),
-    /// A failure of the fake itself, answered with `Internal` and reported by `verify`.
-    Internal(String),
-}
-
-impl From<Status> for WriteRefusal {
-    fn from(status: Status) -> Self {
-        Self::Status(status)
     }
 }
 
@@ -720,7 +698,7 @@ impl AppendConnection {
                     .and_then(|mut decoder| decoder.decode(&record_batch.serialized_record_batch))
                     .map_err(|err| err.to_string())?;
                 Ok(DecodedRows {
-                    rows: fit_to_layout(&batch, layout)?,
+                    rows: fit_to_layout(&batch, schema, layout)?,
                     changes: None,
                 })
             }
@@ -1085,6 +1063,37 @@ mod tests {
             amount: "1.51".to_string(),
         };
         assert_eq!(fake.rows::<Payment>(SHOP.table(PAYMENTS))?, vec![expected]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_bignumeric_beyond_ten_to_the_38_survives_a_pending_commit(
+    ) -> BigQueryResult<()> {
+        const PAYMENTS: BigQueryTableId = BigQueryTableId::from_static("payments");
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(PAYMENTS), |columns| {
+            columns
+                .from_type::<Payment>()
+                .with("amount", |amount| amount.bignumeric())
+        })
+        .create()?;
+        let payments = vec![Payment {
+            id: 1,
+            amount: "200000000000000000000000000000000000000.5".to_string(),
+        }];
+        let (mut writer, _responses) = fake
+            .db()
+            .create_streaming_writer_with_options::<Payment>(
+                SHOP.table(PAYMENTS),
+                options(BigQueryWriteMode::Pending),
+            )
+            .await?;
+        writer.write_all(&payments).await?;
+        let finalized = writer.finalize().await?;
+
+        fake.db().commit_write_streams(vec![finalized]).await?;
+
+        assert_eq!(fake.rows::<Payment>(SHOP.table(PAYMENTS))?, payments);
         Ok(())
     }
 

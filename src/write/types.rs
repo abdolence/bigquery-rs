@@ -216,6 +216,18 @@ impl BigQueryChangeType {
             BigQueryChangeType::Delete => "DELETE",
         }
     }
+
+    /// The change `text` names, as [`FromStr`] reads it, failing with the codec error a decoder
+    /// places at its field.
+    pub(crate) fn from_text(text: &str) -> Result<Self, CodecError> {
+        match text {
+            "UPSERT" => Ok(BigQueryChangeType::Upsert),
+            "DELETE" => Ok(BigQueryChangeType::Delete),
+            _ => Err(CodecError::invalid_text(format!(
+                "{text:?} is not UPSERT or DELETE"
+            ))),
+        }
+    }
 }
 
 impl FromStr for BigQueryChangeType {
@@ -228,13 +240,7 @@ impl FromStr for BigQueryChangeType {
     /// [`BigQueryError::SerializeError`] with kind
     /// [`InvalidText`](crate::errors::BigQueryCodecErrorKind::InvalidText) for any other text.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "UPSERT" => Ok(BigQueryChangeType::Upsert),
-            "DELETE" => Ok(BigQueryChangeType::Delete),
-            _ => Err(
-                CodecError::invalid_text(format!("{s:?} is not UPSERT or DELETE")).into_serialize(),
-            ),
-        }
+        Self::from_text(s).map_err(CodecError::into_serialize)
     }
 }
 

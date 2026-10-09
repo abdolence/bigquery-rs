@@ -68,12 +68,13 @@ impl FakeShared {
         }
         let table = self.state().tables.get(&key).map(|table| {
             (
+                table.schema.clone(),
                 table.arrow_schema.clone(),
                 table.batches.clone(),
                 table.read_streams,
             )
         });
-        let Some((arrow_schema, table_batches, read_streams)) = table else {
+        let Some((schema, arrow_schema, table_batches, read_streams)) = table else {
             let status = key.not_found();
             call.fail(status.code(), status.message());
             return;
@@ -95,7 +96,7 @@ impl FakeShared {
         let restriction = Some(options.row_restriction.as_str()).filter(|r| !r.is_empty());
         let ruled = self.rules().answer_read(&key, restriction);
         let batches = match (ruled, restriction) {
-            (Some(rows), _) => match fit_to_layout(&rows, &arrow_schema) {
+            (Some(rows), _) => match fit_to_layout(&rows, &schema, &arrow_schema) {
                 Ok(rows) => vec![rows],
                 Err(err) => {
                     self.internal(call, &format!("the read rule's rows of {key}: {err}"));

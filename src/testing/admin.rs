@@ -7,32 +7,17 @@
 
 use crate::db::fake::FakeCall;
 use crate::testing::rules::BigQueryFakeRpc;
-use crate::testing::server::FakeShared;
+use crate::testing::server::{FakeRefusal, FakeShared};
 use crate::testing::state::{
     fit_to_layout, DatasetKey, FakeDataset, FakeGeneration, FakeState, FakeTable, TableKey,
 };
 use crate::{BigQueryFieldMode, BigQueryFieldSchema, BigQueryFieldType, BigQueryTableSchema};
 use gcloud_sdk::google::cloud::bigquery::v2;
-use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Status;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-/// Why an admin call is not applied.
-enum AdminRefusal {
-    /// What BigQuery answers.
-    Status(Status),
-    /// A failure of the fake itself, answered with `Internal` and reported by `verify`.
-    Internal(String),
-}
-
-impl From<Status> for AdminRefusal {
-    fn from(status: Status) -> Self {
-        Self::Status(status)
-    }
-}
-
-type AdminResult<T> = Result<T, AdminRefusal>;
+type AdminResult<T> = Result<T, FakeRefusal>;
 
 impl FakeShared {
     pub(super) async fn serve_admin(&self, call: FakeCall) {
@@ -58,15 +43,6 @@ impl FakeShared {
                 let described = method.to_string();
                 self.unmatched(call, &described, &[]);
             }
-        }
-    }
-
-    /// Answers `call` with `answer`.
-    fn answer<M: Message>(&self, call: FakeCall, answer: AdminResult<M>) {
-        match answer {
-            Ok(message) => call.reply(&message),
-            Err(AdminRefusal::Status(status)) => call.fail(status.code(), status.message()),
-            Err(AdminRefusal::Internal(failure)) => self.internal(call, &failure),
         }
     }
 
@@ -245,7 +221,7 @@ impl FakeShared {
             .state()
             .dataset(&key)
             .map(|dataset| dataset.resource(&key))
-            .map_err(AdminRefusal::from);
+            .map_err(FakeRefusal::from);
         self.answer(call, answer);
     }
 
@@ -535,7 +511,7 @@ impl FakeTable {
     /// `InvalidArgument` for a change BigQuery refuses.
     fn change_schema(&mut self, key: &TableKey, schema: BigQueryTableSchema) -> AdminResult<()> {
         if let Some(problem) = schema_change_refusal(&self.schema.fields, &schema.fields, "") {
-            return Err(AdminRefusal::from(Status::invalid_argument(format!(
+            return Err(FakeRefusal::from(Status::invalid_argument(format!(
                 "Provided Schema does not match Table {}. {problem}",
                 key.legacy_id()
             ))));
@@ -545,8 +521,8 @@ impl FakeTable {
             .batches
             .iter()
             .map(|batch| {
-                fit_to_layout(batch, &arrow_schema).map_err(|err| {
-                    AdminRefusal::Internal(format!(
+                fit_to_layout(batch, &schema, &arrow_schema).map_err(|err| {
+                    FakeRefusal::Internal(format!(
                         "the rows of {key} do not carry over to its new schema: {err}"
                     ))
                 })
@@ -727,6 +703,60 @@ mod tests {
     struct Order {
         id: i64,
         customer: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Payment {
+        id: i64,
+        amount: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct NotedPayment {
+        id: i64,
+        amount: String,
+        note: Option<String>,
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_bignumeric_beyond_ten_to_the_38_survives_a_schema_sync(
+    ) -> BigQueryResult<()> {
+        const PAYMENTS: BigQueryTableId = BigQueryTableId::from_static("payments");
+        let payment = Payment {
+            id: 1,
+            amount: "200000000000000000000000000000000000000.5".to_string(),
+        };
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(PAYMENTS), |columns| {
+            columns
+                .from_type::<Payment>()
+                .with("amount", |amount| amount.bignumeric())
+        })
+        .rows([payment.clone()])
+        .create()?;
+
+        fake.db()
+            .fluent()
+            .schema()
+            .table(SHOP.table(PAYMENTS))
+            .columns(|columns| {
+                columns
+                    .from_type::<NotedPayment>()
+                    .with("amount", |amount| amount.bignumeric())
+            })
+            .sync()
+            .await?;
+
+        let expected = NotedPayment {
+            id: payment.id,
+            amount: payment.amount,
+            note: None,
+        };
+        assert_eq!(
+            fake.rows::<NotedPayment>(SHOP.table(PAYMENTS))?,
+            vec![expected]
+        );
+        Ok(())
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

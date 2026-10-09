@@ -9,7 +9,7 @@ use crate::testing::state::{FakeState, TableKey};
 use crate::testing::BigQueryFake;
 use crate::{BigQueryDbOptions, BigQueryResult};
 use gcloud_sdk::prost::Message;
-use gcloud_sdk::tonic::Code;
+use gcloud_sdk::tonic::{Code, Status};
 use std::fmt::{Display, Formatter};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -33,6 +33,20 @@ enum FakeProblem {
     Unmatched(String),
     /// A failure of the fake itself.
     Internal(String),
+}
+
+/// Why a unary call is not answered with its response.
+pub(super) enum FakeRefusal {
+    /// What BigQuery answers.
+    Status(Status),
+    /// A failure of the fake itself, answered with `Internal` and reported by `verify`.
+    Internal(String),
+}
+
+impl From<Status> for FakeRefusal {
+    fn from(status: Status) -> Self {
+        Self::Status(status)
+    }
 }
 
 impl FakeShared {
@@ -126,6 +140,15 @@ impl FakeShared {
         self.problems()
             .push(FakeProblem::Internal(failure.to_string()));
         call.fail(Code::Internal, &format!("bigquery fake: {failure}"));
+    }
+
+    /// Answers a unary `call` with `answer`.
+    pub(super) fn answer<M: Message>(&self, call: FakeCall, answer: Result<M, FakeRefusal>) {
+        match answer {
+            Ok(message) => call.reply(&message),
+            Err(FakeRefusal::Status(status)) => call.fail(status.code(), status.message()),
+            Err(FakeRefusal::Internal(failure)) => self.internal(call, &failure),
+        }
     }
 
     /// Every problem `verify` reports, empty when there is none.

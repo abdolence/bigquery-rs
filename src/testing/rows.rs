@@ -437,7 +437,7 @@ impl MessageLayout {
 impl BigQueryFieldType {
     /// The fields of the message a value of this type is written as: a STRUCT's own, or a
     /// RANGE's `start` and `end`. `None` for a type written as a scalar.
-    fn message_fields(&self) -> Option<Vec<BigQueryFieldSchema>> {
+    pub(super) fn message_fields(&self) -> Option<Vec<BigQueryFieldSchema>> {
         match self {
             BigQueryFieldType::Struct(fields) => Some(fields.clone()),
             BigQueryFieldType::Range(element) => {
@@ -470,10 +470,8 @@ impl ChangeColumns {
             )
             .at_field(CHANGE_TYPE_COLUMN)
         })?;
-        let change_type = text.parse::<BigQueryChangeType>().map_err(|_| {
-            CodecError::invalid_text(format!("{text:?} is not UPSERT or DELETE"))
-                .at_field(CHANGE_TYPE_COLUMN)
-        })?;
+        let change_type =
+            BigQueryChangeType::from_text(text).map_err(|err| err.at_field(CHANGE_TYPE_COLUMN))?;
         let sequence_number = self
             .sequence_number
             .as_deref()
@@ -846,23 +844,28 @@ impl BigQueryDecimalParams {
     /// value into a column of this precision and scale: rounded half away from zero, and
     /// `None` when it has more digits than the precision.
     pub(super) fn rescale(self, unscaled: i256, from_scale: u32) -> Option<i256> {
-        let ten = i256::from_i128(10);
-        let limit = ten.checked_pow(u32::from(self.precision))?;
-        let scale = u32::from(self.scale);
-        let rescaled = if scale < from_scale {
-            let divisor = ten.checked_pow(from_scale - scale)?;
-            let quotient = unscaled.wrapping_div(divisor);
-            let remainder = unscaled.wrapping_rem(divisor).wrapping_abs();
-            if remainder.wrapping_mul(i256::from_i128(2)) >= divisor {
-                quotient.checked_add(unscaled.signum())
-            } else {
-                Some(quotient)
-            }
+        let limit = i256::from_i128(10).checked_pow(u32::from(self.precision))?;
+        rescale_decimal(unscaled, from_scale, u32::from(self.scale))
+            .filter(|rescaled| rescaled.wrapping_abs() < limit)
+    }
+}
+
+/// `unscaled`, a decimal at `from_scale`, unscaled at `scale`, rounded half away from zero as
+/// BigQuery rounds it; `None` when it does not fit 256 bits.
+pub(super) fn rescale_decimal(unscaled: i256, from_scale: u32, scale: u32) -> Option<i256> {
+    let ten = i256::from_i128(10);
+    if scale < from_scale {
+        let divisor = ten.checked_pow(from_scale - scale)?;
+        let quotient = unscaled.wrapping_div(divisor);
+        let remainder = unscaled.wrapping_rem(divisor).wrapping_abs();
+        if remainder.wrapping_mul(i256::from_i128(2)) >= divisor {
+            quotient.checked_add(unscaled.signum())
         } else {
-            ten.checked_pow(scale - from_scale)
-                .and_then(|factor| unscaled.checked_mul(factor))
-        };
-        rescaled.filter(|rescaled| rescaled.wrapping_abs() < limit)
+            Some(quotient)
+        }
+    } else {
+        ten.checked_pow(scale - from_scale)
+            .and_then(|factor| unscaled.checked_mul(factor))
     }
 }
 

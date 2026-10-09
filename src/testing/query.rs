@@ -551,15 +551,16 @@ impl FakeTable {
         if let Some(problem) = append_refusal(&self.schema.fields, &schema.fields) {
             return Err(refused(problem));
         }
-        fit_to_layout(rows, &self.arrow_schema).map_err(refused)
+        fit_to_layout(rows, &self.schema, &self.arrow_schema).map_err(refused)
     }
 }
 
 /// Why columns `table` do not take a query result of the columns `result`, or `None` if they
 /// do. Each result column must name a column of the table, ignoring case, of the same type, a
 /// RECORD being checked field by field. A declared length, precision or scale plays no part:
-/// BigQuery checks the values against it as it writes them. A REPEATED column takes only a REPEATED result, and a
-/// REQUIRED one only a REQUIRED result; a REQUIRED column the result leaves out is refused.
+/// BigQuery checks the values against it as it writes them. A REPEATED column takes only a
+/// REPEATED result, and a REQUIRED one only a REQUIRED result; a REQUIRED column the result
+/// leaves out is refused.
 fn append_refusal(table: &[BigQueryFieldSchema], result: &[BigQueryFieldSchema]) -> Option<String> {
     for column in result {
         let Some(target) = table
