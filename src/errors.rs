@@ -757,9 +757,14 @@ fn is_rate_limit(status: &gcloud_sdk::tonic::Status) -> bool {
 /// BigQuery never saw such a request, so sending it again is safe. A `Cancelled` the server
 /// sent carries no hyper error and stays permanent.
 fn transport_cancelled(status: &gcloud_sdk::tonic::Status) -> bool {
+    hyper_error(status).is_some_and(hyper::Error::is_canceled)
+}
+
+/// The hyper error under `status`, anywhere in its source chain: a status the channel
+/// reports carries tonic's transport error first and hyper's below it.
+fn hyper_error(status: &gcloud_sdk::tonic::Status) -> Option<&hyper::Error> {
     std::iter::successors(status.source(), |&source| source.source())
-        .filter_map(|source| source.downcast_ref::<hyper::Error>())
-        .any(hyper::Error::is_canceled)
+        .find_map(|source| source.downcast_ref::<hyper::Error>())
 }
 
 /// Classifies an `Unknown` status by the transport error underneath it. A connection that
@@ -767,13 +772,10 @@ fn transport_cancelled(status: &gcloud_sdk::tonic::Status) -> bool {
 /// retrying: a stream resumes from its offset and a unary call is sent again. A request hyper
 /// refused to send, or a response it could not parse, is not.
 fn check_hyper_errors(status: gcloud_sdk::tonic::Status) -> BigQueryError {
-    let hyper_error = status
-        .source()
-        .and_then(|source| source.downcast_ref::<hyper::Error>());
     let lost = |code: &str, err: &hyper::Error| {
         BigQueryError::database_with_code(code, format!("Hyper error: {err}"), true)
     };
-    match hyper_error {
+    match hyper_error(&status) {
         Some(err) if err.is_closed() => lost("CONNECTION_CLOSED", err),
         Some(err) if err.is_timeout() => lost("CONNECTION_TIMEOUT", err),
         Some(err) if err.is_user() || err.is_parse() => {
@@ -969,6 +971,77 @@ mod tests {
         let err = BigQueryError::from(status);
 
         assert!(err.retry_possible(), "{err}");
+    }
+
+    /// tonic's transport error, which carries hyper's error as its source.
+    #[derive(Debug)]
+    struct TransportError(hyper::Error);
+
+    impl Display for TransportError {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.write_str("transport error")
+        }
+    }
+
+    impl Error for TransportError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    /// The status tonic reports for `error` under its transport error.
+    fn under_transport_error(error: hyper::Error) -> Status {
+        let status = Status::from_error(Box::new(TransportError(error)));
+        assert_eq!(status.code(), Code::Unknown);
+        status
+    }
+
+    #[tokio::test]
+    async fn a_closed_connection_under_the_transport_error_is_connection_closed() {
+        let (client, _server) = tokio::io::duplex(64 * 1024);
+        let (mut sender, connection) =
+            hyper::client::conn::http2::handshake::<_, _, String>(TokioExecutor, Pipe(client))
+                .await
+                .expect("the handshake only writes the preface");
+        drop(connection);
+        let closed = sender.ready().await.expect_err("the connection is gone");
+
+        match BigQueryError::from(under_transport_error(closed)) {
+            BigQueryError::DatabaseError(err) => {
+                assert_eq!(err.public.code, "CONNECTION_CLOSED");
+                assert!(err.retry_possible);
+            }
+            other => panic!("expected a database error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_hyper_refused_under_the_transport_error_is_not_retryable() {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            if let Ok(mut connection) = h2::server::handshake(server).await {
+                while connection.accept().await.is_some() {}
+            }
+        });
+        let (mut sender, connection) =
+            hyper::client::conn::http2::handshake(TokioExecutor, Pipe(client))
+                .await
+                .expect("the handshake only writes the preface");
+        tokio::spawn(connection);
+        let request = hyper::Request::builder()
+            .method(hyper::Method::CONNECT)
+            .uri("http://example.com")
+            .body(String::from("a CONNECT over HTTP/2 takes no body"))
+            .expect("a valid request");
+        let refused = sender
+            .send_request(request)
+            .await
+            .expect_err("hyper refuses a CONNECT with a body");
+        assert!(refused.is_user(), "{refused:?}");
+
+        let err = BigQueryError::from(under_transport_error(refused));
+
+        assert!(!err.retry_possible(), "{err}");
     }
 
     #[test]
