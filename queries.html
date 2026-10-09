@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8cd4664a.js";
+            window.path_to_searchindex_js = "searchindex-61fc53da.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -376,6 +376,60 @@ let outcome = db
 </span><span class="boring">}</span></code></pre>
 <p>Parameter names must be GoogleSQL identifiers: ASCII letters, digits and <code>_</code>, not starting with a
 digit.</p>
+<h3 id="sql-files"><a class="header" href="#sql-files">SQL files</a></h3>
+<p>A longer statement can live in its own <code>.sql</code> file. <code>sql_file!(path, names...)</code> embeds the file
+into the binary at compile time and lists the names of its named parameters. The path is relative
+to the Rust file that calls the macro, the same as <code>include_str!</code>, and Cargo rebuilds the crate
+when the file changes.</p>
+<p>With <code>query/sql/top_words.sql</code>:</p>
+<pre><code class="language-sql">SELECT word, word_count
+FROM `bigquery-public-data.samples.shakespeare`
+WHERE corpus = @corpus
+  AND word_count &gt;= @min_count
+ORDER BY word_count DESC
+LIMIT 10
+</code></pre>
+<p>the query takes the file in place of the text, and the values are bound with <code>.param</code> as usual:</p>
+<pre><code class="language-rust no_run">use bigquery::*;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct WordCount {
+    word: String,
+    word_count: i64,
+}
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let top_words: Vec&lt;WordCount&gt; = db
+    .fluent()
+    .query(bigquery::sql_file!("query/sql/top_words.sql", corpus, min_count))
+    .param("corpus", "hamlet")
+    .param("min_count", 100)
+    .obj()
+    .query()
+    .await?;
+<span class="boring">let _ = top_words;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>The names are checked twice:</p>
+<ul>
+<li>at compile time, against the file: a parameter the file uses and the list leaves out, or a
+listed name the file never uses, fails the build;</li>
+<li>at run time, against the <code>.param</code> and <code>.params</code> calls, before anything is sent: a listed name
+with no value, or a value bound to a name the list does not have, fails the terminal with
+<code>InvalidParametersError</code> naming the parameter.</li>
+</ul>
+<p>The check reads the file with GoogleSQL’s lexical rules, so an <code>@</code> inside a string, a quoted
+identifier or a comment is not a parameter, and neither is a <code>@@</code> system variable. The rest
+follows BigQuery’s parser:</p>
+<ul>
+<li>whitespace and comments may stand between <code>@</code> and the name;</li>
+<li>a backtick-quoted name such as <code>@`corpus` </code> is listed as <code>corpus</code>;</li>
+<li>a STRUCT parameter read as <code>@window.earliest</code> is listed as <code>window</code>;</li>
+<li>names are compared ignoring case, so <code>@Corpus</code> is listed as <code>corpus</code> and bound with
+<code>.param("corpus", ...)</code>.</li>
+</ul>
+<p>Nothing is sent to BigQuery to check the statement itself; use a dry run for that.</p>
 <h3 id="positional-parameters"><a class="header" href="#positional-parameters">Positional parameters</a></h3>
 <p><code>.positional_param(value)</code> and <code>.positional_param_as(type, value)</code> add the next <code>?</code>, inferred or
 typed the same way as the named ones:</p>

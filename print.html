@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8cd4664a.js";
+            window.path_to_searchindex_js = "searchindex-61fc53da.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-403efbef.js"></script>
@@ -920,6 +920,60 @@ let outcome = db
 </span><span class="boring">}</span></code></pre>
 <p>Parameter names must be GoogleSQL identifiers: ASCII letters, digits and <code>_</code>, not starting with a
 digit.</p>
+<h3 id="sql-files"><a class="header" href="#sql-files">SQL files</a></h3>
+<p>A longer statement can live in its own <code>.sql</code> file. <code>sql_file!(path, names...)</code> embeds the file
+into the binary at compile time and lists the names of its named parameters. The path is relative
+to the Rust file that calls the macro, the same as <code>include_str!</code>, and Cargo rebuilds the crate
+when the file changes.</p>
+<p>With <code>query/sql/top_words.sql</code>:</p>
+<pre><code class="language-sql">SELECT word, word_count
+FROM `bigquery-public-data.samples.shakespeare`
+WHERE corpus = @corpus
+  AND word_count &gt;= @min_count
+ORDER BY word_count DESC
+LIMIT 10
+</code></pre>
+<p>the query takes the file in place of the text, and the values are bound with <code>.param</code> as usual:</p>
+<pre><code class="language-rust no_run">use bigquery::*;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct WordCount {
+    word: String,
+    word_count: i64,
+}
+
+<span class="boring">async fn example(db: BigQueryDb) -&gt; BigQueryResult&lt;()&gt; {
+</span>let top_words: Vec&lt;WordCount&gt; = db
+    .fluent()
+    .query(bigquery::sql_file!("query/sql/top_words.sql", corpus, min_count))
+    .param("corpus", "hamlet")
+    .param("min_count", 100)
+    .obj()
+    .query()
+    .await?;
+<span class="boring">let _ = top_words;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>The names are checked twice:</p>
+<ul>
+<li>at compile time, against the file: a parameter the file uses and the list leaves out, or a
+listed name the file never uses, fails the build;</li>
+<li>at run time, against the <code>.param</code> and <code>.params</code> calls, before anything is sent: a listed name
+with no value, or a value bound to a name the list does not have, fails the terminal with
+<code>InvalidParametersError</code> naming the parameter.</li>
+</ul>
+<p>The check reads the file with GoogleSQL’s lexical rules, so an <code>@</code> inside a string, a quoted
+identifier or a comment is not a parameter, and neither is a <code>@@</code> system variable. The rest
+follows BigQuery’s parser:</p>
+<ul>
+<li>whitespace and comments may stand between <code>@</code> and the name;</li>
+<li>a backtick-quoted name such as <code>@`corpus` </code> is listed as <code>corpus</code>;</li>
+<li>a STRUCT parameter read as <code>@window.earliest</code> is listed as <code>window</code>;</li>
+<li>names are compared ignoring case, so <code>@Corpus</code> is listed as <code>corpus</code> and bound with
+<code>.param("corpus", ...)</code>.</li>
+</ul>
+<p>Nothing is sent to BigQuery to check the statement itself; use a dry run for that.</p>
 <h3 id="positional-parameters"><a class="header" href="#positional-parameters">Positional parameters</a></h3>
 <p><code>.positional_param(value)</code> and <code>.positional_param_as(type, value)</code> add the next <code>?</code>, inferred or
 typed the same way as the named ones:</p>
@@ -3123,7 +3177,7 @@ work in both directions too.</p>
 <tr><td>NUMERIC, BIGNUMERIC</td><td><code>String</code></td><td>integers, <code>f64</code></td><td><code>BigQueryDecimal&lt;T&gt;</code></td></tr>
 <tr><td>BOOL</td><td><code>bool</code></td><td></td><td></td></tr>
 <tr><td>STRING</td><td><code>String</code></td><td><code>Box&lt;str&gt;</code>, <code>char</code>, unit enums, any type serialized as a string</td><td></td></tr>
-<tr><td>BYTES</td><td><code>Vec&lt;u8&gt;</code></td><td><code>serde_bytes::ByteBuf</code>, <code>[u8; N]</code></td><td></td></tr>
+<tr><td>BYTES</td><td><code>Vec&lt;u8&gt;</code></td><td><code>serde_bytes::ByteBuf</code>, <code>[u8; N]</code>, <code>serde_json::Value</code> (an array of byte numbers)</td><td></td></tr>
 <tr><td>DATE</td><td><code>jiff::civil::Date</code></td><td><code>String</code>, <code>i32</code> days</td><td><code>BigQueryDate</code></td></tr>
 <tr><td>TIME</td><td><code>jiff::civil::Time</code></td><td><code>String</code>, <code>i64</code> microseconds of the day</td><td><code>BigQueryTime</code></td></tr>
 <tr><td>DATETIME</td><td><code>jiff::civil::DateTime</code></td><td><code>String</code>, <code>i64</code> civil microseconds</td><td><code>BigQueryDateTime</code></td></tr>
@@ -3208,8 +3262,8 @@ by BigQuery only.</p>
 <p>BYTES is <code>Vec&lt;u8&gt;</code>, <code>serde_bytes::ByteBuf</code>, or <code>[u8; N]</code> when the value has exactly N bytes. A string
 is not taken for BYTES on write, and bytes are not taken for STRING: BigQuery stores a string sent
 to BYTES as its raw UTF-8 bytes and does not decode base64, so a base64 text would be stored as
-text by accident. A <code>serde_json::Value</code> row cannot hold BYTES; select <code>TO_BASE64(b)</code> instead, or use
-a typed field.</p>
+text by accident. A <code>serde_json::Value</code> reads BYTES as an array of byte numbers, such as
+<code>[0, 255]</code>, and the writer takes that array back for BYTES.</p>
 <h2 id="geography"><a class="header" href="#geography">GEOGRAPHY</a></h2>
 <p>GEOGRAPHY is a <code>String</code>. BigQuery returns WKT and takes both WKT and GeoJSON on write, storing
 either as a geography. Invalid text is rejected by BigQuery.</p>
@@ -3363,9 +3417,23 @@ struct Promotion {
 <p><code>start</code> is inclusive and <code>end</code> exclusive, and <code>None</code> is an unbounded end. A NULL range into a bare
 <code>BigQueryRange&lt;T&gt;</code> fails with <code>NullForNonOption</code>. Whether <code>start</code> comes before <code>end</code> is checked by
 BigQuery.</p>
-<p>Be aware of a REQUIRED RANGE column: BigQuery reads an unbounded end of it as <code>1970-01-01</code> (or the
-epoch for DATETIME and TIMESTAMP), and the library cannot tell it from a real epoch bound. NULLABLE
-and REPEATED RANGE columns keep unbounded ends as <code>None</code>.</p>
+<p>NULLABLE and REPEATED RANGE columns keep unbounded ends as <code>None</code>. A REQUIRED RANGE column has no
+NULL for its ends, so BigQuery sends an unbounded end of it as <code>1970-01-01</code> (or the epoch for
+DATETIME and TIMESTAMP). The library reads that epoch as <code>None</code> when it breaks <code>start &lt; end</code>, which
+BigQuery keeps for every range:</p>
+<ul>
+<li>an epoch end at or before the start is an unbounded end;</li>
+<li>an epoch start at or after the end is an unbounded start;</li>
+<li><code>[UNBOUNDED, UNBOUNDED)</code> reads as both <code>None</code>.</li>
+</ul>
+<p>A real epoch bound looks the same as an unbounded one, so four cases read wrong:</p>
+<ul>
+<li>an unbounded start with an end after the epoch reads the start as the epoch;</li>
+<li>an unbounded end with a start before the epoch reads the end as the epoch;</li>
+<li><code>[1970-01-01, UNBOUNDED)</code> reads as both <code>None</code>, the same as <code>[UNBOUNDED, UNBOUNDED)</code>;</li>
+<li><code>[UNBOUNDED, 1970-01-01)</code> reads as both <code>None</code> too.</li>
+</ul>
+<p>Use a NULLABLE RANGE column where these values matter.</p>
 <h2 id="struct"><a class="header" href="#struct">STRUCT</a></h2>
 <p>A STRUCT column is a struct with derived serde, its fields matched by name, or a map with string
 keys, or a <code>serde_json::Value</code> object. Nested structs and <code>ARRAY&lt;STRUCT&gt;</code> work the same way.</p>
