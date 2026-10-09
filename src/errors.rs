@@ -732,6 +732,9 @@ impl From<gcloud_sdk::tonic::Status> for BigQueryError {
                 Self::database(code, format!("{status}"), true)
             }
             Code::Unknown => check_hyper_errors(status),
+            Code::Cancelled if transport_cancelled(&status) => {
+                BigQueryError::database_with_code("CONNECTION_CLOSED", format!("{status}"), true)
+            }
             _ => Self::database(code, format!("{status}"), false),
         }
     }
@@ -747,6 +750,16 @@ fn is_rate_limit(status: &gcloud_sdk::tonic::Status) -> bool {
         .message()
         .to_ascii_lowercase()
         .contains("exceeded rate limits")
+}
+
+/// Whether hyper cancelled the request under `status` because its connection closed before
+/// the request went out, as when a call is sent on a connection the server has just dropped.
+/// BigQuery never saw such a request, so sending it again is safe. A `Cancelled` the server
+/// sent carries no hyper error and stays permanent.
+fn transport_cancelled(status: &gcloud_sdk::tonic::Status) -> bool {
+    std::iter::successors(status.source(), |&source| source.source())
+        .filter_map(|source| source.downcast_ref::<hyper::Error>())
+        .any(hyper::Error::is_canceled)
 }
 
 /// Classifies an `Unknown` status by the transport error underneath it. A connection that
@@ -778,6 +791,10 @@ fn check_hyper_errors(status: gcloud_sdk::tonic::Status) -> BigQueryError {
 mod tests {
     use super::*;
     use gcloud_sdk::tonic::Status;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{ready, Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite};
 
     fn classify(code: Code, message: &str) -> BigQueryError {
         BigQueryError::from(Status::new(code, message))
@@ -874,6 +891,90 @@ mod tests {
     fn unknown_transport_error_is_retryable() {
         let err = classify(Code::Unknown, "transport error");
         assert!(err.retry_possible(), "{err}");
+    }
+
+    /// Lets hyper's client run over an in-memory pipe.
+    struct Pipe(tokio::io::DuplexStream);
+
+    impl hyper::rt::Read for Pipe {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            mut buf: hyper::rt::ReadBufCursor<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let mut bytes = [0; 1024];
+            let mut read = tokio::io::ReadBuf::new(&mut bytes);
+            ready!(Pin::new(&mut self.0).poll_read(cx, &mut read))?;
+            buf.put_slice(read.filled());
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl hyper::rt::Write for Pipe {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_shutdown(cx)
+        }
+    }
+
+    #[derive(Clone)]
+    struct TokioExecutor;
+
+    impl<F> hyper::rt::Executor<F> for TokioExecutor
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        fn execute(&self, future: F) {
+            tokio::spawn(future);
+        }
+    }
+
+    /// The status tonic reports for a call sent on an HTTP/2 connection that closed before the
+    /// call went out.
+    async fn call_on_a_closed_connection() -> Status {
+        let (client, _server) = tokio::io::duplex(64 * 1024);
+        let (mut sender, connection) =
+            hyper::client::conn::http2::handshake(TokioExecutor, Pipe(client))
+                .await
+                .expect("the handshake only writes the preface");
+        drop(connection);
+        let request = hyper::Request::new(String::new());
+        let error = sender
+            .send_request(request)
+            .await
+            .expect_err("the connection is gone");
+        Status::from_error(Box::new(error))
+    }
+
+    #[tokio::test]
+    async fn call_cancelled_by_a_closed_connection_is_retryable() {
+        let status = call_on_a_closed_connection().await;
+        assert_eq!(status.code(), Code::Cancelled);
+
+        let err = BigQueryError::from(status);
+
+        assert!(err.retry_possible(), "{err}");
+    }
+
+    #[test]
+    fn cancelled_by_the_server_is_not_retryable() {
+        let err = classify(Code::Cancelled, "operation was canceled");
+        assert!(!err.retry_possible(), "{err}");
     }
 
     #[test]
