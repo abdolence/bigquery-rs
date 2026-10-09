@@ -428,3 +428,41 @@ async fn round_trip_every_type_and_mode_through_the_writer() -> TestResult {
     )
     .await
 }
+
+#[tokio::test]
+async fn round_trip_bytes_as_json_value_arrays() -> TestResult {
+    with_scratch(
+        "round_trip_bytes_as_json_value_arrays",
+        async |s: &Scratch| {
+            run_sql(
+                s,
+                &format!(
+                    "CREATE TABLE {} (id INT64 NOT NULL, payload BYTES NOT NULL)",
+                    s.table_sql("payloads")
+                ),
+            )
+            .await?;
+            let expected = vec![
+                serde_json::json!({"id": 1, "payload": [0, 127, 255]}),
+                serde_json::json!({"id": 2, "payload": []}),
+            ];
+            s.db.fluent()
+                .insert()
+                .into(s.dataset_ref()?.table(s.table_id("payloads")))
+                .objects(&expected)
+                .execute()
+                .await?;
+            let mut got: Vec<serde_json::Value> =
+                s.db.fluent()
+                    .select()
+                    .from(s.table("payloads"))
+                    .obj()
+                    .query()
+                    .await?;
+            got.sort_by_key(|row| row["id"].as_i64());
+            assert_eq!(got, expected);
+            Ok(())
+        },
+    )
+    .await
+}

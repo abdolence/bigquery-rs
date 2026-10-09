@@ -142,8 +142,8 @@ by BigQuery only.
 BYTES is `Vec<u8>`, `serde_bytes::ByteBuf`, or `[u8; N]` when the value has exactly N bytes. A string
 is not taken for BYTES on write, and bytes are not taken for STRING: BigQuery stores a string sent
 to BYTES as its raw UTF-8 bytes and does not decode base64, so a base64 text would be stored as
-text by accident. A `serde_json::Value` row cannot hold BYTES; select `TO_BASE64(b)` instead, or use
-a typed field.
+text by accident. A `serde_json::Value` reads BYTES as an array of byte numbers, such as
+`[0, 255]`, and the writer takes that array back for BYTES.
 
 ## GEOGRAPHY
 

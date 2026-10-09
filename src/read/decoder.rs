@@ -700,9 +700,18 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
 impl<'a> de::Deserializer<'a> for ValueDeserializer<'_, 'a> {
     type Error = CodecError;
 
+    /// BYTES is a sequence of `u8` here: a self-describing target such as `serde_json::Value`
+    /// has no bytes form, and a byte buffer that `flatten` or `untagged` buffers through here
+    /// still reads a sequence of `u8` as its bytes.
     fn deserialize_any<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         if self.is_null() {
             return visitor.visit_unit();
+        }
+        if let ColumnValues::Bytes(values) = &self.column.values {
+            return visitor.visit_seq(ByteSeq {
+                bytes: values.value(self.row),
+                next_byte: 0,
+            });
         }
         self.any_non_null(visitor)
     }

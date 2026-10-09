@@ -1161,20 +1161,92 @@ fn json_null_elements_of_an_array_into_options_are_none() {
 }
 
 #[test]
-fn bytes_column_into_json_value_is_an_error() {
+fn bytes_column_into_json_value_is_an_array_of_bytes() {
     let batch = batch(vec![column(
         "payload",
-        BinaryArray::from_vec(vec![&b"\x01"[..]]),
+        BinaryArray::from_vec(vec![&b"\x01\xff"[..], b""]),
     )]);
-    #[derive(Deserialize, Debug)]
+    #[derive(Deserialize, Debug, PartialEq)]
     struct JsonPayload {
-        #[allow(dead_code, reason = "decoded only to see it fail")]
         payload: serde_json::Value,
     }
-    let error = row_error::<JsonPayload>(&batch, 0);
     assert_eq!(
-        (error.path.as_str(), error.kind),
-        ("payload", BigQueryCodecErrorKind::TypeMismatch)
+        row::<JsonPayload>(&batch, 0),
+        Ok(JsonPayload {
+            payload: serde_json::json!([1, 255])
+        })
+    );
+    assert_eq!(
+        row::<JsonPayload>(&batch, 1),
+        Ok(JsonPayload {
+            payload: serde_json::json!([])
+        })
+    );
+}
+
+/// A BYTES value read into `serde_json::Value` is written back by the writer as the same bytes.
+#[test]
+fn bytes_read_into_json_value_write_back_as_the_same_bytes() {
+    use crate::write::descriptor::WritePlan;
+    use crate::write::encoder::Encoder;
+    #[derive(serde::Serialize)]
+    struct Attachment<'a> {
+        #[serde(with = "serde_bytes")]
+        payload: &'a [u8],
+    }
+    let payload = b"\x00\x7f\xff";
+    let batch = batch(vec![column(
+        "payload",
+        BinaryArray::from_vec(vec![&payload[..]]),
+    )]);
+    let read: serde_json::Value = row(&batch, 0).expect("the row decodes");
+    let plan = Arc::new(WritePlan::new(
+        &crate::BigQueryTableSchema {
+            fields: vec![crate::types::testkit::field(
+                "payload",
+                crate::BigQueryFieldType::Bytes { max_length: None },
+                crate::BigQueryFieldMode::Required,
+            )],
+        },
+        false,
+    ));
+    let mut from_value = Vec::new();
+    Encoder::new(plan.clone())
+        .encode(&read, &mut from_value)
+        .expect("the value encodes");
+    let mut from_bytes = Vec::new();
+    Encoder::new(plan)
+        .encode(&Attachment { payload }, &mut from_bytes)
+        .expect("the bytes encode");
+    assert_eq!(from_value, from_bytes);
+}
+
+/// `flatten` buffers a value through `deserialize_any`; a byte buffer behind it still gets the
+/// column's bytes.
+#[test]
+fn flattened_byte_buffer_reads_the_bytes() {
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Attachment {
+        payload: serde_bytes::ByteBuf,
+    }
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Message {
+        id: i64,
+        #[serde(flatten)]
+        attachment: Attachment,
+    }
+    let batch = batch(vec![
+        column("id", Int64Array::from(vec![7])),
+        column("payload", BinaryArray::from_vec(vec![&b"\x00\xff"[..]])),
+    ]);
+    assert_eq!(
+        row::<Message>(&batch, 0),
+        Ok(Message {
+            id: 7,
+            attachment: Attachment {
+                payload: serde_bytes::ByteBuf::from(vec![0, 255])
+            }
+        })
     );
 }
 
