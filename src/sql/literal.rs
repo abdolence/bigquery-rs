@@ -1,8 +1,8 @@
 use super::ident::{escape_into, quote_identifier};
 use crate::errors::BigQueryCodecErrorKind;
+use crate::query::{bytes_from_base64, float_from_text};
 use crate::types::error::CodecError;
 use crate::BigQueryRangeElementType;
-use base64::Engine;
 use gcloud_sdk::google::cloud::bigquery::v2::{QueryParameterType, QueryParameterValue};
 use std::fmt::{Display, Formatter};
 
@@ -236,10 +236,9 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
             "STRING" => text.map(SqlLiteral::string),
             "BYTES" => text
                 .map(|t| {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(t)
+                    bytes_from_base64(t)
                         .map(|b| SqlLiteral::bytes(&b))
-                        .map_err(|_| malformed("BYTES", &t))
+                        .ok_or_else(|| malformed("BYTES", &t))
                 })
                 .transpose()?,
             "INT64" => text
@@ -250,12 +249,7 @@ impl TryFrom<(&QueryParameterType, &QueryParameterValue)> for SqlLiteral {
                 })
                 .transpose()?,
             "FLOAT64" => text
-                .map(|t| match t {
-                    "NaN" => Ok(f64::NAN),
-                    "Infinity" => Ok(f64::INFINITY),
-                    "-Infinity" => Ok(f64::NEG_INFINITY),
-                    t => t.parse().map_err(|_| malformed("FLOAT64", &t)),
-                })
+                .map(|t| float_from_text(t).ok_or_else(|| malformed("FLOAT64", &t)))
                 .transpose()?
                 .map(SqlLiteral::float64),
             "BOOL" => text

@@ -208,6 +208,42 @@ pub enum BigQueryChangeType {
     Delete,
 }
 
+impl BigQueryChangeType {
+    /// The value of the `_CHANGE_TYPE` pseudo-column, as in `UPSERT`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            BigQueryChangeType::Upsert => "UPSERT",
+            BigQueryChangeType::Delete => "DELETE",
+        }
+    }
+
+    /// The change `text` names, as [`FromStr`] reads it, failing with the codec error a decoder
+    /// places at its field.
+    pub(crate) fn from_text(text: &str) -> Result<Self, CodecError> {
+        match text {
+            "UPSERT" => Ok(BigQueryChangeType::Upsert),
+            "DELETE" => Ok(BigQueryChangeType::Delete),
+            _ => Err(CodecError::invalid_text(format!(
+                "{text:?} is not UPSERT or DELETE"
+            ))),
+        }
+    }
+}
+
+impl FromStr for BigQueryChangeType {
+    type Err = BigQueryError;
+
+    /// The change a `_CHANGE_TYPE` value names, exactly as BigQuery spells it: `UPSERT` or
+    /// `DELETE`.
+    ///
+    /// # Errors
+    /// [`BigQueryError::SerializeError`] with kind
+    /// [`InvalidText`](crate::errors::BigQueryCodecErrorKind::InvalidText) for any other text.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_text(s).map_err(CodecError::into_serialize)
+    }
+}
+
 /// A CDC `_CHANGE_SEQUENCE_NUMBER`, which orders changes to one key. `From<u64>` writes it in
 /// hex; any other text is sent as it is, and BigQuery checks its form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -2,19 +2,32 @@
 //!
 //! It speaks raw HTTP/2, so a handler sees each request message as it arrives and answers in
 //! any shape gRPC allows: a unary reply, a server stream, a bidi exchange one request at a
-//! time, a status at any point, a dropped connection or a call that never answers. The
-//! per-API answers live in the sibling `read`, `write`, `query` and `table` modules.
+//! time, a status at any point, a dropped connection or a call that never answers.
+//!
+//! [`FakeServer`], [`FakeCall`] and the [`wire`] encodings are shared with `bigquery::testing`.
+//! [`FakeBigQuery`] and the per-API helpers in the sibling `read`, `write`, `query` and `table`
+//! modules serve the crate's own tests.
 
+#[cfg(test)]
 pub(crate) mod events;
+#[cfg(test)]
 pub(crate) mod query;
+#[cfg(test)]
 pub(crate) mod read;
+#[cfg(test)]
 pub(crate) mod spans;
+#[cfg(test)]
 pub(crate) mod table;
+pub(crate) mod wire;
+#[cfg(test)]
 pub(crate) mod write;
 
-use crate::{BigQueryDatasetId, BigQueryDb, BigQueryDbOptions, BigQueryTableId};
+use crate::db::RetryBackoff;
+#[cfg(test)]
+use crate::{BigQueryDatasetId, BigQueryTableId};
+use crate::{BigQueryDb, BigQueryDbOptions, BigQueryResult};
 use futures::future::BoxFuture;
-use gcloud_sdk::prost::Message;
+use gcloud_sdk::prost::{DecodeError, Message};
 use gcloud_sdk::tonic::Code;
 use h2::server::SendResponse;
 use h2::{RecvStream, SendStream};
@@ -23,25 +36,117 @@ use hyper::header::HeaderValue;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Notify};
+#[cfg(test)]
+use tokio::sync::watch;
+use tokio::sync::Notify;
+use tokio::task::{AbortHandle, JoinSet};
 
 /// The `shop` dataset the fake-server tests use, in the client's own project.
+#[cfg(test)]
 pub(crate) const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
 /// The `orders` table the fake-server tests use, in [`SHOP`].
+#[cfg(test)]
 pub(crate) const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 
 type Handler = dyn Fn(FakeCall) -> BoxFuture<'static, ()> + Send + Sync;
 
-/// A running fake server and a [`BigQueryDb`] whose v2 and Storage endpoints both point at it.
+/// Every line the handlers of one server logged, in order.
+#[cfg(test)]
+type CallLog = Arc<watch::Sender<Vec<String>>>;
+
+/// A gRPC server on a loopback port that hands every call to one handler.
 ///
-/// The handler runs once per RPC, on its own task, and owns the call until it answers. It
-/// records what it saw with [`FakeCall::log`], so a test can assert a whole RPC sequence with
-/// one comparison of [`FakeBigQuery::calls`].
-pub(crate) struct FakeBigQuery {
-    pub db: BigQueryDb,
-    calls: Arc<watch::Sender<Vec<String>>>,
+/// The handler runs once per RPC, on its own task, and owns the call until it answers. Dropping
+/// the server stops it: the accept task owns the connections, and each connection owns its
+/// calls, so aborting the accept task ends every task the server started.
+pub(crate) struct FakeServer {
+    endpoint: url::Url,
+    accept: AbortHandle,
+    #[cfg(test)]
+    calls: CallLog,
 }
 
+/// What every call on one server shares.
+#[derive(Clone)]
+struct CallContext {
+    handler: Arc<Handler>,
+    #[cfg(test)]
+    calls: CallLog,
+}
+
+impl FakeServer {
+    /// Binds a free loopback port and starts serving it with `handler`.
+    pub(crate) async fn bind<F, Fut>(handler: F) -> std::io::Result<Self>
+    where
+        F: Fn(FakeCall) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = url::Url::parse(&format!("http://{}", listener.local_addr()?))
+            .map_err(std::io::Error::other)?;
+        let context = CallContext {
+            handler: Arc::new(move |call| Box::pin(handler(call))),
+            #[cfg(test)]
+            calls: Arc::new(watch::Sender::new(Vec::new())),
+        };
+        #[cfg(test)]
+        let calls = context.calls.clone();
+        let accept = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                while connections.try_join_next().is_some() {}
+                connections.spawn(serve_connection(socket, context.clone()));
+            }
+            // The listener failed: keep serving the connections already open.
+            while connections.join_next().await.is_some() {}
+        })
+        .abort_handle();
+        Ok(Self {
+            endpoint,
+            accept,
+            #[cfg(test)]
+            calls,
+        })
+    }
+
+    /// A client whose v2 and Storage endpoints both point at this server, with the project,
+    /// location and `max_retries` of `options`. It authenticates with a token the server never
+    /// checks.
+    pub(crate) async fn client(
+        &self,
+        options: BigQueryDbOptions,
+        backoff: RetryBackoff,
+    ) -> BigQueryResult<BigQueryDb> {
+        let options = options
+            .with_bigquery_api_url(self.endpoint.clone())
+            .with_bigquery_storage_api_url(self.endpoint.clone());
+        BigQueryDb::connect(
+            options,
+            Vec::new(),
+            gcloud_sdk::TokenSourceType::ExternalSource(Box::new(FakeTokenSource)),
+            backoff,
+        )
+        .await
+    }
+}
+
+impl Drop for FakeServer {
+    fn drop(&mut self) {
+        self.accept.abort();
+    }
+}
+
+/// A running fake server and a [`BigQueryDb`] whose v2 and Storage endpoints both point at it.
+///
+/// The handler records what it saw with [`FakeCall::log`], so a test can assert a whole RPC
+/// sequence with one comparison of [`FakeBigQuery::calls`].
+#[cfg(test)]
+pub(crate) struct FakeBigQuery {
+    pub db: BigQueryDb,
+    server: FakeServer,
+}
+
+#[cfg(test)]
 impl FakeBigQuery {
     pub async fn start<F, Fut>(handler: F) -> Self
     where
@@ -58,47 +163,26 @@ impl FakeBigQuery {
         F: Fn(FakeCall) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let server = FakeServer::bind(handler)
             .await
             .expect("a free loopback port for the fake server");
-        let endpoint = url::Url::parse(&format!(
-            "http://{}",
-            listener
-                .local_addr()
-                .expect("a bound listener has a local address")
-        ))
-        .expect("a loopback address is a URL");
-        let handler: Arc<Handler> = Arc::new(move |call| Box::pin(handler(call)));
-        let calls = Arc::new(watch::Sender::new(Vec::new()));
-        let accepted = calls.clone();
-        // Detached: #[tokio::test] drops every spawned task, this one included, at test end.
-        tokio::spawn(async move {
-            while let Ok((socket, _)) = listener.accept().await {
-                tokio::spawn(serve_connection(socket, handler.clone(), accepted.clone()));
-            }
-        });
-        let options = BigQueryDbOptions::new("fake-project".into())
-            .with_max_retries(max_retries)
-            .with_bigquery_api_url(endpoint.clone())
-            .with_bigquery_storage_api_url(endpoint);
-        let db = BigQueryDb::with_options_token_source(
-            options,
-            Vec::new(),
-            gcloud_sdk::TokenSourceType::ExternalSource(Box::new(FakeTokenSource)),
-        )
-        .await
-        .expect("a client for the fake server");
-        Self { db, calls }
+        let options = BigQueryDbOptions::new("fake-project".into()).with_max_retries(max_retries);
+        let db = server
+            .client(options, RetryBackoff::FullJitter)
+            .await
+            .expect("a client for the fake server");
+        Self { db, server }
     }
 
     /// Every line the handlers logged so far, in the order they logged them.
     pub fn calls(&self) -> Vec<String> {
-        self.calls.borrow().clone()
+        self.server.calls.borrow().clone()
     }
 
     /// Resolves once at least `count` lines have been logged.
     pub async fn wait_for_calls(&self, count: usize) {
-        self.calls
+        self.server
+            .calls
             .subscribe()
             .wait_for(|calls| calls.len() >= count)
             .await
@@ -114,8 +198,9 @@ pub(crate) struct FakeCall {
     received: Vec<u8>,
     respond: SendResponse<Bytes>,
     send: Option<SendStream<Bytes>>,
-    calls: Arc<watch::Sender<Vec<String>>>,
     close: Arc<Notify>,
+    #[cfg(test)]
+    calls: CallLog,
 }
 
 impl FakeCall {
@@ -133,6 +218,7 @@ impl FakeCall {
     }
 
     /// Appends one line to the server's call log.
+    #[cfg(test)]
     pub fn log(&self, line: impl Into<String>) {
         let line = line.into();
         self.calls.send_modify(|calls| calls.push(line));
@@ -157,13 +243,28 @@ impl FakeCall {
         }
     }
 
+    /// The next request message, decoded, or `None` once the client has closed its side.
+    ///
+    /// # Errors
+    /// The decode error if the bytes are not an `M`.
+    pub async fn try_next_request<M: Message + Default>(
+        &mut self,
+    ) -> Result<Option<M>, DecodeError> {
+        match self.next_message().await {
+            Some(bytes) => M::decode(bytes.as_slice()).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// The next request message, decoded.
     ///
     /// # Panics
     /// If the bytes are not an `M`, which is a test bug.
+    #[cfg(test)]
     pub async fn next_request<M: Message + Default>(&mut self) -> Option<M> {
-        let bytes = self.next_message().await?;
-        Some(M::decode(bytes.as_slice()).expect("the request decodes as the handler's type"))
+        self.try_next_request()
+            .await
+            .expect("the request decodes as the handler's type")
     }
 
     /// Sends the response headers now. [`send`](Self::send) does it on the first message; a
@@ -270,16 +371,14 @@ impl gcloud_sdk::Source for FakeTokenSource {
     }
 }
 
-/// Serves one client connection until the client closes it or a handler drops it.
-async fn serve_connection(
-    socket: TcpStream,
-    handler: Arc<Handler>,
-    calls: Arc<watch::Sender<Vec<String>>>,
-) {
+/// Serves one client connection until the client closes it or a handler drops it. The calls
+/// it started end with it, since a call cannot answer once its connection is gone.
+async fn serve_connection(socket: TcpStream, context: CallContext) {
     let Ok(mut connection) = h2::server::handshake(socket).await else {
         return;
     };
     let close = Arc::new(Notify::new());
+    let mut calls = JoinSet::new();
     let serve = async {
         while let Some(Ok((request, respond))) = connection.accept().await {
             let method = request
@@ -297,10 +396,12 @@ async fn serve_connection(
                 received: Vec::new(),
                 respond,
                 send: None,
-                calls: calls.clone(),
                 close: close.clone(),
+                #[cfg(test)]
+                calls: context.calls.clone(),
             };
-            tokio::spawn(handler(call));
+            while calls.try_join_next().is_some() {}
+            calls.spawn((context.handler)(call));
         }
     };
     tokio::select! {

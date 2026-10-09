@@ -1,6 +1,7 @@
 //! Fake answers for the Storage Write RPCs: `AppendRows`, `GetWriteStream`,
 //! `CreateWriteStream`, `FlushRows`, `FinalizeWriteStream` and `BatchCommitWriteStreams`.
 
+use super::wire::storage_error_status;
 use super::FakeCall;
 use crate::read::ArrowIpcDecoder;
 use arrow_array::{Array, Int64Array, RecordBatch};
@@ -14,10 +15,9 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     AppendRowsRequest, AppendRowsResponse, BatchCommitWriteStreamsRequest,
     BatchCommitWriteStreamsResponse, CreateWriteStreamRequest, FinalizeWriteStreamRequest,
     FinalizeWriteStreamResponse, FlushRowsRequest, FlushRowsResponse, GetWriteStreamRequest,
-    RowError, StorageError, TableFieldSchema, TableSchema, WriteStream,
+    RowError, TableFieldSchema, TableSchema, WriteStream,
 };
 use gcloud_sdk::prost::encoding::decode_varint;
-use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Code;
 
 pub(crate) const DEFAULT_STREAM: &str =
@@ -254,24 +254,16 @@ pub(crate) fn in_band(
     storage: Option<StorageErrorCode>,
     message: &str,
 ) -> AppendRowsResponse {
-    let details = storage
-        .map(|storage| gcloud_sdk::prost_types::Any {
-            type_url: "type.googleapis.com/google.cloud.bigquery.storage.v1.StorageError".into(),
-            value: StorageError {
-                code: storage.into(),
-                entity: CREATED_STREAM.into(),
-                error_message: message.into(),
-            }
-            .encode_to_vec(),
-        })
-        .into_iter()
-        .collect();
-    AppendRowsResponse {
-        response: Some(Response::Error(gcloud_sdk::google::rpc::Status {
+    let status = match storage {
+        Some(storage) => storage_error_status(code, storage, CREATED_STREAM, message),
+        None => gcloud_sdk::google::rpc::Status {
             code: code as i32,
             message: message.into(),
-            details,
-        })),
+            details: Vec::new(),
+        },
+    };
+    AppendRowsResponse {
+        response: Some(Response::Error(status)),
         ..Default::default()
     }
 }

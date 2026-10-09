@@ -240,7 +240,7 @@ impl StreamTask {
             if !err.retry_possible() || failures >= max_retries {
                 return Err(err);
             }
-            let delay = crate::db::retry_delay(failures);
+            let delay = self.db.retry_delay(failures);
             failures += 1;
             self.span.in_scope(|| {
                 warn!(

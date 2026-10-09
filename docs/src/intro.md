@@ -74,6 +74,9 @@ each of them provides that the other does not.
   as quoted identifiers, tested against a corpus of hostile values and on BigQuery itself. The
   calls that lose data say so in their names: `dangerously_delete_with_contents()`,
   `dangerously_recreate_with_data_loss()`. No unsafe code.
+- **Testing.** A fake BigQuery for your tests, in `bigquery::testing`. The code under test runs
+  its real client against a loopback gRPC server, which answers queries, serves table rows and
+  fails calls as the test scripts it with your own structures. No credentials or network.
 
 ### What the official crate provides and this one does not
 
@@ -85,4 +88,5 @@ Checked against `google-cloud-bigquery` 0.18.0 and `google-cloud-bigquery-v2` 1.
 - It uses the REST API for v2, which is GA. The v2 API over gRPC this crate uses works for every
   call the library makes, but Google does not document it and it is pre-GA, so be aware it can
   change without notice;
-- It has stub traits to mock its clients in your tests. This crate has no public mocks.
+- It has stub traits to mock its clients in your tests. This crate has no mocks of its clients
+  and provides a fake BigQuery server instead, see [Testing with the fake](./testing.md).

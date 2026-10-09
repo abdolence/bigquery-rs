@@ -9,8 +9,8 @@ use std::time::Duration;
 use tracing::{warn, Span};
 
 impl BigQueryDb {
-    /// Sends `message` through `send`, and sends it again after a random [`retry_delay`] while
-    /// it fails with a retryable error, up to
+    /// Sends `message` through `send`, and sends it again after the client's
+    /// [`retry_delay`](Self::retry_delay) while it fails with a retryable error, up to
     /// [`max_retries`](crate::BigQueryDbOptions::max_retries) times. Each retry is logged in
     /// `span` as "Failed to `action`".
     ///
@@ -50,11 +50,46 @@ impl BigQueryDb {
         // Boxed so that each caller's future holds a pointer to the attempt rather than the
         // attempt itself: a v2 request and response are kilobytes each, and inline they add up
         // to more than a debug build's test thread has.
-        retry(span, action, self.inner.options.max_retries, || {
-            Box::pin(send(new_request(message.clone(), metadata)))
-        })
+        retry(
+            span,
+            action,
+            self.inner.options.max_retries,
+            self.inner.backoff,
+            || Box::pin(send(new_request(message.clone(), metadata))),
+        )
         .await
         .map(Response::into_inner)
+    }
+
+    /// How long to wait before retry number `retries + 1` of a call or a stream.
+    pub(crate) fn retry_delay(&self, retries: usize) -> Duration {
+        self.inner.backoff.delay(retries)
+    }
+}
+
+/// How a client waits between the attempts of a retried call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryBackoff {
+    /// A random delay of up to `2^retries` seconds: exponential backoff with full jitter. The
+    /// bound saturates rather than overflowing for large `retries`.
+    FullJitter,
+    /// No delay, for a client of the in-process fake, whose failures are scripted and whose
+    /// tests should not wait out a backoff meant for a real backend.
+    Immediate,
+}
+
+impl RetryBackoff {
+    /// How long to wait before retry number `retries + 1`.
+    pub(crate) fn delay(self, retries: usize) -> Duration {
+        match self {
+            RetryBackoff::FullJitter => {
+                let max_millis = 2u64
+                    .saturating_pow(u32::try_from(retries).unwrap_or(u32::MAX))
+                    .saturating_mul(1000);
+                Duration::from_millis(rand::rng().random_range(0..=max_millis))
+            }
+            RetryBackoff::Immediate => Duration::ZERO,
+        }
     }
 }
 
@@ -83,11 +118,12 @@ pub(crate) fn new_request<R>(message: R, metadata: &MetadataMap) -> Request<R> {
 }
 
 /// Calls `send` until it succeeds, fails with an error that is not retryable, or has been
-/// retried `max_retries` times, waiting [`retry_delay`] between attempts.
+/// retried `max_retries` times, waiting as `backoff` says between attempts.
 pub(crate) async fn retry<T, F, Fut>(
     span: &Span,
     action: &str,
     max_retries: usize,
+    backoff: RetryBackoff,
     send: F,
 ) -> BigQueryResult<T>
 where
@@ -103,7 +139,7 @@ where
                 if retries >= max_retries || !err.retry_possible() {
                     return Err(err);
                 }
-                let delay = retry_delay(retries);
+                let delay = backoff.delay(retries);
                 span.in_scope(|| {
                     warn!(
                         %err,
@@ -118,15 +154,6 @@ where
             }
         }
     }
-}
-
-/// How long to wait before retry number `retries + 1`: a random delay of up to `2^retries`
-/// seconds ("full jitter"), saturating rather than overflowing for large `retries`.
-pub(crate) fn retry_delay(retries: usize) -> Duration {
-    let max_millis = 2u64
-        .saturating_pow(u32::try_from(retries).unwrap_or(u32::MAX))
-        .saturating_mul(1000);
-    Duration::from_millis(rand::rng().random_range(0..=max_millis))
 }
 
 #[cfg(test)]
@@ -152,14 +179,20 @@ mod tests {
         code: Code,
         attempts: &AtomicUsize,
     ) -> BigQueryResult<&'static str> {
-        retry(&Span::none(), "probe", max_retries, || async {
-            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-            if attempt < failures {
-                Err(Status::new(code, "backend error"))
-            } else {
-                Ok("done")
-            }
-        })
+        retry(
+            &Span::none(),
+            "probe",
+            max_retries,
+            RetryBackoff::FullJitter,
+            || async {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt < failures {
+                    Err(Status::new(code, "backend error"))
+                } else {
+                    Ok("done")
+                }
+            },
+        )
         .await
     }
 
@@ -205,7 +238,8 @@ mod tests {
         for retries in 0..6 {
             let bound = Duration::from_secs(1 << retries);
             for _ in 0..100 {
-                assert!(retry_delay(retries) <= bound, "retry {retries}");
+                let delay = RetryBackoff::FullJitter.delay(retries);
+                assert!(delay <= bound, "retry {retries}");
             }
         }
     }
@@ -213,7 +247,7 @@ mod tests {
     #[test]
     fn retry_delay_saturates_for_any_retry_count() {
         for retries in [63, 64, 1000, usize::MAX] {
-            assert!(retry_delay(retries) < Duration::MAX);
+            assert!(RetryBackoff::FullJitter.delay(retries) < Duration::MAX);
         }
     }
 

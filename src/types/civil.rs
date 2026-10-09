@@ -194,7 +194,6 @@ pub(crate) fn pack_datetime(micros: i64) -> i64 {
 }
 
 /// The inverse of [`pack_time`].
-#[cfg(test)]
 pub(crate) fn unpack_time(packed: i64) -> i64 {
     let micros = packed & 0xF_FFFF;
     let fields = packed >> 20;
@@ -202,20 +201,25 @@ pub(crate) fn unpack_time(packed: i64) -> i64 {
     (hours * 3600 + minutes * 60 + seconds) * MICROS_PER_SECOND + micros
 }
 
-/// The inverse of [`pack_datetime`].
-#[cfg(test)]
-pub(crate) fn unpack_datetime(packed: i64) -> i64 {
+/// The inverse of [`pack_datetime`]. `OutOfRange` for a year, month and day that are no date.
+pub(crate) fn unpack_datetime(packed: i64) -> Result<i64, CodecError> {
     let micros = packed & 0xF_FFFF;
     let fields = packed >> 20;
     let (hours, minutes, seconds) = ((fields >> 12) & 0x1F, (fields >> 6) & 0x3F, fields & 0x3F);
-    let date = jiff::civil::date(
-        (fields >> 26) as i16,
-        ((fields >> 22) & 0xF) as i8,
-        ((fields >> 17) & 0x1F) as i8,
-    );
-    i64::from(raw_date_days(date)) * MICROS_PER_DAY
+    let (year, month, day) = (fields >> 26, (fields >> 22) & 0xF, (fields >> 17) & 0x1F);
+    let date = i16::try_from(year)
+        .ok()
+        .zip(i8::try_from(month).ok())
+        .zip(i8::try_from(day).ok())
+        .and_then(|((year, month), day)| jiff::civil::Date::new(year, month, day).ok())
+        .ok_or_else(|| {
+            CodecError::out_of_range(format!(
+                "packed DATETIME {packed} has no date {year}-{month}-{day}"
+            ))
+        })?;
+    Ok(i64::from(raw_date_days(date)) * MICROS_PER_DAY
         + (hours * 3600 + minutes * 60 + seconds) * MICROS_PER_SECOND
-        + micros
+        + micros)
 }
 
 /// A jiff date for BigQuery days; `OutOfRange` outside BigQuery's DATE range.
@@ -542,8 +546,11 @@ mod tests {
         let secs = (2026i64 << 26) | (10 << 22) | (4 << 17) | (12 << 12) | (34 << 6) | 56;
         assert_eq!(pack_datetime(civil_micros), (secs << 20) | 123456);
         assert_eq!(unpack_time(pack_time(45_296_123_456)), 45_296_123_456);
-        assert_eq!(unpack_datetime(pack_datetime(civil_micros)), civil_micros);
+        assert_eq!(
+            unpack_datetime(pack_datetime(civil_micros)).ok(),
+            Some(civil_micros)
+        );
         let min = i64::from(DATE_MIN_DAYS) * MICROS_PER_DAY;
-        assert_eq!(unpack_datetime(pack_datetime(min)), min);
+        assert_eq!(unpack_datetime(pack_datetime(min)).ok(), Some(min));
     }
 }

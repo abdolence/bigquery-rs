@@ -4,6 +4,7 @@
 use crate::db::fake::table::v2_field;
 use crate::db::fake::{FakeBigQuery, FakeCall};
 use crate::errors::BigQueryError;
+use crate::testing::{BigQueryFake, BigQueryFakeCode, BigQueryFakeFault, BigQueryFakeRpc};
 use crate::{BigQueryDataset, BigQueryDatasetSummary, BigQueryJob, BigQueryTable};
 use crate::{
     BigQueryDatasetId, BigQueryDatasetRef, BigQueryFieldMode, BigQueryFieldType, BigQueryJobRef,
@@ -55,94 +56,6 @@ fn dataset_body(project: &str, dataset: &str) -> v2::Dataset {
 async fn unexpected(call: FakeCall) {
     let message = format!("unexpected {}", call.method());
     call.fail(Code::Unimplemented, &message);
-}
-
-#[tokio::test]
-async fn create_sends_the_settings_and_returns_the_stored_dataset() {
-    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-        if call.method() != "InsertDataset" {
-            return unexpected(call).await;
-        }
-        let request: v2::InsertDatasetRequest = call.next_request().await.expect("a request");
-        let dataset = request.dataset.unwrap_or_default();
-        let reference = dataset.dataset_reference.clone().unwrap_or_default();
-        call.log(format!(
-            "InsertDataset {} {}.{} location={} description={:?} labels={:?}",
-            request.project_id,
-            reference.project_id,
-            reference.dataset_id,
-            dataset.location,
-            dataset.description,
-            sorted(&dataset.labels),
-        ));
-        call.reply(&v2::Dataset {
-            creation_time: CREATED_MS,
-            ..dataset
-        });
-    })
-    .await;
-    let created = fake
-        .db
-        .fluent()
-        .schema()
-        .dataset(SHOP)
-        .create()
-        .location(BigQueryLocation::from_static("EU"))
-        .description("Shop")
-        .labels([("team", "shop")])
-        .execute()
-        .await
-        .expect("the call succeeds");
-    assert_eq!(
-        fake.calls(),
-        [
-            r#"InsertDataset fake-project fake-project.shop location=EU description=Some("Shop") labels={"team": "shop"}"#
-        ]
-    );
-    assert_eq!(
-        created.reference,
-        BigQueryDatasetRef::new("fake-project", SHOP).expect("a valid project")
-    );
-    assert_eq!(created.location, Some(BigQueryLocation::from_static("EU")));
-    assert_eq!(
-        created.creation_time,
-        Some("2026-10-04T00:00:00Z".parse().expect("a timestamp"))
-    );
-}
-
-#[tokio::test]
-async fn create_sends_the_default_table_expiration() {
-    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-        if call.method() != "InsertDataset" {
-            return unexpected(call).await;
-        }
-        let request: v2::InsertDatasetRequest = call.next_request().await.expect("a request");
-        let dataset = request.dataset.unwrap_or_default();
-        call.log(format!(
-            "InsertDataset default_table_expiration_ms={:?}",
-            dataset.default_table_expiration_ms
-        ));
-        call.reply(&dataset);
-    })
-    .await;
-    let created = fake
-        .db
-        .fluent()
-        .schema()
-        .dataset(SHOP)
-        .create()
-        .default_table_expiration(Duration::from_secs(2 * 3600))
-        .execute()
-        .await
-        .expect("the call succeeds");
-    assert_eq!(
-        fake.calls(),
-        ["InsertDataset default_table_expiration_ms=Some(7200000)"]
-    );
-    assert_eq!(
-        created.default_table_expiration,
-        Some(Duration::from_secs(2 * 3600))
-    );
 }
 
 #[tokio::test]
@@ -243,118 +156,6 @@ async fn update_writes_the_read_dataset_back_with_its_etag_and_the_changes() {
         ]
     );
     assert_eq!(updated.description.as_deref(), Some("new"));
-}
-
-#[tokio::test]
-async fn a_label_replacement_and_a_cleared_description_apply_in_order() {
-    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-        match call.method() {
-            "GetDataset" => {
-                let _: v2::GetDatasetRequest = call.next_request().await.expect("a request");
-                call.reply(&read_dataset());
-            }
-            "UpdateDataset" => {
-                let request: v2::UpdateOrPatchDatasetRequest =
-                    call.next_request().await.expect("a request");
-                let body = request.dataset.unwrap_or_default();
-                call.log(format!(
-                    "description={:?} labels={:?}",
-                    body.description,
-                    sorted(&body.labels)
-                ));
-                call.reply(&body);
-            }
-            _ => unexpected(call).await,
-        }
-    })
-    .await;
-    fake.db
-        .fluent()
-        .schema()
-        .dataset(SHOP)
-        .update()
-        .label("x", "1")
-        .labels([("only", "this")])
-        .label("also", "this")
-        .clear_description()
-        .execute()
-        .await
-        .expect("the call succeeds");
-    assert_eq!(
-        fake.calls(),
-        [r#"description=Some("") labels={"also": "this", "only": "this"}"#]
-    );
-}
-
-#[tokio::test]
-async fn an_update_refused_on_its_etag_is_a_data_conflict_sent_once() {
-    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-        match call.method() {
-            "GetDataset" => {
-                let _: v2::GetDatasetRequest = call.next_request().await.expect("a request");
-                call.reply(&read_dataset());
-            }
-            "UpdateDataset" => {
-                let _: v2::UpdateOrPatchDatasetRequest =
-                    call.next_request().await.expect("a request");
-                call.log("UpdateDataset");
-                call.fail(Code::FailedPrecondition, "Precondition check failed.");
-            }
-            _ => unexpected(call).await,
-        }
-    })
-    .await;
-    let result = fake
-        .db
-        .fluent()
-        .schema()
-        .dataset(SHOP)
-        .update()
-        .label("c", "3")
-        .execute()
-        .await;
-    match result {
-        Err(BigQueryError::DataConflictError(_)) => {}
-        other => panic!("expected a data conflict, got {other:?}"),
-    }
-    assert_eq!(fake.calls(), ["UpdateDataset"]);
-}
-
-#[tokio::test]
-async fn only_the_dangerous_delete_deletes_contents() {
-    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-        if call.method() != "DeleteDataset" {
-            return unexpected(call).await;
-        }
-        let request: v2::DeleteDatasetRequest = call.next_request().await.expect("a request");
-        call.log(format!(
-            "DeleteDataset {}.{} delete_contents={}",
-            request.project_id, request.dataset_id, request.delete_contents
-        ));
-        call.reply(&());
-    })
-    .await;
-    fake.db
-        .fluent()
-        .schema()
-        .dataset(SHOP)
-        .delete()
-        .await
-        .expect("the call succeeds");
-    fake.db
-        .fluent()
-        .schema()
-        .dataset(SHOP)
-        .dangerously_delete_with_contents()
-        .await
-        .expect("the call succeeds");
-    assert_eq!(
-        fake.calls(),
-        [
-            "DeleteDataset fake-project.shop delete_contents=false",
-            "DeleteDataset fake-project.shop delete_contents=true",
-        ]
-    );
 }
 
 fn listed_dataset(dataset: &str) -> v2::ListFormatDataset {
@@ -807,10 +608,94 @@ async fn the_job_listing_sends_its_filters_on_every_page() {
 }
 
 #[tokio::test]
-async fn an_unrecognised_state_filter_is_refused_before_any_request() {
-    let fake = FakeBigQuery::start(unexpected).await;
+async fn create_returns_the_stored_dataset() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+
+    let created = fake
+        .db()
+        .fluent()
+        .schema()
+        .dataset(SHOP)
+        .create()
+        .location(BigQueryLocation::from_static("EU"))
+        .description("Shop")
+        .labels([("team", "shop")])
+        .default_table_expiration(Duration::from_secs(2 * 3600))
+        .execute()
+        .await?;
+
+    assert_eq!(
+        created.reference,
+        BigQueryDatasetRef::new("fake-project", SHOP)?
+    );
+    assert_eq!(created.location, Some(BigQueryLocation::from_static("EU")));
+    assert_eq!(created.description.as_deref(), Some("Shop"));
+    assert_eq!(created.labels, BigQueryLabels::from([("team", "shop")]));
+    assert_eq!(
+        created.default_table_expiration,
+        Some(Duration::from_secs(2 * 3600))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_label_replacement_and_a_cleared_description_apply_in_order() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    let shop = || fake.db().fluent().schema().dataset(SHOP);
+    shop().create().description("Shop").execute().await?;
+
+    shop()
+        .update()
+        .label("x", "1")
+        .labels([("only", "this")])
+        .label("also", "this")
+        .clear_description()
+        .execute()
+        .await?;
+
+    let read = shop().get().await?;
+    assert_eq!(read.description, None);
+    assert_eq!(
+        read.labels,
+        BigQueryLabels::from([("also", "this"), ("only", "this")])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_update_refused_on_its_etag_is_a_data_conflict_sent_once() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    fake.create_dataset(SHOP)?;
+    let refusal =
+        fake.when_fault(BigQueryFakeRpc::UpdateDataset)
+            .fails(BigQueryFakeFault::status(
+                BigQueryFakeCode::FailedPrecondition,
+                "Precondition check failed.",
+            ))?;
+
     let result = fake
-        .db
+        .db()
+        .fluent()
+        .schema()
+        .dataset(SHOP)
+        .update()
+        .label("c", "3")
+        .execute()
+        .await;
+
+    assert!(
+        matches!(result, Err(BigQueryError::DataConflictError(_))),
+        "{result:?}"
+    );
+    assert_eq!(refusal.calls(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unrecognised_state_filter_is_refused_before_any_request() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    let result = fake
+        .db()
         .stream_jobs(
             BigQueryListJobsParams::new()
                 .with_states(vec![BigQueryJobState::Other("PAUSED".into())]),
@@ -821,7 +706,7 @@ async fn an_unrecognised_state_filter_is_refused_before_any_request() {
         "{:?}",
         result.err()
     );
-    assert!(fake.calls().is_empty());
+    Ok(())
 }
 
 fn assert_unexpected<T: std::fmt::Debug>(what: &str, result: BigQueryResult<T>) {

@@ -684,7 +684,7 @@ impl ConnectionTask {
         self.reconnect_after_drain = false;
         self.next_offset = self.written_offset;
         if err.retry_possible() && self.reconnects < self.max_retries {
-            let delay = crate::db::retry_delay(self.reconnects);
+            let delay = self.settings.db.retry_delay(self.reconnects);
             self.reconnects += 1;
             warn!(
                 parent: &self.settings.span,

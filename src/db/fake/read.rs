@@ -1,9 +1,9 @@
 //! Fake answers for the Storage Read RPCs: `CreateReadSession` and `ReadRows`, plus the
 //! `GetTable` a typed read sends for its projection.
 
+use super::wire::IpcMessages;
 use super::FakeCall;
 use arrow_array::RecordBatch;
-use arrow_ipc::writer::{IpcWriteOptions, StreamWriter};
 use gcloud_sdk::google::cloud::bigquery::storage::v1::arrow_serialization_options::CompressionCodec;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::table_read_options::OutputFormatSerializationOptions;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
@@ -36,31 +36,16 @@ impl FakeReadTable {
     /// The IPC schema message and each stream's IPC record batch messages, encoded as a session
     /// with `compression` sends them.
     pub(crate) fn encode(&self, compression: CompressionCodec) -> (Vec<u8>, Vec<Vec<Vec<u8>>>) {
-        let options = match compression {
-            CompressionCodec::Lz4Frame => IpcWriteOptions::default()
-                .try_with_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME)),
-            CompressionCodec::Zstd => IpcWriteOptions::default()
-                .try_with_compression(Some(arrow_ipc::CompressionType::ZSTD)),
-            CompressionCodec::CompressionUnspecified => Ok(IpcWriteOptions::default()),
-        }
-        .expect("the IPC write options are valid");
+        let compression = compression.into();
         let mut schema = Vec::new();
         let streams = self
             .streams
             .iter()
             .map(|batches| {
-                let mut writer =
-                    StreamWriter::try_new_with_options(Vec::new(), &self.schema, options.clone())
-                        .expect("an IPC stream writer");
-                schema = writer.get_ref().clone();
-                batches
-                    .iter()
-                    .map(|batch| {
-                        let start = writer.get_ref().len();
-                        writer.write(batch).expect("the batch encodes");
-                        writer.get_ref()[start..].to_vec()
-                    })
-                    .collect()
+                let messages = IpcMessages::encode(&self.schema, batches, compression)
+                    .expect("the batches encode");
+                schema = messages.schema;
+                messages.batches
             })
             .collect();
         (schema, streams)

@@ -100,6 +100,8 @@ mod admin;
 
 pub use admin::*;
 
+pub mod testing;
+
 mod struct_path_macro;
 
 /// The `struct_path` crate the [`path!`] and [`paths!`] macros expand to, for its

@@ -30,4 +30,5 @@
 
 - [Type mapping](./types.md)
 - [Observability](./observability.md)
+- [Testing with the fake](./testing.md)
 - [Benchmarks](./benchmarks.md)

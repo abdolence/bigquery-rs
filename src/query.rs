@@ -22,7 +22,11 @@ mod params;
 mod routing;
 mod support;
 
-pub(crate) use params::{infer_param, literal_of, struct_params, typed_param, ParamLabel};
+pub(crate) use params::{
+    bytes_from_base64, float_from_text, literal_of, parameter_mode, ParamList,
+};
+#[cfg(test)]
+pub(crate) use params::{infer_param, typed_param, ParamLabel};
 
 #[cfg(test)]
 mod tests;
