@@ -70,7 +70,8 @@ impl BigQueryDb {
 /// How a client waits between the attempts of a retried call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetryBackoff {
-    /// A random delay of up to `2^retries` seconds: exponential backoff with full jitter.
+    /// A random delay of up to `2^retries` seconds: exponential backoff with full jitter. The
+    /// bound saturates rather than overflowing for large `retries`.
     FullJitter,
     /// No delay, for a client of the in-process fake, whose failures are scripted and whose
     /// tests should not wait out a backoff meant for a real backend.
@@ -81,7 +82,12 @@ impl RetryBackoff {
     /// How long to wait before retry number `retries + 1`.
     pub(crate) fn delay(self, retries: usize) -> Duration {
         match self {
-            RetryBackoff::FullJitter => retry_delay(retries),
+            RetryBackoff::FullJitter => {
+                let max_millis = 2u64
+                    .saturating_pow(u32::try_from(retries).unwrap_or(u32::MAX))
+                    .saturating_mul(1000);
+                Duration::from_millis(rand::rng().random_range(0..=max_millis))
+            }
             RetryBackoff::Immediate => Duration::ZERO,
         }
     }
@@ -148,15 +154,6 @@ where
             }
         }
     }
-}
-
-/// How long to wait before retry number `retries + 1`: a random delay of up to `2^retries`
-/// seconds ("full jitter"), saturating rather than overflowing for large `retries`.
-fn retry_delay(retries: usize) -> Duration {
-    let max_millis = 2u64
-        .saturating_pow(u32::try_from(retries).unwrap_or(u32::MAX))
-        .saturating_mul(1000);
-    Duration::from_millis(rand::rng().random_range(0..=max_millis))
 }
 
 #[cfg(test)]
@@ -241,7 +238,8 @@ mod tests {
         for retries in 0..6 {
             let bound = Duration::from_secs(1 << retries);
             for _ in 0..100 {
-                assert!(retry_delay(retries) <= bound, "retry {retries}");
+                let delay = RetryBackoff::FullJitter.delay(retries);
+                assert!(delay <= bound, "retry {retries}");
             }
         }
     }
@@ -249,7 +247,7 @@ mod tests {
     #[test]
     fn retry_delay_saturates_for_any_retry_count() {
         for retries in [63, 64, 1000, usize::MAX] {
-            assert!(retry_delay(retries) < Duration::MAX);
+            assert!(RetryBackoff::FullJitter.delay(retries) < Duration::MAX);
         }
     }
 
