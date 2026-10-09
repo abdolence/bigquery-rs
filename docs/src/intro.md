@@ -74,9 +74,9 @@ each of them provides that the other does not.
   as quoted identifiers, tested against a corpus of hostile values and on BigQuery itself. The
   calls that lose data say so in their names: `dangerously_delete_with_contents()`,
   `dangerously_recreate_with_data_loss()`. No unsafe code.
-- **Testing.** A fake BigQuery for your tests, behind the `testing` feature. The code under test
-  runs its real client against a loopback gRPC server, which answers queries, serves table rows
-  and fails calls as the test scripts it with your own structures. No credentials or network.
+- **Testing.** A fake BigQuery for your tests, in `bigquery::testing`. The code under test runs
+  its real client against a loopback gRPC server, which answers queries, serves table rows and
+  fails calls as the test scripts it with your own structures. No credentials or network.
 
 ### What the official crate provides and this one does not
 

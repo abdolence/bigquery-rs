@@ -1,6 +1,6 @@
 # Testing with the fake
 
-The library provides a fake BigQuery for your tests, behind the `testing` feature.
+The library provides a fake BigQuery for your tests, in the `bigquery::testing` module.
 `BigQueryFake` runs a gRPC server on a loopback port and hands out a real `BigQueryDb` connected
 to it, so the code under test runs unchanged, through the same requests, codecs, retries and
 errors as against BigQuery. It needs no credentials and no network.
@@ -11,11 +11,10 @@ A test scripts the fake with your own serde types:
 - a table holds rows, which reads serve and writes append to, and which the test reads back;
 - a fault makes the calls of one RPC fail.
 
-Enable the feature in your dev-dependencies, next to an async test runtime:
+The tests need an async runtime in your dev-dependencies:
 
 ```toml
 [dev-dependencies]
-bigquery = { version = "0.8", features = ["testing"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -318,22 +317,10 @@ whole application against the fake, with a factory that picks one at startup fro
 application's own configuration, such as an environment variable. The library itself reads no
 variable for this.
 
-The application forwards the `testing` feature with a feature of its own, so production builds do
-not compile the fake in:
-
-```toml
-[dependencies]
-bigquery = "0.8"
-
-[features]
-fake-bigquery = ["bigquery/testing"]
-```
-
 The factory returns an owner of the client. Dropping a `BigQueryFake` stops its server and runs
 `verify()`, so the owner keeps the fake alive next to the client it hands out:
 
 ```rust,no_run
-# #![allow(unexpected_cfgs)]
 # use bigquery::*;
 # use serde::{Deserialize, Serialize};
 # #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -346,7 +333,6 @@ The factory returns an owner of the client. Dropping a `BigQueryFake` stops its 
 # }
 pub struct AppBigQuery {
     db: BigQueryDb,
-    #[cfg(feature = "fake-bigquery")]
     _fake: Option<bigquery::testing::BigQueryFake>,
 }
 
@@ -356,10 +342,8 @@ impl AppBigQuery {
     }
 }
 
-/// BigQuery in `project`, or a seeded fake when the build has `fake-bigquery` and
-/// `APP_BIGQUERY=fake` is set.
+/// BigQuery in `project`, or a seeded fake when `APP_BIGQUERY=fake` is set.
 pub async fn bigquery_db(project: &str) -> BigQueryResult<AppBigQuery> {
-    #[cfg(feature = "fake-bigquery")]
     if std::env::var("APP_BIGQUERY").as_deref() == Ok("fake") {
         let fake = bigquery::testing::BigQueryFake::start().await?;
         seed(&fake)?;
@@ -370,12 +354,10 @@ pub async fn bigquery_db(project: &str) -> BigQueryResult<AppBigQuery> {
     }
     Ok(AppBigQuery {
         db: BigQueryDb::new(project).await?,
-        #[cfg(feature = "fake-bigquery")]
         _fake: None,
     })
 }
 
-#[cfg(feature = "fake-bigquery")]
 fn seed(fake: &bigquery::testing::BigQueryFake) -> BigQueryResult<()> {
     let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
     fake.table(SHOP.table(ORDERS), |columns| columns.from_type::<Order>())
@@ -398,8 +380,9 @@ let orders = orders_of(bigquery.db(), "Alice").await?;
 
 The fake answers a query only from a rule, so the fake branch seeds a rule for every query the
 application sends, besides the tables it reads and writes. An application run against the fake
-with `APP_BIGQUERY=fake cargo run --features fake-bigquery` panics when the fake is dropped if a
-call went unanswered, as a test does.
+with `APP_BIGQUERY=fake cargo run` panics when the fake is dropped if a call went unanswered, as
+a test does. An application that wants the fake out of its production builds can put the fake
+branch behind a feature of its own.
 
 ## Limits
 

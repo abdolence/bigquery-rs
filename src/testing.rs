@@ -1,4 +1,4 @@
-//! A fake BigQuery for your tests, behind the `testing` feature.
+//! A fake BigQuery for your tests.
 //!
 //! [`BigQueryFake`] runs a gRPC server on a loopback port and hands out a real [`BigQueryDb`]
 //! pointed at it, so the code under test runs unchanged, through the same requests, codecs,
@@ -16,11 +16,10 @@
 //! [`verify`](BigQueryFake::verify), which runs when the fake is dropped, panics with every
 //! such call and the rules that were there to answer it.
 //!
-//! Enable the feature in your dev-dependencies, next to an async test runtime:
+//! The tests need an async runtime in your dev-dependencies:
 //!
 //! ```toml
 //! [dev-dependencies]
-//! bigquery = { version = "0.8", features = ["testing"] }
 //! tokio = { version = "1", features = ["macros", "rt"] }
 //! ```
 //!
