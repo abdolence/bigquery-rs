@@ -730,10 +730,7 @@ mod tests {
     }
 
     fn invalid_query() -> BigQueryFakeJobFailure {
-        BigQueryFakeJobFailure {
-            reason: "invalidQuery".to_string(),
-            message: "Division by zero".to_string(),
-        }
+        BigQueryFakeJobFailure::new("invalidQuery", "Division by zero")
     }
 
     #[tokio::test]
@@ -818,7 +815,7 @@ mod tests {
     #[tokio::test]
     async fn a_destination_table_is_written_by_its_disposition() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.create_dataset(SHOP);
+        fake.create_dataset(SHOP)?;
         fake.query(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
         let into = || fake.db().fluent().query(BEST_ORDERS);
@@ -1019,7 +1016,7 @@ mod tests {
         let fault = fake
             .fault(crate::testing::BigQueryFakeRpc::GetJob)
             .times(1)
-            .respond(BigQueryFakeFault::status(
+            .fails(BigQueryFakeFault::status(
                 BigQueryFakeCode::PermissionDenied,
                 "no access",
             ))?;

@@ -526,7 +526,7 @@ mod tests {
         let fault = fake
             .fault(BigQueryFakeRpc::CreateReadSession)
             .on_table(orders())
-            .respond(BigQueryFakeFault::status(
+            .fails(BigQueryFakeFault::status(
                 BigQueryFakeCode::PermissionDenied,
                 "no access",
             ))?;
@@ -549,7 +549,7 @@ mod tests {
             .fault(BigQueryFakeRpc::ReadRows)
             .on_table(orders())
             .times(1)
-            .respond(BigQueryFakeFault::status(
+            .fails(BigQueryFakeFault::status(
                 BigQueryFakeCode::Unavailable,
                 "try again",
             ))?;

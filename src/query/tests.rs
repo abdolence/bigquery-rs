@@ -1284,10 +1284,7 @@ async fn failed_query_is_the_status_of_the_query_call() -> BigQueryResult<()> {
 async fn job_error_result_is_a_job_error() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
     fake.query("SELECT ERROR('boom')")
-        .fails_job(BigQueryFakeJobFailure {
-            reason: "invalidQuery".to_string(),
-            message: "boom".to_string(),
-        })?;
+        .fails_job(BigQueryFakeJobFailure::new("invalidQuery", "boom"))?;
 
     match fake
         .db()
@@ -1342,7 +1339,7 @@ async fn base_variant_skips_rows_that_fail_to_decode() -> BigQueryResult<()> {
 async fn destination_table_query_runs_as_a_job_and_reads_its_table() -> BigQueryResult<()> {
     const ORDERS_COPY: crate::BigQueryTableId = crate::BigQueryTableId::from_static("orders_copy");
     let fake = BigQueryFake::start().await?;
-    fake.create_dataset(SHOP);
+    fake.create_dataset(SHOP)?;
     fake.query(PEOPLE).returns_rows(
         |columns| columns.from_type::<Person>(),
         [person(1), person(2)],
@@ -1431,7 +1428,7 @@ async fn already_existing_job_on_a_first_attempt_is_a_conflict() -> BigQueryResu
 #[tokio::test]
 async fn dry_run_with_a_destination_is_a_dry_run_job() -> BigQueryResult<()> {
     let fake = BigQueryFake::start().await?;
-    fake.create_dataset(SHOP);
+    fake.create_dataset(SHOP)?;
     fake.query(PEOPLE)
         .bytes_processed(1234)
         .returns_rows(|columns| columns.from_type::<Person>(), [person(1)])?;

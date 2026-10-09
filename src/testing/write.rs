@@ -820,7 +820,7 @@ mod tests {
         let lost = fake
             .fault(BigQueryFakeRpc::AppendRows)
             .times(1)
-            .respond(BigQueryFakeFault::ConnectionDropped)?;
+            .fails(BigQueryFakeFault::ConnectionDropped)?;
 
         let summary = fake
             .db()
@@ -970,7 +970,7 @@ mod tests {
         let aborted =
             fake.fault(BigQueryFakeRpc::AppendRows)
                 .times(1)
-                .respond(BigQueryFakeFault::status(
+                .fails(BigQueryFakeFault::status(
                     BigQueryFakeCode::Aborted,
                     "transaction aborted",
                 ))?;

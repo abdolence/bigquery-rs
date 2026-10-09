@@ -121,7 +121,7 @@ async fn lost_append_acknowledgement() -> BigQueryResult<()> {
         .create()?;
     fake.fault(BigQueryFakeRpc::AppendRows)
         .times(1)
-        .respond(BigQueryFakeFault::ConnectionDropped)?;
+        .fails(BigQueryFakeFault::ConnectionDropped)?;
     save(fake.db(), &orders).await?;
     let at_least_once: Vec<Order> = fake.rows(SHOP.table(ORDERS))?;
     assert_eq!(at_least_once.len(), 2 * orders.len());
@@ -136,7 +136,7 @@ async fn lost_append_acknowledgement() -> BigQueryResult<()> {
         .create()?;
     fake.fault(BigQueryFakeRpc::AppendRows)
         .times(1)
-        .respond(BigQueryFakeFault::ConnectionDropped)?;
+        .fails(BigQueryFakeFault::ConnectionDropped)?;
     save_exactly_once(fake.db(), &orders).await?;
     let exactly_once: Vec<Order> = fake.rows(SHOP.table(ORDERS))?;
     assert_eq!(exactly_once, orders);

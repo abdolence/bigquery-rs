@@ -251,7 +251,7 @@ fake.table(SHOP.table(ORDERS), |columns| columns.from_type::<Order>())
 let lost = fake
     .fault(BigQueryFakeRpc::AppendRows)
     .times(1)
-    .respond(BigQueryFakeFault::ConnectionDropped)?;
+    .fails(BigQueryFakeFault::ConnectionDropped)?;
 let orders = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
 
 fake.db()

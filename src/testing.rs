@@ -248,11 +248,14 @@ impl BigQueryFake {
         BigQueryFakeQueryBuilder::new(self, SqlMatcher::Matching(Box::new(sql)))
     }
 
-    /// Creates the dataset, unless it exists. A dataset without a project is in the client's.
-    pub fn create_dataset(&self, dataset: impl Into<BigQueryDatasetRef>) {
+    /// Creates the dataset. A dataset without a project is in the client's.
+    ///
+    /// # Errors
+    /// [`BigQueryError::DataConflictError`] if the dataset exists.
+    pub fn create_dataset(&self, dataset: impl Into<BigQueryDatasetRef>) -> BigQueryResult<()> {
         let key = DatasetKey::resolve(&dataset.into(), self.shared.project());
-        // An existing dataset is kept as it is.
-        let _ = self.shared.state().create_dataset(key);
+        self.shared.state().create_dataset(key)?;
+        Ok(())
     }
 
     /// Starts a table with the columns `columns` declares, as
@@ -403,6 +406,7 @@ impl BigQueryFake {
 /// [`times`](Self::times) of 0, is kept, and the terminal returns the error without
 /// registering the rule.
 #[derive(Debug)]
+#[must_use]
 pub struct BigQueryFakeQueryBuilder<'a> {
     fake: &'a BigQueryFake,
     sql: SqlMatcher,
@@ -595,6 +599,7 @@ struct FakeTableContents {
 /// are kept, and [`create`](Self::create) returns the first such error without creating the
 /// table.
 #[derive(Debug)]
+#[must_use]
 pub struct BigQueryFakeTableBuilder<'a> {
     fake: &'a BigQueryFake,
     table: BigQueryTableRef,
@@ -647,6 +652,7 @@ impl BigQueryFakeTableBuilder<'_> {
 
 /// A rule for the read sessions of one table, from [`BigQueryFake::read`].
 #[derive(Debug)]
+#[must_use]
 pub struct BigQueryFakeReadBuilder<'a> {
     fake: &'a BigQueryFake,
     table: BigQueryTableRef,
@@ -699,6 +705,7 @@ impl BigQueryFakeReadBuilder<'_> {
 
 /// A fault being built, from [`BigQueryFake::fault`].
 #[derive(Debug)]
+#[must_use]
 pub struct BigQueryFakeFaultBuilder<'a> {
     fake: &'a BigQueryFake,
     rpc: BigQueryFakeRpc,
@@ -707,7 +714,7 @@ pub struct BigQueryFakeFaultBuilder<'a> {
 }
 
 impl BigQueryFakeFaultBuilder<'_> {
-    /// Narrows the fault to the calls on `table`. [`respond`](Self::respond) refuses it for an
+    /// Narrows the fault to the calls on `table`. [`fails`](Self::fails) refuses it for an
     /// RPC whose calls name no table, such as `GetJob` or the dataset RPCs.
     pub fn on_table(mut self, table: impl Into<BigQueryTableRef>) -> Self {
         self.table = Some(table.into());
@@ -720,12 +727,12 @@ impl BigQueryFakeFaultBuilder<'_> {
         self
     }
 
-    /// Answers the calls with `fault`.
+    /// Fails the calls with `fault`.
     ///
     /// # Errors
     /// [`BigQueryError::InvalidParametersError`] for the field `on_table` when the RPC names
     /// no table, and the `times` error the builder kept.
-    pub fn respond(self, fault: BigQueryFakeFault) -> BigQueryResult<BigQueryFakeRule> {
+    pub fn fails(self, fault: BigQueryFakeFault) -> BigQueryResult<BigQueryFakeRule> {
         let rpc = self.rpc;
         let table = self
             .table
@@ -754,6 +761,7 @@ impl BigQueryFakeFaultBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BigQueryDatasetId;
     use serde::Deserialize;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -883,6 +891,21 @@ mod tests {
         assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
 
         assert_eq!((for_alice.calls(), for_anyone.calls()), (1, 1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn creating_a_dataset_that_exists_is_a_data_conflict() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+        fake.create_dataset(SHOP)?;
+
+        let again = fake.create_dataset(SHOP);
+
+        assert!(
+            matches!(again, Err(BigQueryError::DataConflictError(_))),
+            "{again:?}"
+        );
         Ok(())
     }
 

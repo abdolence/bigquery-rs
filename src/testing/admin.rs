@@ -794,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn creating_a_dataset_that_exists_is_a_conflict() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.create_dataset(SHOP);
+        fake.create_dataset(SHOP)?;
 
         let created = fake
             .db()
@@ -958,7 +958,7 @@ mod tests {
     #[tokio::test]
     async fn sync_creates_a_table_then_adds_a_column() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
-        fake.create_dataset(SHOP);
+        fake.create_dataset(SHOP)?;
         let orders = || fake.db().fluent().schema().table(SHOP.table(ORDERS));
 
         let created = orders().columns(order_columns).sync().await?;

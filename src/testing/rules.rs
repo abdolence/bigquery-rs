@@ -142,6 +142,9 @@ pub enum BigQueryFakeFault {
     /// `Aborted` or `OutOfRange`, takes `AlreadyExists` on a stream written at offsets as the
     /// request already written, and fails the request's rows on any other code, `Unavailable`
     /// and `ResourceExhausted` included.
+    ///
+    /// [`status`](Self::status) makes one.
+    #[non_exhaustive]
     Status {
         /// The gRPC code.
         code: BigQueryFakeCode,
@@ -313,11 +316,22 @@ impl BigQueryFakeRpc {
 /// The `error_result` of a failed query job, which the client reads back as
 /// [`BigQueryError::JobError`](crate::errors::BigQueryError::JobError).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BigQueryFakeJobFailure {
     /// BigQuery's short error code, such as `invalidQuery`.
     pub reason: String,
     /// The error message.
     pub message: String,
+}
+
+impl BigQueryFakeJobFailure {
+    /// A failure of BigQuery's error code `reason`, such as `invalidQuery`, with `message`.
+    pub fn new(reason: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Which statements a query rule matches.
