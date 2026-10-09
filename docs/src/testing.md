@@ -309,6 +309,98 @@ drop(fake); // Panics: no rule answers the query for Bob
 If the test is already panicking when the fake is dropped, the problems are logged with
 `tracing::error!` instead, so the first panic is the one the test reports.
 
+## Choosing the fake or BigQuery at startup
+
+`fake.db()` is a real `BigQueryDb` connected to the fake's loopback server, so the fake needs no
+trait shared with the real client. Code that takes a `BigQueryDb`, as an argument or a field of
+the application state, runs unchanged against either. This also makes it possible to run the
+whole application against the fake, with a factory that picks one at startup from the
+application's own configuration, such as an environment variable. The library itself reads no
+variable for this.
+
+The application forwards the `testing` feature with a feature of its own, so production builds do
+not compile the fake in:
+
+```toml
+[dependencies]
+bigquery = "0.8"
+
+[features]
+fake-bigquery = ["bigquery/testing"]
+```
+
+The factory returns an owner of the client. Dropping a `BigQueryFake` stops its server and runs
+`verify()`, so the owner keeps the fake alive next to the client it hands out:
+
+```rust,no_run
+# #![allow(unexpected_cfgs)]
+# use bigquery::*;
+# use serde::{Deserialize, Serialize};
+# #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+# struct Order { id: i64, customer: String, total: f64 }
+# const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+# const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+# const ORDERS_OF: &str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+# async fn orders_of(db: &BigQueryDb, customer: &str) -> BigQueryResult<Vec<Order>> {
+#     db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+# }
+pub struct AppBigQuery {
+    db: BigQueryDb,
+    #[cfg(feature = "fake-bigquery")]
+    _fake: Option<bigquery::testing::BigQueryFake>,
+}
+
+impl AppBigQuery {
+    pub fn db(&self) -> &BigQueryDb {
+        &self.db
+    }
+}
+
+/// BigQuery in `project`, or a seeded fake when the build has `fake-bigquery` and
+/// `APP_BIGQUERY=fake` is set.
+pub async fn bigquery_db(project: &str) -> BigQueryResult<AppBigQuery> {
+    #[cfg(feature = "fake-bigquery")]
+    if std::env::var("APP_BIGQUERY").as_deref() == Ok("fake") {
+        let fake = bigquery::testing::BigQueryFake::start().await?;
+        seed(&fake)?;
+        return Ok(AppBigQuery {
+            db: fake.db().clone(),
+            _fake: Some(fake),
+        });
+    }
+    Ok(AppBigQuery {
+        db: BigQueryDb::new(project).await?,
+        #[cfg(feature = "fake-bigquery")]
+        _fake: None,
+    })
+}
+
+#[cfg(feature = "fake-bigquery")]
+fn seed(fake: &bigquery::testing::BigQueryFake) -> BigQueryResult<()> {
+    let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
+    fake.table(SHOP.table(ORDERS), |columns| columns.from_type::<Order>())
+        .rows(&alice)
+        .create()?;
+    fake.query(ORDERS_OF)
+        .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
+    Ok(())
+}
+
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> BigQueryResult<()> {
+// The rest of the application sees only the client
+let bigquery = bigquery_db("my-gcp-project-id").await?;
+let orders = orders_of(bigquery.db(), "Alice").await?;
+# let _ = orders;
+# Ok(())
+# }
+```
+
+The fake answers a query only from a rule, so the fake branch seeds a rule for every query the
+application sends, besides the tables it reads and writes. An application run against the fake
+with `APP_BIGQUERY=fake cargo run --features fake-bigquery` panics when the fake is dropped if a
+call went unanswered, as a test does.
+
 ## Limits
 
 The fake binds its own port, so tests run in parallel, and a fake is `Send + Sync`, so a test can
