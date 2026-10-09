@@ -283,7 +283,7 @@ fn array_of<T>(len: i64, f: impl Fn(i64) -> T) -> Vec<T> {
 
 /// Twelve rows: every third has NULLs, and arrays of zero to two elements. Values are those
 /// BigQuery gives back as written: canonical NUMERIC and WKT text, JSON without floats, and
-/// REQUIRED RANGEs with both ends, since an unbounded end of a REQUIRED RANGE reads back as
+/// REQUIRED RANGEs with both ends, since some unbounded bounds of a REQUIRED RANGE read back as
 /// the epoch.
 fn every_type_rows() -> Vec<EveryType> {
     let names = ["Åsa", "Björn", "Linnéa", "Örjan", "Märta", "Göran"];

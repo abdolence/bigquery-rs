@@ -110,9 +110,9 @@ const TYPES: &[(&str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-/// `t_all`: row 1 holds every value, row 2 NULLs and empty arrays. Two more columns pin
-/// BigQuery behaviour: a parameterised NUMERIC, which arrives at its own precision and scale,
-/// and a REQUIRED RANGE with an unbounded end.
+/// `t_all`: row 1 holds every value, row 2 NULLs and empty arrays. More columns pin BigQuery
+/// behaviour: a parameterised NUMERIC, which arrives at its own precision and scale, and
+/// REQUIRED RANGEs with unbounded bounds, which arrive as the epoch.
 fn all_types_sql(s: &Scratch) -> String {
     let mut columns = vec!["id INT64 NOT NULL".to_string()];
     let mut first = vec!["1 AS id".to_string()];
@@ -134,6 +134,12 @@ fn all_types_sql(s: &Scratch) -> String {
     columns.push("rr_range RANGE<DATE> NOT NULL".into());
     first.push("RANGE<DATE> '[UNBOUNDED, 2024-01-01)'".into());
     second.push("RANGE<DATE> '[2024-01-01, UNBOUNDED)'".into());
+    columns.push("rr_range_datetime RANGE<DATETIME> NOT NULL".into());
+    first.push("RANGE<DATETIME> '[UNBOUNDED, UNBOUNDED)'".into());
+    second.push("RANGE<DATETIME> '[UNBOUNDED, 1960-01-01 00:00:00)'".into());
+    columns.push("rr_range_timestamp RANGE<TIMESTAMP> NOT NULL".into());
+    first.push("RANGE<TIMESTAMP> '[2024-01-01 00:00:00 UTC, UNBOUNDED)'".into());
+    second.push("RANGE<TIMESTAMP> '[UNBOUNDED, UNBOUNDED)'".into());
     format!(
         "CREATE TABLE {} ({}) AS SELECT {} UNION ALL SELECT {}",
         s.table_sql("t_all"),
@@ -208,6 +214,8 @@ struct AllTypes {
     a_struct: Vec<Pair>,
     p_numeric: Option<String>,
     rr_range: BigQueryRange<jiff::civil::Date>,
+    rr_range_datetime: BigQueryRange<jiff::civil::DateTime>,
+    rr_range_timestamp: BigQueryRange<jiff::Timestamp>,
 }
 
 fn timestamp(s: &str) -> jiff::Timestamp {
@@ -397,12 +405,22 @@ fn expected(id: i64) -> AllTypes {
             vec![]
         },
         p_numeric: some("12345678.91".to_string()),
-        // A REQUIRED RANGE carries no validity for its ends, so BigQuery's unbounded start
-        // arrives as 1970-01-01.
+        // A REQUIRED RANGE carries no validity for its ends, and BigQuery sends an unbounded
+        // one as the epoch. An unbounded start before a later end reads as that epoch.
         rr_range: if full {
             range(Some(date(1970, 1, 1)), Some(date(2024, 1, 1)))
         } else {
-            range(Some(date(2024, 1, 1)), Some(date(1970, 1, 1)))
+            range(Some(date(2024, 1, 1)), None)
+        },
+        rr_range_datetime: if full {
+            range(None, None)
+        } else {
+            range(None, Some(datetime("1960-01-01T00:00:00")))
+        },
+        rr_range_timestamp: if full {
+            range(Some(timestamp("2024-01-01T00:00:00Z")), None)
+        } else {
+            range(None, None)
         },
     }
 }

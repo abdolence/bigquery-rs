@@ -325,9 +325,17 @@ struct Promotion {
 `BigQueryRange<T>` fails with `NullForNonOption`. Whether `start` comes before `end` is checked by
 BigQuery.
 
-Be aware of a REQUIRED RANGE column: BigQuery reads an unbounded end of it as `1970-01-01` (or the
-epoch for DATETIME and TIMESTAMP), and the library cannot tell it from a real epoch bound. NULLABLE
-and REPEATED RANGE columns keep unbounded ends as `None`.
+NULLABLE and REPEATED RANGE columns keep unbounded ends as `None`. A REQUIRED RANGE column has no
+NULL for its ends, so BigQuery sends an unbounded end of it as `1970-01-01` (or the epoch for
+DATETIME and TIMESTAMP). The library reads that epoch as `None` when it breaks `start < end`, which
+BigQuery keeps for every range:
+
+- an epoch end at or before the start is an unbounded end;
+- an epoch start at or after the end is an unbounded start;
+- `[UNBOUNDED, UNBOUNDED)` reads as both `None`.
+
+Be aware of the two cases left: an unbounded start with an end after the epoch, and an unbounded
+end with a start before it, read as the epoch, since a real epoch bound looks the same.
 
 ## STRUCT
 

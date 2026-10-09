@@ -73,7 +73,7 @@ enum ColumnValues<'a> {
 }
 
 pub(crate) struct Column<'a> {
-    nulls: Option<&'a NullBuffer>,
+    nulls: Option<NullBuffer>,
     values: ColumnValues<'a>,
 }
 
@@ -90,7 +90,7 @@ impl<'a> Column<'a> {
                 let list = array.as_list::<i32>();
                 let items = Column::of_kind(kind, item, list.values(), state)?;
                 Ok(Column {
-                    nulls: array.nulls(),
+                    nulls: array.nulls().cloned(),
                     values: ColumnValues::List {
                         offsets: list.value_offsets(),
                         items: Box::new(items),
@@ -150,19 +150,39 @@ impl<'a> Column<'a> {
             FieldKind::Struct | FieldKind::Range => match field.data_type() {
                 DataType::Struct(fields) => {
                     let array = array.as_struct();
-                    ColumnValues::Struct(Box::new(StructColumns::new(
+                    let mut node = StructColumns::new(
                         fields.iter().map(AsRef::as_ref).collect(),
                         array.columns().iter().collect(),
                         state.clone(),
-                    )))
+                    );
+                    if kind == FieldKind::Range {
+                        node.unbound_epoch_sentinels();
+                    }
+                    ColumnValues::Struct(Box::new(node))
                 }
                 _ => return Err(CodecError::unsupported_arrow_type(field)),
             },
         };
         Ok(Column {
-            nulls: array.nulls(),
+            nulls: array.nulls().cloned(),
             values,
         })
+    }
+
+    #[inline]
+    fn is_null(&self, row: usize) -> bool {
+        self.nulls.as_ref().is_some_and(|nulls| nulls.is_null(row))
+    }
+
+    /// The integer of a temporal value: days for DATE, microseconds otherwise.
+    fn temporal_integer(&self, row: usize) -> Option<i64> {
+        match &self.values {
+            ColumnValues::Date(values) => Some(i64::from(values[row])),
+            ColumnValues::Time(values)
+            | ColumnValues::DateTime(values)
+            | ColumnValues::Timestamp(values) => Some(values[row]),
+            _ => None,
+        }
     }
 }
 
@@ -236,6 +256,46 @@ impl<'a> StructColumns<'a> {
             .get_or_init(|| Column::new(self.fields[column], self.arrays[column], &self.state))
             .as_ref()
             .map_err(Clone::clone)
+    }
+
+    /// Marks NULL the RANGE bound that holds BigQuery's sentinel for an unbounded bound.
+    ///
+    /// A REQUIRED RANGE has no validity for its bounds, and BigQuery sends an unbounded one as
+    /// the epoch, which is 0 in the Arrow unit of every element type. BigQuery enforces
+    /// `start < end`, so a pair that breaks it holds the sentinel, on its epoch side: an epoch
+    /// end at or below the start, an epoch start at or above the end. A pair that keeps
+    /// `start < end` is left as sent, since a real epoch bound arrives the same way. The rule
+    /// holds in every column mode, as no valid pair breaks it.
+    fn unbound_epoch_sentinels(&mut self) {
+        let position = |name: &str| self.fields.iter().position(|field| field.name() == name);
+        let (Some(start), Some(end)) = (position("start"), position("end")) else {
+            return;
+        };
+        let column =
+            |index: usize| Column::new(self.fields[index], self.arrays[index], &self.state);
+        let (Ok(mut start_column), Ok(mut end_column)) = (column(start), column(end)) else {
+            return;
+        };
+        let rows = self.arrays[start].len();
+        let mut start_valid = Vec::with_capacity(rows);
+        let mut end_valid = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let bound = |column: &Column<'_>| {
+                (!column.is_null(row))
+                    .then(|| column.temporal_integer(row))
+                    .flatten()
+            };
+            let (keep_start, keep_end) = match (bound(&start_column), bound(&end_column)) {
+                (Some(start), Some(end)) => (start != 0 || start < end, end != 0 || end > start),
+                _ => (!start_column.is_null(row), !end_column.is_null(row)),
+            };
+            start_valid.push(keep_start);
+            end_valid.push(keep_end);
+        }
+        start_column.nulls = Some(NullBuffer::from(start_valid));
+        end_column.nulls = Some(NullBuffer::from(end_valid));
+        self.columns[start] = OnceCell::from(Ok(start_column));
+        self.columns[end] = OnceCell::from(Ok(end_column));
     }
 
     pub(crate) fn request_redo(&self) {
@@ -478,9 +538,7 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
 
     #[inline]
     fn is_null(&self) -> bool {
-        self.column
-            .nulls
-            .is_some_and(|nulls| nulls.is_null(self.row))
+        self.column.is_null(self.row)
     }
 
     #[inline]
@@ -514,18 +572,6 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
             _ => return Ok(false),
         }
         Ok(true)
-    }
-
-    /// The integer of a temporal value: days for DATE, microseconds otherwise.
-    fn temporal_integer(&self) -> Option<i64> {
-        let row = self.row;
-        match &self.column.values {
-            ColumnValues::Date(values) => Some(i64::from(values[row])),
-            ColumnValues::Time(values)
-            | ColumnValues::DateTime(values)
-            | ColumnValues::Timestamp(values) => Some(values[row]),
-            _ => None,
-        }
     }
 
     /// The whole number a NUMERIC or BIGNUMERIC value holds; `OutOfRange` when it has a
@@ -562,7 +608,7 @@ impl<'c, 'a> ValueDeserializer<'c, 'a> {
     /// An integer target of 64 bits or fewer; serde's visitors check the narrower ranges.
     fn integer<V: Visitor<'a>>(self, visitor: V) -> Result<V::Value, CodecError> {
         self.non_null()?;
-        if let Some(integer) = self.temporal_integer() {
+        if let Some(integer) = self.column.temporal_integer(self.row) {
             return visitor.visit_i64(integer);
         }
         if let Some(whole) = self.whole_decimal() {

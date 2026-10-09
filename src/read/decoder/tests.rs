@@ -787,10 +787,81 @@ fn numeric_reads_into_integers_only_when_whole() {
     );
 }
 
-/// A characterisation of BigQuery's input: a REQUIRED RANGE column has no validity buffer for
-/// its children, so an unbounded end arrives as the epoch value and cannot be told apart.
+/// BigQuery sends an unbounded bound of a REQUIRED RANGE as the epoch, with no validity for it.
+/// A pair that breaks `start < end` can only hold that sentinel, so the epoch side is unbounded,
+/// for every element type and column mode.
 #[test]
-fn required_range_unbounded_end_reads_as_epoch() {
+fn range_epoch_bound_that_breaks_start_before_end_is_unbounded() {
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Booking {
+        booked: BigQueryRange<i64>,
+        history: Vec<BigQueryRange<i64>>,
+    }
+    let unbounded_end = BigQueryRange {
+        start: Some(10),
+        end: None,
+    };
+    let unbounded_start = BigQueryRange {
+        start: None,
+        end: Some(-10),
+    };
+    let unbounded = BigQueryRange {
+        start: None,
+        end: None,
+    };
+    for element in [
+        BigQueryRangeElementType::Date,
+        BigQueryRangeElementType::DateTime,
+        BigQueryRangeElementType::Timestamp,
+    ] {
+        let ranges = || {
+            StructArray::new(
+                Fields::from(vec![
+                    Field::new("start", range_child_type(element), true),
+                    Field::new("end", range_child_type(element), true),
+                ]),
+                vec![
+                    range_child(element, vec![Some(10), Some(0), Some(0)]),
+                    range_child(element, vec![Some(0), Some(-10), Some(0)]),
+                ],
+                None,
+            )
+        };
+        let required = ranges();
+        let batch = batch(vec![
+            (
+                Field::new("booked", required.data_type().clone(), false)
+                    .with_metadata(range_metadata()),
+                Arc::new(required) as ArrayRef,
+            ),
+            list_with(
+                "history",
+                vec![0, 3, 3, 3],
+                Arc::new(ranges()),
+                range_metadata(),
+            ),
+        ]);
+        let booked: Vec<_> = (0..3)
+            .map(|index| row::<Booking>(&batch, index).map(|booking| booking.booked))
+            .collect();
+        assert_eq!(
+            booked,
+            [Ok(unbounded_end), Ok(unbounded_start), Ok(unbounded)],
+            "{element:?}"
+        );
+        assert_eq!(
+            row::<Booking>(&batch, 0).map(|booking| booking.history),
+            Ok(vec![unbounded_end, unbounded_start, unbounded]),
+            "{element:?}"
+        );
+    }
+}
+
+/// An unbounded start before a real end after the epoch keeps `start < end`, so the sentinel
+/// cannot be told from a real epoch start and stays one. A NULLABLE RANGE carries validity for
+/// its ends and reads an unbounded start as `None`.
+#[test]
+fn range_epoch_start_before_a_later_end_stays_the_epoch() {
     let children = |nulls: Option<Vec<bool>>| {
         let start = Date32Array::new(vec![0, 10].into(), nulls.clone().map(NullBuffer::from));
         let end = Date32Array::new(vec![5, 0].into(), None);
