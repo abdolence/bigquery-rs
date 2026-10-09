@@ -100,6 +100,9 @@ mod admin;
 
 pub use admin::*;
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 mod struct_path_macro;
 
 /// The `struct_path` crate the [`path!`] and [`paths!`] macros expand to, for its

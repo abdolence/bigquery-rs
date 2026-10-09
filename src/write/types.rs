@@ -208,6 +208,16 @@ pub enum BigQueryChangeType {
     Delete,
 }
 
+impl BigQueryChangeType {
+    /// The value of the `_CHANGE_TYPE` pseudo-column, as in `UPSERT`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            BigQueryChangeType::Upsert => "UPSERT",
+            BigQueryChangeType::Delete => "DELETE",
+        }
+    }
+}
+
 /// A CDC `_CHANGE_SEQUENCE_NUMBER`, which orders changes to one key. `From<u64>` writes it in
 /// hex; any other text is sent as it is, and BigQuery checks its form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

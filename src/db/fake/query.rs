@@ -1,9 +1,9 @@
 //! Fake answers for the query RPCs: `Query`, `InsertJob`, `GetQueryResults`, `GetJob` and
 //! `CancelJob`.
 
+use super::wire::{IpcCompression, IpcMessages};
 use super::FakeCall;
 use arrow_array::RecordBatch;
-use arrow_ipc::writer::StreamWriter;
 use gcloud_sdk::google::cloud::bigquery::v2::{
     query_response, ArrowRecordBatch, ArrowSchema, CancelJobRequest, GetJobRequest,
     GetQueryResultsRequest, InsertJobRequest, Job, JobReference, PostQueryRequest, QueryResponse,
@@ -92,11 +92,16 @@ impl FakeCall {
 /// The IPC schema message of `batch` and its record batch message, uncompressed, as the inline
 /// result of a `Query` response carries them.
 pub(crate) fn encode_ipc(batch: &RecordBatch) -> (Vec<u8>, Vec<u8>) {
-    let mut writer = StreamWriter::try_new(Vec::new(), &batch.schema()).expect("an IPC writer");
-    let schema = writer.get_ref().clone();
-    writer.write(batch).expect("the batch encodes");
-    let message = writer.get_ref()[schema.len()..].to_vec();
-    (schema, message)
+    let IpcMessages {
+        schema,
+        mut batches,
+    } = IpcMessages::encode(
+        &batch.schema(),
+        std::slice::from_ref(batch),
+        IpcCompression::default(),
+    )
+    .expect("the batch encodes");
+    (schema, batches.remove(0))
 }
 
 /// A complete `Query` response carrying `batch` inline, of a result of `total_rows` rows.

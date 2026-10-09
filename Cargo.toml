@@ -32,6 +32,8 @@ tls-roots = ["gcloud-sdk/tls-roots"]
 tls-webpki-roots = ["gcloud-sdk/tls-webpki-roots"]
 # Exposes the row encoder alone to `benches/write_codec.rs`; not part of the API.
 bench-internals = []
+# A fake BigQuery for your tests, see `bigquery::testing`.
+testing = ["dep:h2", "tokio/net", "tokio/macros"]
 
 [dependencies]
 tracing = "0.1"
@@ -52,6 +54,8 @@ arrow-schema = "60"
 arrow-buffer = "60"
 arrow-ipc = { version = "60", default-features = false, features = ["lz4", "zstd"] }
 url = { version = "2.5", features = ["serde"] }
+# The raw HTTP/2 server behind `bigquery::testing`; already in the tree through hyper and tonic.
+h2 = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

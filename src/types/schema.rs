@@ -415,6 +415,92 @@ impl From<&BigQueryTableSchema> for v2::TableSchema {
     }
 }
 
+/// The Storage API type of a column of this kind.
+#[cfg(feature = "testing")]
+impl From<FieldKind> for StorageType {
+    fn from(kind: FieldKind) -> Self {
+        match kind {
+            FieldKind::Int64 => StorageType::Int64,
+            FieldKind::Float64 => StorageType::Double,
+            FieldKind::Bool => StorageType::Bool,
+            FieldKind::String => StorageType::String,
+            FieldKind::Bytes => StorageType::Bytes,
+            FieldKind::Date => StorageType::Date,
+            FieldKind::Time => StorageType::Time,
+            FieldKind::DateTime => StorageType::Datetime,
+            FieldKind::Timestamp => StorageType::Timestamp,
+            FieldKind::Numeric => StorageType::Numeric,
+            FieldKind::BigNumeric => StorageType::Bignumeric,
+            FieldKind::Geography => StorageType::Geography,
+            FieldKind::Json => StorageType::Json,
+            FieldKind::Interval => StorageType::Interval,
+            FieldKind::Range => StorageType::Range,
+            FieldKind::Struct => StorageType::Struct,
+        }
+    }
+}
+
+/// A column as `GetWriteStream` and `CreateWriteStream` return it, which reads back as the
+/// same column.
+#[cfg(feature = "testing")]
+impl From<&BigQueryFieldSchema> for storage::TableFieldSchema {
+    fn from(field: &BigQueryFieldSchema) -> Self {
+        let mut out = storage::TableFieldSchema {
+            name: field.name.clone(),
+            r#type: StorageType::from(FieldKind::from(&field.field_type)).into(),
+            mode: match field.mode {
+                BigQueryFieldMode::Nullable => StorageMode::Nullable,
+                BigQueryFieldMode::Required => StorageMode::Required,
+                BigQueryFieldMode::Repeated => StorageMode::Repeated,
+            }
+            .into(),
+            description: field.description.clone().unwrap_or_default(),
+            default_value_expression: field.default_value_expression.clone().unwrap_or_default(),
+            ..Default::default()
+        };
+        match &field.field_type {
+            BigQueryFieldType::String { max_length } | BigQueryFieldType::Bytes { max_length } => {
+                // A length beyond i64 cannot be declared in BigQuery.
+                out.max_length = max_length.map_or(0, |n| i64::try_from(n).unwrap_or(i64::MAX));
+            }
+            BigQueryFieldType::Numeric(Some(params))
+            | BigQueryFieldType::BigNumeric(Some(params)) => {
+                out.precision = i64::from(params.precision);
+                out.scale = i64::from(params.scale);
+            }
+            BigQueryFieldType::Range(element) => {
+                let element = match element {
+                    BigQueryRangeElementType::Date => StorageType::Date,
+                    BigQueryRangeElementType::DateTime => StorageType::Datetime,
+                    BigQueryRangeElementType::Timestamp => StorageType::Timestamp,
+                };
+                out.range_element_type = Some(storage::table_field_schema::FieldElementType {
+                    r#type: element.into(),
+                });
+            }
+            BigQueryFieldType::Struct(fields) => {
+                out.fields = fields.iter().map(storage::TableFieldSchema::from).collect();
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+/// The schema `GetWriteStream` and `CreateWriteStream` return.
+#[cfg(feature = "testing")]
+impl From<&BigQueryTableSchema> for storage::TableSchema {
+    fn from(schema: &BigQueryTableSchema) -> Self {
+        storage::TableSchema {
+            fields: schema
+                .fields
+                .iter()
+                .map(storage::TableFieldSchema::from)
+                .collect(),
+        }
+    }
+}
+
 impl BigQueryTableSchema {
     /// The schema of a read session or an inline query result.
     ///

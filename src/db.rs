@@ -4,7 +4,7 @@ pub use options::*;
 pub(crate) mod proto;
 
 mod retry;
-pub(crate) use retry::{if_match, retry_delay};
+pub(crate) use retry::{if_match, RetryBackoff};
 
 mod ids;
 pub use ids::*;
@@ -21,7 +21,7 @@ pub use table_ref::*;
 mod support;
 pub(crate) use support::*;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) mod fake;
 
 use crate::errors::BigQueryError;
@@ -52,6 +52,7 @@ const STORAGE_READ_MAX_DECODING_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 
 struct BigQueryDbInner {
     options: BigQueryDbOptions,
+    backoff: RetryBackoff,
     v2: GoogleApi<JobServiceClient<GoogleAuthMiddleware>>,
     storage: GoogleApi<BigQueryReadClient<GoogleAuthMiddleware>>,
 }
@@ -143,6 +144,23 @@ impl BigQueryDb {
         token_scopes: Vec<String>,
         token_source_type: TokenSourceType,
     ) -> BigQueryResult<Self> {
+        Self::connect(
+            options,
+            token_scopes,
+            token_source_type,
+            RetryBackoff::FullJitter,
+        )
+        .await
+    }
+
+    /// [`with_options_token_source`](Self::with_options_token_source), with retries waiting as
+    /// `backoff` says.
+    pub(crate) async fn connect(
+        options: BigQueryDbOptions,
+        token_scopes: Vec<String>,
+        token_source_type: TokenSourceType,
+        backoff: RetryBackoff,
+    ) -> BigQueryResult<Self> {
         table_ref::check_project_id("google_project_id", &options.google_project_id)?;
         let (api, storage) = (
             options.effective_bigquery_api_url(),
@@ -185,6 +203,7 @@ impl BigQueryDb {
         Ok(Self {
             inner: Arc::new(BigQueryDbInner {
                 options,
+                backoff,
                 v2,
                 storage,
             }),

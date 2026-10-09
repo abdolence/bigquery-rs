@@ -129,12 +129,8 @@ impl Encoder {
             caches: &mut self.caches,
             scratch: &mut self.scratch,
         };
-        let change_type = match change_type {
-            BigQueryChangeType::Upsert => "UPSERT",
-            BigQueryChangeType::Delete => "DELETE",
-        };
         output.put(cdc.change_type.get());
-        output.length_delimited(change_type.as_bytes());
+        output.length_delimited(change_type.name().as_bytes());
         if let Some(sequence_number) = sequence_number {
             output.put(cdc.sequence_number.get());
             output.length_delimited(sequence_number.as_str().as_bytes());
