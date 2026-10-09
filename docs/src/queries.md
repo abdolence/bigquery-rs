@@ -283,9 +283,16 @@ The names are checked twice:
   `InvalidParametersError` naming the parameter.
 
 The check reads the file with GoogleSQL's lexical rules, so an `@` inside a string, a quoted
-identifier or a comment is not a parameter, and neither is a `@@` system variable. A STRUCT
-parameter read as `@window.earliest` is listed as `window`. Names are compared exactly, case
-included. Nothing is sent to BigQuery to check the statement itself; use a dry run for that.
+identifier or a comment is not a parameter, and neither is a `@@` system variable. The rest
+follows BigQuery's parser:
+
+- whitespace and comments may stand between `@` and the name;
+- a backtick-quoted name such as ``@`corpus` `` is listed as `corpus`;
+- a STRUCT parameter read as `@window.earliest` is listed as `window`;
+- names are compared ignoring case, so `@Corpus` is listed as `corpus` and bound with
+  `.param("corpus", ...)`.
+
+Nothing is sent to BigQuery to check the statement itself; use a dry run for that.
 
 ### Positional parameters
 

@@ -4,12 +4,13 @@
 
 /// The `@name` query parameters of a statement, in order of appearance, repeats included.
 ///
-/// A parameter is `@` followed by an identifier: an ASCII letter or `_`, then ASCII letters,
-/// digits and `_`. The name ends at the first other character, so `@window.earliest` is the
-/// parameter `window` and its field `earliest`. Not parameters: `@@name` system variables,
-/// `@{...}` hints, and any `@` inside a string or bytes literal (`'...'`, `"..."`, `'''...'''`,
-/// `"""..."""`, with or without an `r`, `b` or `rb` prefix), a backtick-quoted identifier, or a
-/// `--`, `#` or `/* */` comment.
+/// A parameter is `@` followed by its name: an identifier (an ASCII letter or `_`, then ASCII
+/// letters, digits and `_`) or a backtick-quoted identifier. Whitespace and comments may stand
+/// between the two, as BigQuery's parser allows. An unquoted name ends at the first other
+/// character, so `@window.earliest` is the parameter `window` and its field `earliest`. Not
+/// parameters: `@@name` system variables, `@{...}` hints, `@1`, and any `@` inside a string or
+/// bytes literal (`'...'`, `"..."`, `'''...'''`, `"""..."""`, with or without an `r`, `b` or
+/// `rb` prefix), a backtick-quoted identifier, or a `--`, `#` or `/* */` comment.
 ///
 /// A backslash skips the character after it inside every quoted token. That is the escape rule
 /// of the non-raw forms, and in a raw literal a backslash still keeps the quote after it from
@@ -27,23 +28,40 @@ impl<'a> SqlParameterNames<'a> {
         }
     }
 
-    /// The next parameter name, or `None` past the last one. The name is ASCII.
+    /// The next parameter name, or `None` past the last one. A backtick-quoted name comes
+    /// without its backticks, its escapes as written.
     pub(crate) const fn next_name(&mut self) -> Option<&'a [u8]> {
         let bytes = self.rest;
         let mut at = 0;
         while at < bytes.len() {
-            let next = byte_at(bytes, at + 1);
             at = match bytes[at] {
                 b'\'' | b'"' | b'`' => quoted_end(bytes, at),
-                b'-' if next == b'-' => line_end(bytes, at),
                 b'#' => line_end(bytes, at),
-                b'/' if next == b'*' => block_comment_end(bytes, at),
-                b'@' if next == b'@' => identifier_end(bytes, at + 2),
-                b'@' if is_identifier_start(next) => {
-                    let end = identifier_end(bytes, at + 1);
-                    let (head, tail) = bytes.split_at(end);
-                    self.rest = tail;
-                    return Some(head.split_at(at + 1).1);
+                b'-' if byte_at(bytes, at + 1) == b'-' => line_end(bytes, at),
+                b'/' if byte_at(bytes, at + 1) == b'*' => block_comment_end(bytes, at),
+                b'@' if byte_at(bytes, at + 1) == b'@' => identifier_end(bytes, at + 2),
+                b'@' => {
+                    let start = trivia_end(bytes, at + 1);
+                    let (name_start, name_end, end) = match byte_at(bytes, start) {
+                        first if is_identifier_start(first) => {
+                            let end = identifier_end(bytes, start);
+                            (start, end, end)
+                        }
+                        b'`' => {
+                            let end = quoted_end(bytes, start);
+                            if end < start + 2 || bytes[end - 1] != b'`' {
+                                self.rest = &[];
+                                return None;
+                            }
+                            (start + 1, end - 1, end)
+                        }
+                        _ => {
+                            at += 1;
+                            continue;
+                        }
+                    };
+                    self.rest = bytes.split_at(end).1;
+                    return Some(bytes.split_at(name_end).0.split_at(name_start).1);
                 }
                 _ => at + 1,
             };
@@ -51,31 +69,28 @@ impl<'a> SqlParameterNames<'a> {
         self.rest = &[];
         None
     }
-
-    /// Whether `name` is one of the remaining parameters.
-    pub(crate) const fn contains(mut self, name: &[u8]) -> bool {
-        while let Some(found) = self.next_name() {
-            if same_bytes(found, name) {
-                return true;
-            }
-        }
-        false
-    }
 }
 
-/// Byte equality; `==` on slices is not `const`.
-pub(crate) const fn same_bytes(left: &[u8], right: &[u8]) -> bool {
+/// Whether two parameter names name the same parameter. BigQuery compares names ignoring ASCII
+/// case; `eq_ignore_ascii_case` on slices is not `const` at the crate's MSRV.
+pub(crate) const fn same_name(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
     let mut index = 0;
     while index < left.len() {
-        if left[index] != right[index] {
+        if !left[index].eq_ignore_ascii_case(&right[index]) {
             return false;
         }
         index += 1;
     }
     true
+}
+
+/// Whether `name` is a GoogleSQL identifier that needs no quoting: ASCII letters, digits and
+/// underscores, not starting with a digit.
+pub(crate) const fn is_identifier(name: &[u8]) -> bool {
+    !name.is_empty() && is_identifier_start(name[0]) && identifier_end(name, 0) == name.len()
 }
 
 /// The byte at `at`, or `0` past the end, which no rule here matches.
@@ -141,6 +156,20 @@ const fn block_comment_end(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
+/// The first byte at or after `at` that is neither whitespace nor part of a comment.
+const fn trivia_end(bytes: &[u8], mut at: usize) -> usize {
+    while at < bytes.len() {
+        at = match bytes[at] {
+            byte if byte.is_ascii_whitespace() => at + 1,
+            b'#' => line_end(bytes, at),
+            b'-' if byte_at(bytes, at + 1) == b'-' => line_end(bytes, at),
+            b'/' if byte_at(bytes, at + 1) == b'*' => block_comment_end(bytes, at),
+            _ => return at,
+        };
+    }
+    at
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,8 +207,24 @@ mod tests {
     #[test]
     fn system_variables_hints_and_bare_at_signs_are_not_parameters() {
         assert_eq!(
-            names("SET @@dataset_id = 'x'; SELECT @@project_id, @1, @ a, @{hint=1} @real"),
+            names("SET @@dataset_id = 'x'; SELECT @@project_id, @@ a, @1, @{hint=1} @ , @real"),
             ["real"]
+        );
+    }
+
+    #[test]
+    fn whitespace_and_comments_may_separate_the_name_from_its_at_sign() {
+        assert_eq!(
+            names("SELECT @ a, @\n\tb, @ /* note */ c, @-- note\nd, @# note\r\ne"),
+            ["a", "b", "c", "d", "e"]
+        );
+    }
+
+    #[test]
+    fn a_backtick_quoted_name_is_a_parameter() {
+        assert_eq!(
+            names("SELECT @`corpus`, @ `min_count`, `@hidden`"),
+            ["corpus", "min_count"]
         );
     }
 
@@ -202,16 +247,6 @@ mod tests {
         assert_eq!(names("SELECT @a /* @b"), ["a"]);
         assert_eq!(names("SELECT @a, '''x ' @b"), ["a"]);
         assert_eq!(names("SELECT @a, '\\"), ["a"]);
-    }
-
-    #[test]
-    fn contains_looks_only_past_the_names_already_taken() {
-        let mut scan = SqlParameterNames::new("@first @second");
-        assert!(scan.contains(b"first"));
-        assert_eq!(scan.next_name(), Some(&b"first"[..]));
-        assert!(!scan.contains(b"first"));
-        assert!(scan.contains(b"second"));
-        assert!(!scan.contains(b"secon"));
     }
 
     /// One piece of a generated statement: either text that holds no `@` and no token opener,
@@ -270,10 +305,10 @@ mod tests {
         }
 
         #[test]
-        fn arbitrary_text_never_panics_and_yields_identifiers(sql in "\\PC{0,64}") {
+        fn arbitrary_text_never_panics_and_yields_names_it_holds(sql in "\\PC{0,64}") {
             for name in names(&sql) {
-                prop_assert!(is_identifier_start(name.as_bytes()[0]));
-                prop_assert_eq!(identifier_end(name.as_bytes(), 0), name.len());
+                let quoted = format!("`{name}`");
+                prop_assert!(is_identifier(name.as_bytes()) || sql.contains(&quoted));
             }
         }
     }

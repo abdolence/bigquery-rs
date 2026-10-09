@@ -1,5 +1,6 @@
 use crate::errors::BigQueryError;
 use crate::query::{infer_param, struct_params, typed_param, ParamLabel};
+use crate::sql::same_name;
 use crate::{
     BigQueryDatasetRef, BigQueryDestinationWrite, BigQueryDryRunResult, BigQueryJobCreation,
     BigQueryJobStats, BigQueryParamType, BigQueryQueryDestination, BigQueryQueryOutcome,
@@ -289,20 +290,26 @@ where
 
     /// Refuses named parameters that differ from the names a [`sql_file!`](crate::sql_file!)
     /// statement declares: the macro checks the file against its list when the caller compiles,
-    /// and this checks the `.param` calls against the same list.
+    /// and this checks the `.param` calls against the same list. Names compare ignoring ASCII
+    /// case, as BigQuery compares them.
     fn check_bound_names(declared: &[&str], bound: &[QueryParameter]) -> BigQueryResult<()> {
         let named: Vec<&str> = bound
             .iter()
             .map(|param| param.name.as_str())
             .filter(|name| !name.is_empty())
             .collect();
-        if let Some(unbound) = declared.iter().find(|name| !named.contains(name)) {
+        let lists = |names: &[&str], name: &str| {
+            names
+                .iter()
+                .any(|listed| same_name(listed.as_bytes(), name.as_bytes()))
+        };
+        if let Some(unbound) = declared.iter().find(|name| !lists(&named, name)) {
             return Err(BigQueryError::invalid_parameters(
                 *unbound,
                 format!("the SQL file uses @{unbound}, and no value is bound to it"),
             ));
         }
-        if let Some(undeclared) = named.iter().find(|name| !declared.contains(name)) {
+        if let Some(undeclared) = named.iter().find(|name| !lists(declared, name)) {
             return Err(BigQueryError::invalid_parameters(
                 *undeclared,
                 format!("a value is bound to {undeclared}, which the SQL file does not use"),

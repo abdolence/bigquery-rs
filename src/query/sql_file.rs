@@ -1,13 +1,12 @@
-use crate::sql::{same_bytes, SqlParameterNames};
+use crate::sql::{same_name, SqlParameterNames};
 use std::borrow::Cow;
 
 /// The GoogleSQL statement that [`query`](crate::BigQueryExprBuilder::query) runs: text built
 /// at run time, or a `.sql` file embedded and checked by [`sql_file!`](crate::sql_file!).
 ///
-/// Any `&str` or `String` converts into it; a `&str` is copied. A statement from
-/// [`sql_file!`](crate::sql_file!) borrows the text embedded in the binary, and it carries the
-/// names of its `@name` parameters: the query refuses to run unless exactly those names are
-/// bound.
+/// Any `&str`, `String`, `Box<str>` or `Cow<str>` converts into it. A statement from
+/// [`sql_file!`](crate::sql_file!) carries the names of its `@name` parameters: the query
+/// refuses to run unless exactly those names are bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BigQuerySql(Statement);
 
@@ -24,13 +23,13 @@ impl BigQuerySql {
     /// Wraps `text`, whose `@name` parameters must be exactly `parameters`, without allocating.
     /// This is what [`sql_file!`](crate::sql_file!) expands to.
     ///
-    /// Parameters are compared by exact name; they are found as the
-    /// [`sql_file!`](crate::sql_file!) docs describe. The order of `parameters` and repeats in
-    /// either list do not matter.
+    /// Parameters are found as the [`sql_file!`](crate::sql_file!) docs describe, and names
+    /// are compared ignoring ASCII case, as BigQuery compares them. The order of `parameters`
+    /// and repeats in either list do not matter.
     ///
     /// In a `const` item a mismatch fails the build:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0080
     /// use bigquery::BigQuerySql;
     /// const TOP: BigQuerySql = BigQuerySql::from_static("SELECT @corpus", &["corpus", "limit"]);
     /// ```
@@ -38,21 +37,26 @@ impl BigQuerySql {
     /// # Panics
     /// When called at run time, on a parameter of `text` that `parameters` does not list, or a
     /// name in `parameters` that `text` does not use.
-    pub const fn from_static(text: &'static str, parameters: &'static [&'static str]) -> Self {
-        let mut used = SqlParameterNames::new(text);
-        while let Some(name) = used.next_name() {
-            if !lists(parameters, name) {
-                mismatch(
+    pub const fn from_static<const N: usize>(
+        text: &'static str,
+        parameters: &'static [&'static str; N],
+    ) -> Self {
+        let mut used = [false; N];
+        let mut names = SqlParameterNames::new(text);
+        while let Some(name) = names.next_name() {
+            match position(parameters, name) {
+                Some(index) => used[index] = true,
+                None => mismatch(
                     "the SQL uses @",
                     name,
                     ", which the parameter list leaves out",
-                );
+                ),
             }
         }
         let mut index = 0;
-        while index < parameters.len() {
+        while index < N {
             let name = parameters[index].as_bytes();
-            if !SqlParameterNames::new(text).contains(name) {
+            if !matches!(position(parameters, name), Some(first) if used[first]) {
                 mismatch(
                     "the parameter list names ",
                     name,
@@ -66,10 +70,10 @@ impl BigQuerySql {
 
     /// The text and, for a statement from [`from_static`](Self::from_static), its parameter
     /// names.
-    pub(crate) fn into_parts(self) -> (Cow<'static, str>, Option<&'static [&'static str]>) {
+    pub(crate) fn into_parts(self) -> (String, Option<&'static [&'static str]>) {
         match self.0 {
-            Statement::Text(text) => (Cow::Owned(text), None),
-            Statement::Declared { text, parameters } => (Cow::Borrowed(text), Some(parameters)),
+            Statement::Text(text) => (text, None),
+            Statement::Declared { text, parameters } => (text.to_string(), Some(parameters)),
         }
     }
 }
@@ -92,15 +96,31 @@ impl From<&String> for BigQuerySql {
     }
 }
 
-const fn lists(parameters: &[&str], name: &[u8]) -> bool {
+impl From<Box<str>> for BigQuerySql {
+    fn from(text: Box<str>) -> Self {
+        Self(Statement::Text(text.into()))
+    }
+}
+
+impl From<Cow<'_, str>> for BigQuerySql {
+    fn from(text: Cow<'_, str>) -> Self {
+        Self(Statement::Text(text.into_owned()))
+    }
+}
+
+/// The index of the first of `parameters` that names the same parameter as `name`.
+const fn position(parameters: &[&str], name: &[u8]) -> Option<usize> {
     let mut index = 0;
     while index < parameters.len() {
-        if same_bytes(parameters[index].as_bytes(), name) {
-            return true;
+        let listed = parameters[index].as_bytes();
+        // Most listed names differ in length; testing that here, without a call, keeps the
+        // const evaluation of a long file within rustc's budget.
+        if listed.len() == name.len() && same_name(listed, name) {
+            return Some(index);
         }
         index += 1;
     }
-    false
+    None
 }
 
 /// Panics with `before`, `name` and `after` joined. Const panics take a single `&str` argument,
@@ -159,13 +179,13 @@ const fn mismatch(before: &str, name: &[u8], after: &str) -> ! {
 ///
 /// A parameter the file uses but the list leaves out fails the build:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0080
 /// let _ = bigquery::sql_file!("sql/top_words.sql", corpus);
 /// ```
 ///
 /// So does a listed name the file never uses:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0080
 /// let _ = bigquery::sql_file!("sql/top_words.sql", corpus, min_count, limit);
 /// ```
 ///
@@ -177,12 +197,18 @@ const fn mismatch(before: &str, name: &[u8], after: &str) -> ! {
 ///
 /// The file is read with GoogleSQL's lexical rules, so an `@` inside a string or bytes literal,
 /// a backtick-quoted identifier or a comment is not a parameter, and neither is a `@@name`
-/// system variable. A parameter name ends at the first character that cannot be part of an
-/// identifier: `@window.earliest` reads the field `earliest` of the STRUCT parameter `window`,
-/// and lists as `window`. Names are compared exactly, case included.
+/// system variable. Whitespace and comments may stand between `@` and the name, and the name
+/// may be backtick-quoted: ``@`corpus` `` lists as `corpus`. An unquoted name ends at the first
+/// character that cannot be part of an identifier: `@window.earliest` reads the field
+/// `earliest` of the STRUCT parameter `window`, and lists as `window`. Names are compared
+/// ignoring ASCII case, as BigQuery compares them, so `@Corpus` lists as `corpus`.
 #[macro_export]
 macro_rules! sql_file {
     ($path:literal $(, $parameter:ident)* $(,)?) => {{
+        #[allow(
+            long_running_const_eval,
+            reason = "the check is one pass over the file, which ends however long it is"
+        )]
         const SQL: $crate::BigQuerySql = $crate::BigQuerySql::from_static(
             ::core::include_str!($path),
             &[$(::core::stringify!($parameter)),*],
@@ -199,9 +225,102 @@ mod tests {
     fn a_file_with_its_parameters_listed_is_embedded_unchanged() {
         let (text, parameters) =
             crate::sql_file!("sql/top_words.sql", min_count, corpus,).into_parts();
-        assert!(matches!(text, Cow::Borrowed(_)));
         assert_eq!(text, include_str!("sql/top_words.sql"));
         assert_eq!(parameters, Some(&["min_count", "corpus"][..]));
+    }
+
+    /// A `UNION ALL` branch of a sales report with no parameters.
+    const REPORT_BRANCH: &str = "SELECT region, country, SUM(amount) AS total -- per region\n\
+        FROM `sales.archived_orders` WHERE note != 'n/a' GROUP BY region, country\nUNION ALL\n";
+
+    /// The report's last branch, which uses all of [`REPORT_FILTERS`].
+    const REPORT_FILTERED_BRANCH: &str = "SELECT region, country, SUM(amount) AS total\n\
+        FROM `sales.orders` WHERE ordered_on BETWEEN @start_date AND @end_date\n\
+        AND region = @region AND country = @country AND city = @city AND store = @store\n\
+        AND category = @category AND brand = @brand AND price BETWEEN @min_price AND @max_price\n\
+        AND quantity BETWEEN @min_quantity AND @max_quantity AND currency = @currency\n\
+        AND channel = @channel AND campaign = @campaign AND tier = @customer_tier\n\
+        AND payment = @payment_method AND status = @status AND warehouse = @warehouse\n\
+        AND carrier = @carrier GROUP BY region, country\n";
+
+    const REPORT_FILTERS: [&str; 20] = [
+        "start_date",
+        "end_date",
+        "region",
+        "country",
+        "city",
+        "store",
+        "category",
+        "brand",
+        "min_price",
+        "max_price",
+        "min_quantity",
+        "max_quantity",
+        "currency",
+        "channel",
+        "campaign",
+        "customer_tier",
+        "payment_method",
+        "status",
+        "warehouse",
+        "carrier",
+    ];
+
+    const REPORT_BRANCHES: usize = 512;
+
+    const REPORT_LENGTH: usize =
+        REPORT_BRANCH.len() * REPORT_BRANCHES + REPORT_FILTERED_BRANCH.len();
+
+    /// A report of [`REPORT_BRANCHES`] branches, its parameters only in the last one, so that
+    /// finding them takes a scan of the whole text.
+    static REPORT_BYTES: [u8; REPORT_LENGTH] = {
+        let branch = REPORT_BRANCH.as_bytes();
+        let filtered = REPORT_FILTERED_BRANCH.as_bytes();
+        let padding = REPORT_LENGTH - filtered.len();
+        let mut text = [0; REPORT_LENGTH];
+        let mut index = 0;
+        while index < REPORT_LENGTH {
+            text[index] = if index < padding {
+                branch[index % branch.len()]
+            } else {
+                filtered[index - padding]
+            };
+            index += 1;
+        }
+        text
+    };
+
+    const REPORT_TEXT: &str = match std::str::from_utf8(&REPORT_BYTES) {
+        Ok(text) => text,
+        Err(_) => panic!("the report is built from a UTF-8 branch"),
+    };
+
+    const REPORT: BigQuerySql = BigQuerySql::from_static(REPORT_TEXT, &REPORT_FILTERS);
+
+    #[test]
+    fn a_large_file_with_many_parameters_is_checked_while_compiling() {
+        assert!(REPORT_TEXT.len() > 60_000);
+        let (text, parameters) = REPORT.into_parts();
+        assert_eq!(text, REPORT_TEXT);
+        assert_eq!(parameters, Some(&REPORT_FILTERS[..]));
+    }
+
+    #[test]
+    fn text_in_a_box_or_a_cow_is_a_statement() {
+        let owned = String::from("SELECT 1");
+        let statements = [
+            BigQuerySql::from(Box::<str>::from("SELECT 1")),
+            BigQuerySql::from(Cow::Borrowed("SELECT 1")),
+            BigQuerySql::from(Cow::<str>::Owned(owned.clone())),
+        ];
+        for statement in statements {
+            assert_eq!(statement, BigQuerySql::from(&owned));
+        }
+    }
+
+    #[test]
+    fn listed_names_match_parameters_whatever_their_case() {
+        let _ = BigQuerySql::from_static("SELECT @Corpus WHERE c = @CORPUS", &["corpus"]);
     }
 
     #[test]

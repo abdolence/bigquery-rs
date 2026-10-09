@@ -277,6 +277,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sql_file_parameters_bind_whatever_the_case_of_their_names() -> BigQueryResult<()> {
+        let db = MockDatabase;
+        BigQueryExprBuilder::new(&db)
+            .query(crate::sql_file!(
+                "../../query/sql/top_words.sql",
+                corpus,
+                min_count
+            ))
+            .param("Corpus", "hamlet")
+            .param("MIN_COUNT", 100)
+            .execute()
+            .await?;
+        assert_eq!(take_calls().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sql_file_parameter_left_unbound_fails_without_a_call() {
         let db = MockDatabase;
         let result = BigQueryExprBuilder::new(&db)
