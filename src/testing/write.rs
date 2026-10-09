@@ -67,13 +67,14 @@ impl FakeShared {
     }
 
     /// Answers a unary write call on `table` with the first fault for `rpc` on it, or else
-    /// with what `answer` makes of the state.
+    /// with what `answer` makes of the state. An `answer` that fails leaves the state as it
+    /// found it.
     async fn answer_write<M: Message>(
         &self,
         call: FakeCall,
         rpc: BigQueryFakeRpc,
         table: &TableKey,
-        answer: impl FnOnce(&mut FakeState) -> Result<M, Status>,
+        answer: impl FnOnce(&mut FakeState) -> Result<M, WriteRefusal>,
     ) {
         let Some(call) = self.unfaulted(call, rpc, Some(table)).await else {
             return;
@@ -81,7 +82,8 @@ impl FakeShared {
         let answered = answer(&mut self.state());
         match answered {
             Ok(message) => call.reply(&message),
-            Err(status) => call.fail(status.code(), status.message()),
+            Err(WriteRefusal::Status(status)) => call.fail(status.code(), status.message()),
+            Err(WriteRefusal::Internal(failure)) => self.internal(call, &failure),
         }
     }
 
@@ -132,7 +134,7 @@ impl FakeShared {
                 WriteStreamType::Pending => BigQueryWriteMode::Pending,
                 WriteStreamType::Buffered => BigQueryWriteMode::Buffered,
                 WriteStreamType::Unspecified => {
-                    return Err(Status::invalid_argument("the write stream has no type"))
+                    return Err(Status::invalid_argument("the write stream has no type").into())
                 }
             };
             let schema = state
@@ -168,7 +170,8 @@ impl FakeShared {
             if stream.mode != BigQueryWriteMode::Buffered {
                 return Err(Status::invalid_argument(format!(
                     "FlushRows is supported on BUFFERED streams only, and {name} is not one"
-                )));
+                ))
+                .into());
             }
             let offset = request
                 .offset
@@ -177,18 +180,21 @@ impl FakeShared {
                 return Err(Status::out_of_range(format!(
                     "the offset {offset} is not a row of {name}, which has {} rows",
                     stream.length
-                )));
+                ))
+                .into());
             }
             let table = state
                 .tables
                 .get_mut(&table)
                 .ok_or_else(|| table.not_found())?;
-            for batch in stream.flush_to(offset) {
-                let visible = fit_to_layout(&batch, &table.arrow_schema).map_err(|err| {
-                    Status::internal(format!("bigquery fake: the rows of {name}: {err}"))
-                })?;
-                table.batches.push(visible);
-            }
+            let visible = stream
+                .unflushed_to(offset)
+                .iter()
+                .map(|batch| fit_to_layout(batch, &table.arrow_schema))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| WriteRefusal::Internal(format!("the rows of {name}: {err}")))?;
+            table.batches.extend(visible);
+            stream.flushed = stream.flushed.max(offset + 1);
             Ok(FlushRowsResponse { offset })
         })
         .await;
@@ -266,7 +272,7 @@ impl FakeShared {
                 if let Some(stream) = state.write_streams.get(name) {
                     for batch in &stream.appended {
                         committed.push(fit_to_layout(batch, &layout).map_err(|err| {
-                            Status::internal(format!("bigquery fake: the rows of {name}: {err}"))
+                            WriteRefusal::Internal(format!("the rows of {name}: {err}"))
                         })?);
                     }
                 }
@@ -417,6 +423,20 @@ impl FakeShared {
             return Ok(None);
         }
         Ok(Some(row_errors_response(row_errors)))
+    }
+}
+
+/// Why a unary write call is not answered with its response.
+enum WriteRefusal {
+    /// What BigQuery answers.
+    Status(Status),
+    /// A failure of the fake itself, answered with `Internal` and reported by `verify`.
+    Internal(String),
+}
+
+impl From<Status> for WriteRefusal {
+    fn from(status: Status) -> Self {
+        Self::Status(status)
     }
 }
 
@@ -573,9 +593,8 @@ impl FakeWriteStream {
         }
     }
 
-    /// Makes the rows up to and including `offset` visible, and returns the rows no earlier
-    /// flush made visible. `flushed` counts the rows made visible so far.
-    fn flush_to(&mut self, offset: i64) -> Vec<RecordBatch> {
+    /// The rows up to and including `offset` that no earlier flush made visible.
+    fn unflushed_to(&self, offset: i64) -> Vec<RecordBatch> {
         let end = offset + 1;
         let mut newly_visible = Vec::new();
         let mut first_row = 0;
@@ -590,7 +609,6 @@ impl FakeWriteStream {
             }
             first_row += rows;
         }
-        self.flushed = self.flushed.max(end);
         newly_visible
     }
 
@@ -771,9 +789,13 @@ mod tests {
     use crate::testing::{BigQueryFake, BigQueryFakeCode, BigQueryFakeFault, BigQueryFakeRpc};
     use crate::{
         BigQueryChange, BigQueryChangeType, BigQueryDatasetId, BigQueryResult,
-        BigQueryStreamingWriteOptions, BigQueryTableId, BigQueryWriteMode,
+        BigQueryStreamingWriteOptions, BigQueryStreamingWriter, BigQueryTableId, BigQueryWriteMode,
+        BigQueryWriteResponse,
     };
-    use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
+    use arrow_array::{
+        ArrayRef, Decimal128Array, Float64Array, Int64Array, RecordBatch, StringArray,
+    };
+    use futures::stream::BoxStream;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
@@ -1031,6 +1053,41 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn an_arrow_decimal_is_rescaled_to_its_column() -> BigQueryResult<()> {
+        const PAYMENTS: BigQueryTableId = BigQueryTableId::from_static("payments");
+        let fake = BigQueryFake::start().await?;
+        fake.table(SHOP.table(PAYMENTS), |columns| {
+            columns
+                .from_type::<Payment>()
+                .with("amount", |amount| amount.numeric_with(10, 2))
+        })
+        .create()?;
+        let amounts = Decimal128Array::from(vec![1_505_000_000_i128])
+            .with_precision_and_scale(38, 9)
+            .expect("1.505 fits NUMERIC");
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            ("id", Arc::new(Int64Array::from(vec![1]))),
+            ("amount", Arc::new(amounts)),
+        ];
+        let batch = RecordBatch::try_from_iter(columns).expect("columns of equal length");
+
+        fake.db()
+            .fluent()
+            .insert()
+            .into(SHOP.table(PAYMENTS))
+            .record_batches(vec![batch])
+            .execute()
+            .await?;
+
+        let expected = Payment {
+            id: 1,
+            amount: "1.51".to_string(),
+        };
+        assert_eq!(fake.rows::<Payment>(SHOP.table(PAYMENTS))?, vec![expected]);
+        Ok(())
+    }
+
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct NotedOrder {
         id: i64,
@@ -1104,6 +1161,139 @@ mod tests {
             .await?;
 
         assert_eq!(fake.rows::<Order>(SHOP.table(ORDERS))?, orders());
+        Ok(())
+    }
+
+    const DELIVERIES: BigQueryTableId = BigQueryTableId::from_static("deliveries");
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Address {
+        city: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Delivery {
+        id: i64,
+        address: Address,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ZipAddress {
+        city: String,
+        zip: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ZipDelivery {
+        id: i64,
+        address: ZipAddress,
+    }
+
+    fn deliveries() -> Vec<Delivery> {
+        ["Paris", "Oslo"]
+            .into_iter()
+            .zip(1..)
+            .map(|(city, id)| Delivery {
+                id,
+                address: Address {
+                    city: city.to_string(),
+                },
+            })
+            .collect()
+    }
+
+    fn deliveries_without_zip() -> Vec<ZipDelivery> {
+        deliveries()
+            .into_iter()
+            .map(|delivery| ZipDelivery {
+                id: delivery.id,
+                address: ZipAddress {
+                    city: delivery.address.city,
+                    zip: None,
+                },
+            })
+            .collect()
+    }
+
+    /// A fake whose `shop.deliveries` has the columns of [`Delivery`], with a writer to it
+    /// that has written [`deliveries`].
+    struct DeliveriesWritten {
+        fake: BigQueryFake,
+        writer: BigQueryStreamingWriter<Delivery>,
+        _responses: BoxStream<'static, BigQueryResult<BigQueryWriteResponse>>,
+    }
+
+    impl DeliveriesWritten {
+        async fn start(mode: BigQueryWriteMode) -> BigQueryResult<Self> {
+            let fake = BigQueryFake::start().await?;
+            fake.table(SHOP.table(DELIVERIES), |columns| {
+                columns.from_type::<Delivery>()
+            })
+            .create()?;
+            let (mut writer, responses) = fake
+                .db()
+                .create_streaming_writer_with_options::<Delivery>(
+                    SHOP.table(DELIVERIES),
+                    options(mode),
+                )
+                .await?;
+            writer.write_all(&deliveries()).await?;
+            writer.flush().await?;
+            Ok(Self {
+                fake,
+                writer,
+                _responses: responses,
+            })
+        }
+    }
+
+    async fn add_zip(fake: &BigQueryFake) -> BigQueryResult<()> {
+        fake.db()
+            .fluent()
+            .schema()
+            .table(SHOP.table(DELIVERIES))
+            .columns(|columns| columns.from_type::<ZipDelivery>())
+            .sync()
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn buffered_rows_flushed_after_a_nested_field_is_added_reach_the_table(
+    ) -> BigQueryResult<()> {
+        let DeliveriesWritten {
+            fake,
+            mut writer,
+            _responses,
+        } = DeliveriesWritten::start(BigQueryWriteMode::Buffered).await?;
+        add_zip(&fake).await?;
+
+        assert_eq!(writer.flush_rows_to(1).await?, 1);
+
+        assert_eq!(
+            fake.rows::<ZipDelivery>(SHOP.table(DELIVERIES))?,
+            deliveries_without_zip()
+        );
+        writer.finish().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_rows_take_a_nested_field_added_before_their_commit() -> BigQueryResult<()> {
+        let DeliveriesWritten {
+            fake,
+            writer,
+            _responses,
+        } = DeliveriesWritten::start(BigQueryWriteMode::Pending).await?;
+        let finalized = writer.finalize().await?;
+        add_zip(&fake).await?;
+
+        fake.db().commit_write_streams(vec![finalized]).await?;
+
+        assert_eq!(
+            fake.rows::<ZipDelivery>(SHOP.table(DELIVERIES))?,
+            deliveries_without_zip()
+        );
         Ok(())
     }
 }
