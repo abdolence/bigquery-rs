@@ -1,5 +1,5 @@
 use crate::errors::BigQueryError;
-use crate::query::{infer_param, struct_params, typed_param, ParamLabel};
+use crate::query::ParamList;
 use crate::sql::parameter_position;
 use crate::{
     BigQueryDatasetRef, BigQueryDestinationWrite, BigQueryDryRunResult, BigQueryJobCreation,
@@ -32,7 +32,8 @@ where
 {
     db: &'a D,
     params: BigQueryQueryParams,
-    failure: Option<BigQueryError>,
+    /// The statement's parameters, moved into `params` by the terminal.
+    parameters: ParamList,
     /// The parameter names a statement from [`sql_file!`](crate::sql_file!) declares, which
     /// the bound named parameters must match.
     declared_parameters: Option<&'static [&'static str]>,
@@ -47,24 +48,9 @@ where
         Self {
             db,
             params: BigQueryQueryParams::new(text),
-            failure: None,
+            parameters: ParamList::default(),
             declared_parameters,
         }
-    }
-
-    fn push(mut self, encoded: Result<QueryParameter, BigQueryError>) -> Self {
-        match encoded {
-            Ok(parameter) if self.failure.is_none() => self.params.query_parameters.push(parameter),
-            Ok(_) => {}
-            Err(failure) => {
-                self.failure.get_or_insert(failure);
-            }
-        }
-        self
-    }
-
-    fn next_position(&self) -> ParamLabel<'static> {
-        ParamLabel::Positional(self.params.query_parameters.len())
     }
 
     /// Adds the named parameter `@name`, its type inferred from the value's serde form:
@@ -76,51 +62,47 @@ where
     /// [`param_as`](Self::param_as). `None`, an empty sequence and elements of different types
     /// cannot be inferred, and the terminal fails with
     /// [`InvalidParametersError`](crate::errors::BigQueryError::InvalidParametersError).
-    pub fn param<N: Into<String>, V: Serialize>(self, name: N, value: V) -> Self {
-        let name = name.into();
-        let encoded = infer_param(ParamLabel::Named(&name), &value);
-        self.push(encoded)
+    pub fn param<N: Into<String>, V: Serialize>(mut self, name: N, value: V) -> Self {
+        self.parameters.named(&name.into(), &value);
+        self
     }
 
     /// Adds the named parameter `@name` of type `ty`, the value in any form the write path
     /// takes for that type, so `param_as("t", BigQueryFieldType::Timestamp, ts)` works for a
     /// plain `jiff::Timestamp`. `None` is a NULL of that type.
     pub fn param_as<N: Into<String>, V: Serialize>(
-        self,
+        mut self,
         name: N,
         ty: impl Into<BigQueryParamType>,
         value: V,
     ) -> Self {
-        let name = name.into();
-        let encoded = typed_param(ParamLabel::Named(&name), &ty.into(), &value);
-        self.push(encoded)
+        self.parameters.named_as(&name.into(), &ty.into(), &value);
+        self
     }
 
     /// Adds every top-level field of a struct or string-keyed map as a named parameter,
     /// inferred as by [`param`](Self::param).
-    pub fn params<P: Serialize + ?Sized>(self, params: &P) -> Self {
-        match struct_params(params) {
-            Ok(encoded) => encoded.into_iter().fold(self, |b, p| b.push(Ok(p))),
-            Err(failure) => self.push(Err(failure)),
-        }
+    pub fn params<P: Serialize + ?Sized>(mut self, params: &P) -> Self {
+        self.parameters.fields(params);
+        self
     }
 
     /// Adds the next positional parameter `?`, inferred as by [`param`](Self::param). Named
     /// and positional parameters together fail at the terminal.
-    pub fn positional_param<V: Serialize>(self, value: V) -> Self {
-        let encoded = infer_param(self.next_position(), &value);
-        self.push(encoded)
+    pub fn positional_param<V: Serialize>(mut self, value: V) -> Self {
+        self.parameters.positional(&value);
+        self
     }
 
     /// Adds the next positional parameter `?` of type `ty`, as by
     /// [`param_as`](Self::param_as).
     pub fn positional_param_as<V: Serialize>(
-        self,
+        mut self,
         ty: impl Into<BigQueryParamType>,
         value: V,
     ) -> Self {
-        let encoded = typed_param(self.next_position(), &ty.into(), &value);
-        self.push(encoded)
+        self.parameters.positional_as(&ty.into(), &value);
+        self
     }
 
     /// Runs the job in this location. Leave it unset unless needed: BigQuery finds the
@@ -279,13 +261,13 @@ where
     }
 
     fn checked(self) -> BigQueryResult<(&'a D, BigQueryQueryParams)> {
-        if let Some(failure) = self.failure {
-            return Err(failure);
-        }
+        let parameters = self.parameters.into_parameters()?;
         if let Some(declared) = self.declared_parameters {
-            Self::check_bound_names(declared, &self.params.query_parameters)?;
+            Self::check_bound_names(declared, &parameters)?;
         }
-        Ok((self.db, self.params))
+        let mut params = self.params;
+        params.query_parameters = parameters;
+        Ok((self.db, params))
     }
 
     /// Refuses named parameters that differ from the names a [`sql_file!`](crate::sql_file!)

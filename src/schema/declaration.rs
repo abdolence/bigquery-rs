@@ -404,6 +404,20 @@ impl BigQuerySchemaColumns {
         self
     }
 
+    /// The columns, refused as `.plan()` and `.sync()` refuse them: a problem kept from
+    /// inference or `with`, a column without a type, and a name the diff and the DDL renderer
+    /// cannot tell apart.
+    ///
+    /// # Errors
+    /// [`BigQueryError::SchemaInferenceError`] for a problem kept here or a column inference
+    /// found no type for, and [`BigQueryError::InvalidParametersError`] for the rest.
+    pub(crate) fn checked(self) -> BigQueryResult<Vec<DeclaredColumn>> {
+        if let Some(problem) = self.problem {
+            return Err(BigQueryError::SchemaInferenceError(problem));
+        }
+        DeclaredColumn::checked(self.columns, "")
+    }
+
     fn column_mut(&mut self, path: &str) -> Option<&mut BigQuerySchemaColumn> {
         let mut segments = path.split('.');
         let top = segments.next()?;
@@ -739,10 +753,7 @@ impl TryFrom<BigQueryTableDeclarationDraft> for BigQueryTableDeclaration {
     type Error = BigQueryError;
 
     fn try_from(draft: BigQueryTableDeclarationDraft) -> Result<Self, Self::Error> {
-        if let Some(problem) = draft.columns.problem {
-            return Err(BigQueryError::SchemaInferenceError(problem));
-        }
-        let columns = DeclaredColumn::checked(draft.columns.columns, "")?;
+        let columns = draft.columns.checked()?;
         if let Some(old) = columns
             .iter()
             .filter_map(|c| c.renamed_from.as_ref())

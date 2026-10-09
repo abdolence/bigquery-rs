@@ -180,6 +180,83 @@ pub(crate) fn parameter_mode(params: &[QueryParameter]) -> BigQueryResult<&'stat
     }
 }
 
+/// The parameters a builder collects, encoded as they are added, and the first one that failed
+/// to encode. Builders never fail, so the failure waits for the terminal, which returns it
+/// without sending anything.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ParamList {
+    parameters: Vec<QueryParameter>,
+    failure: Option<BigQueryError>,
+}
+
+impl ParamList {
+    /// Adds `@name`, its type inferred from the value's serde form.
+    pub(crate) fn named<V: Serialize + ?Sized>(&mut self, name: &str, value: &V) {
+        let encoded = infer_param(ParamLabel::Named(name), value);
+        self.push(encoded);
+    }
+
+    /// Adds `@name` of the declared type `param_type`.
+    pub(crate) fn named_as<V: Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        param_type: &BigQueryParamType,
+        value: &V,
+    ) {
+        let encoded = typed_param(ParamLabel::Named(name), param_type, value);
+        self.push(encoded);
+    }
+
+    /// Adds every top-level field of a struct or string-keyed map as a named parameter.
+    pub(crate) fn fields<P: Serialize + ?Sized>(&mut self, params: &P) {
+        match struct_params(params) {
+            Ok(encoded) => encoded.into_iter().for_each(|param| self.push(Ok(param))),
+            Err(failure) => self.push(Err(failure)),
+        }
+    }
+
+    /// Adds the next positional `?`, its type inferred.
+    pub(crate) fn positional<V: Serialize + ?Sized>(&mut self, value: &V) {
+        let encoded = infer_param(self.next_position(), value);
+        self.push(encoded);
+    }
+
+    /// Adds the next positional `?` of the declared type `param_type`.
+    pub(crate) fn positional_as<V: Serialize + ?Sized>(
+        &mut self,
+        param_type: &BigQueryParamType,
+        value: &V,
+    ) {
+        let encoded = typed_param(self.next_position(), param_type, value);
+        self.push(encoded);
+    }
+
+    /// The parameters in the order they were added.
+    ///
+    /// # Errors
+    /// The first failure to encode one, unchanged.
+    pub(crate) fn into_parameters(self) -> BigQueryResult<Vec<QueryParameter>> {
+        match self.failure {
+            Some(failure) => Err(failure),
+            None => Ok(self.parameters),
+        }
+    }
+
+    fn next_position(&self) -> ParamLabel<'static> {
+        ParamLabel::Positional(self.parameters.len())
+    }
+
+    fn push(&mut self, encoded: Result<QueryParameter, BigQueryError>) {
+        match encoded {
+            Ok(parameter) if self.failure.is_none() => self.parameters.push(parameter),
+            Ok(_) => {}
+            Err(failure) => {
+                self.failure.get_or_insert(failure);
+            }
+        }
+    }
+}
+
 /// A serialized value with what serde said about it.
 #[derive(Clone, Debug, PartialEq)]
 enum SerializedValue {
