@@ -5,12 +5,15 @@ use crate::db::fake::query::{
 use crate::db::fake::read::FakeReadTable;
 use crate::db::fake::spans::{bigquery_fields, CapturedSpans};
 use crate::db::fake::{FakeBigQuery, FakeCall};
-use crate::errors::BigQueryError;
+use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
+use crate::testing::{BigQueryFake, BigQueryFakeCode, BigQueryFakeFault, BigQueryFakeJobFailure};
 use crate::{
     BigQueryDatasetId, BigQueryDatasetRef, BigQueryDmlStats, BigQueryJobId, BigQueryJobRef,
     BigQueryJobStats, BigQueryLocation, BigQueryQueryId, BigQueryRequestId, BigQueryResult,
     BigQueryStatementType, BigQueryTableId,
 };
+use arrow_array::cast::AsArray;
+use arrow_array::types::Int64Type;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::{StreamExt, TryStreamExt};
@@ -29,11 +32,7 @@ const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
 
 /// `id, name`, with `ids` as the ids and `Åsa <id>` as the names.
 fn people(ids: &[i64]) -> RecordBatch {
-    let names: Vec<Option<String>> = ids.iter().map(|id| Some(format!("Åsa {id}"))).collect();
-    people_named(ids, names)
-}
-
-fn people_named(ids: &[i64], names: Vec<Option<String>>) -> RecordBatch {
+    let names: Vec<String> = ids.iter().map(|id| format!("Åsa {id}")).collect();
     RecordBatch::try_new(
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
@@ -919,69 +918,6 @@ async fn sql_text_is_sent_as_given_and_values_only_as_parameters() -> BigQueryRe
     Ok(())
 }
 
-#[tokio::test]
-async fn a_skipped_row_log_line_names_the_row_and_field_and_not_the_cell() -> BigQueryResult<()> {
-    #[derive(Deserialize, Debug)]
-    enum Plan {
-        Basic,
-    }
-    #[derive(Deserialize, Debug)]
-    struct Subscription {
-        #[allow(dead_code, reason = "the row only has to decode")]
-        name: Plan,
-    }
-    const CELL: &str = "s3cr3t-cell";
-    let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
-        call.query_request().await;
-        let names = vec![Some("Basic".to_string()), Some(CELL.to_string())];
-        call.reply(&inline_response(&people_named(&[1, 2], names), 2));
-    })
-    .await;
-
-    let mut with_errors = fake
-        .db
-        .fluent()
-        .query("SELECT 1")
-        .obj::<Subscription>()
-        .stream_query_with_errors()
-        .await?;
-    assert!(with_errors.next().await.expect("the first row").is_ok());
-    let err = match with_errors.next().await.expect("the second row") {
-        Err(BigQueryError::DeserializeError(err)) => err,
-        other => panic!("expected a DeserializeError, got {other:?}"),
-    };
-    assert!(err.message.contains(CELL), "{err}");
-
-    let (events, _guard) = CapturedEvents::capture();
-    let rows: Vec<Subscription> = fake
-        .db
-        .fluent()
-        .query("SELECT 1")
-        .obj::<Subscription>()
-        .stream_query()
-        .await?
-        .collect()
-        .await;
-    assert_eq!(rows.len(), 1);
-    let logged = events.at(tracing::Level::ERROR);
-    assert_eq!(logged.len(), 1, "{logged:?}");
-    let fields = &logged[0];
-    assert_eq!(
-        fields.get("kind").map(String::as_str),
-        Some(err.kind.code())
-    );
-    assert_eq!(
-        fields.get("row"),
-        Some(&err.row.expect("a decoded row has an index").to_string())
-    );
-    assert_eq!(fields.get("path"), Some(&err.path));
-    assert!(
-        fields.values().all(|value| !value.contains(CELL)),
-        "{fields:?}"
-    );
-    Ok(())
-}
-
 const ORDERS_EXPORT: BigQueryTableId = BigQueryTableId::from_static("orders_export");
 
 /// The `Job` that `InsertJob` returns for the fake job, still running.
@@ -1171,372 +1107,410 @@ async fn retried_insert_job_keeps_its_job_id_and_takes_the_job_it_created() -> B
     Ok(())
 }
 
-/// What a caller sees of a query, against the public fake. The tests above script BigQuery's
-/// responses by hand, for the request contents and the response shapes the fake never sends.
-#[cfg(feature = "testing")]
-mod with_the_fake {
-    use super::{person, Person, ORDERS_EXPORT, SHOP};
-    use crate::db::fake::spans::{bigquery_fields, CapturedSpans};
-    use crate::errors::{BigQueryCodecErrorKind, BigQueryError};
-    use crate::testing::{
-        BigQueryFake, BigQueryFakeCode, BigQueryFakeFault, BigQueryFakeJobFailure,
-    };
-    use crate::{BigQueryDmlStats, BigQueryResult, BigQueryStatementType};
-    use arrow_array::cast::AsArray;
-    use arrow_array::types::Int64Type;
-    use arrow_array::RecordBatch;
-    use futures::{StreamExt, TryStreamExt};
-    use serde::{Deserialize, Serialize};
+const PEOPLE: &str = "SELECT id, name FROM shop.people";
 
-    const PEOPLE: &str = "SELECT id, name FROM shop.people";
+/// A `Person` whose name may be missing, for rows a `Person` cannot decode.
+#[derive(Serialize, Deserialize)]
+struct MaybeNamed {
+    id: i64,
+    name: Option<String>,
+}
 
-    /// A `Person` whose name may be missing, for rows a `Person` cannot decode.
-    #[derive(Serialize, Deserialize)]
-    struct MaybeNamed {
-        id: i64,
-        name: Option<String>,
-    }
+fn ids(batches: &[RecordBatch]) -> Vec<i64> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_primitive::<Int64Type>()
+                .values()
+                .to_vec()
+        })
+        .collect()
+}
 
-    fn ids(batches: &[RecordBatch]) -> Vec<i64> {
-        batches
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column(0)
-                    .as_primitive::<Int64Type>()
-                    .values()
-                    .to_vec()
-            })
-            .collect()
-    }
+#[tokio::test]
+async fn record_batches_carry_the_result_rows() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    fake.query(PEOPLE).returns_rows(
+        |columns| columns.from_type::<Person>(),
+        [person(1), person(2)],
+    )?;
 
-    #[tokio::test]
-    async fn record_batches_carry_the_result_rows() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        fake.query(PEOPLE).returns_rows(
-            |columns| columns.from_type::<Person>(),
-            [person(1), person(2)],
-        )?;
+    let batches: Vec<RecordBatch> = fake
+        .db()
+        .fluent()
+        .query(PEOPLE)
+        .record_batches()
+        .await?
+        .try_collect()
+        .await?;
 
-        let batches: Vec<RecordBatch> = fake
-            .db()
-            .fluent()
-            .query(PEOPLE)
-            .record_batches()
-            .await?
-            .try_collect()
-            .await?;
+    assert_eq!(ids(&batches), [1, 2]);
+    Ok(())
+}
 
-        assert_eq!(ids(&batches), [1, 2]);
-        Ok(())
-    }
+#[tokio::test]
+async fn mixed_parameter_modes_fail_before_sending() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
 
-    #[tokio::test]
-    async fn mixed_parameter_modes_fail_before_sending() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
+    let result = fake
+        .db()
+        .fluent()
+        .query("SELECT @a, ?")
+        .param("a", 1)
+        .positional_param(2)
+        .execute()
+        .await;
 
+    assert!(
+        matches!(result, Err(BigQueryError::InvalidParametersError(_))),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_parameter_name_fails_before_sending() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    for name in ["", "a b", "x; DROP TABLE t; --", "`v`", "v'"] {
         let result = fake
             .db()
             .fluent()
-            .query("SELECT @a, ?")
-            .param("a", 1)
-            .positional_param(2)
+            .query("SELECT 1")
+            .param(name, 1)
             .execute()
             .await;
-
         assert!(
             matches!(result, Err(BigQueryError::InvalidParametersError(_))),
-            "{result:?}"
+            "{name:?}: {result:?}"
         );
-        Ok(())
     }
+    Ok(())
+}
 
-    #[tokio::test]
-    async fn invalid_parameter_name_fails_before_sending() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        for name in ["", "a b", "x; DROP TABLE t; --", "`v`", "v'"] {
-            let result = fake
-                .db()
-                .fluent()
-                .query("SELECT 1")
-                .param(name, 1)
-                .execute()
-                .await;
-            assert!(
-                matches!(result, Err(BigQueryError::InvalidParametersError(_))),
-                "{name:?}: {result:?}"
-            );
+#[tokio::test]
+async fn job_less_result_is_decoded_inline_with_its_query_id() -> BigQueryResult<()> {
+    let (spans, _guard) = CapturedSpans::capture();
+    let fake = BigQueryFake::start().await?;
+    fake.query(PEOPLE).bytes_processed(64).returns_rows(
+        |columns| columns.from_type::<Person>(),
+        [person(1), person(2)],
+    )?;
+
+    let (rows, stats) = fake
+        .db()
+        .fluent()
+        .query(PEOPLE)
+        .obj::<Person>()
+        .query_with_stats()
+        .await?;
+
+    assert_eq!(rows, [person(1), person(2)]);
+    assert_eq!(stats.job, None);
+    let query_id = stats.query_id.expect("a job-less result has a query ID");
+    assert_eq!(
+        spans.only("BigQuery Query"),
+        bigquery_fields(&[
+            ("sql_len", &PEOPLE.len().to_string()),
+            ("query_id", query_id.as_str()),
+            ("location", "US"),
+            ("statement_type", "SELECT"),
+            ("bytes_processed", "64"),
+            ("total_rows", "2"),
+            ("route", "inline"),
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dml_has_no_rows() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    let updated = BigQueryDmlStats {
+        inserted: 0,
+        updated: 2,
+        deleted: 0,
+    };
+    fake.query("UPDATE t")
+        .returns_dml(BigQueryStatementType::Update, updated)?;
+
+    let rows: Vec<Person> = fake.db().fluent().query("UPDATE t").obj().query().await?;
+
+    assert_eq!(rows, []);
+    Ok(())
+}
+
+#[tokio::test]
+async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    let deleted = BigQueryDmlStats {
+        inserted: 0,
+        updated: 0,
+        deleted: 1,
+    };
+    fake.query("DELETE t")
+        .returns_dml(BigQueryStatementType::Delete, deleted)?;
+
+    let outcome = fake.db().fluent().query("DELETE t").execute().await?;
+
+    assert_eq!(outcome.job, None);
+    assert!(outcome.query_id.is_some());
+    assert_eq!(outcome.num_dml_affected_rows, Some(1));
+    assert_eq!(outcome.dml_stats, Some(deleted));
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_query_is_the_status_of_the_query_call() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    let refusal = fake.query("SELEC 1").fails(BigQueryFakeFault::status(
+        BigQueryFakeCode::InvalidArgument,
+        "Syntax error: Unexpected identifier \"SELEC\" at [1:1]",
+    ))?;
+
+    match fake.db().fluent().query("SELEC 1").execute().await {
+        Err(BigQueryError::DatabaseError(err)) => {
+            assert!(err.details.contains("SELEC"), "{err}");
+            assert!(!err.retry_possible);
         }
-        Ok(())
+        other => panic!("expected a database error, got {other:?}"),
     }
+    assert_eq!(refusal.calls(), 1);
+    Ok(())
+}
 
-    #[tokio::test]
-    async fn job_less_result_is_decoded_inline_with_its_query_id() -> BigQueryResult<()> {
-        let (spans, _guard) = CapturedSpans::capture();
-        let fake = BigQueryFake::start().await?;
-        fake.query(PEOPLE).bytes_processed(64).returns_rows(
-            |columns| columns.from_type::<Person>(),
-            [person(1), person(2)],
-        )?;
+#[tokio::test]
+async fn job_error_result_is_a_job_error() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    fake.query("SELECT ERROR('boom')")
+        .fails_job(BigQueryFakeJobFailure {
+            reason: "invalidQuery".to_string(),
+            message: "boom".to_string(),
+        })?;
 
-        let (rows, stats) = fake
-            .db()
-            .fluent()
-            .query(PEOPLE)
-            .obj::<Person>()
-            .query_with_stats()
-            .await?;
-
-        assert_eq!(rows, [person(1), person(2)]);
-        assert_eq!(stats.job, None);
-        let query_id = stats.query_id.expect("a job-less result has a query ID");
-        assert_eq!(
-            spans.only("BigQuery Query"),
-            bigquery_fields(&[
-                ("sql_len", &PEOPLE.len().to_string()),
-                ("query_id", query_id.as_str()),
-                ("location", "US"),
-                ("statement_type", "SELECT"),
-                ("bytes_processed", "64"),
-                ("total_rows", "2"),
-                ("route", "inline"),
-            ])
-        );
-        Ok(())
+    match fake
+        .db()
+        .fluent()
+        .query("SELECT ERROR('boom')")
+        .execute()
+        .await
+    {
+        Err(BigQueryError::JobError(err)) => {
+            assert_eq!(err.public.code, "invalidQuery");
+            assert!(err.job.is_some());
+            assert!(err.details.contains("boom"), "{}", err.details);
+            assert_eq!(err.errors.len(), 1);
+            assert_eq!(err.errors[0].reason, "invalidQuery");
+        }
+        other => panic!("expected a job error, got {other:?}"),
     }
+    Ok(())
+}
 
-    #[tokio::test]
-    async fn dml_has_no_rows() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        let updated = BigQueryDmlStats {
-            inserted: 0,
-            updated: 2,
-            deleted: 0,
-        };
-        fake.query("UPDATE t")
-            .returns_dml(BigQueryStatementType::Update, updated)?;
+#[tokio::test]
+async fn base_variant_skips_rows_that_fail_to_decode() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    let rows = [
+        MaybeNamed { id: 1, name: None },
+        MaybeNamed {
+            id: 2,
+            name: Some("Åsa 2".to_string()),
+        },
+    ];
+    fake.query(PEOPLE)
+        .returns_rows(|columns| columns.from_type::<MaybeNamed>(), &rows)?;
+    let people = || fake.db().fluent().query(PEOPLE).obj::<Person>();
 
-        let rows: Vec<Person> = fake.db().fluent().query("UPDATE t").obj().query().await?;
+    let skipped: Vec<Person> = people().stream_query().await?.collect().await;
+    let with_errors: Vec<BigQueryResult<Person>> =
+        people().stream_query_with_errors().await?.collect().await;
 
-        assert_eq!(rows, []);
-        Ok(())
+    assert_eq!(skipped, [person(2)]);
+    match &with_errors[..] {
+        [Err(BigQueryError::DeserializeError(err)), Ok(second)] => {
+            assert_eq!(err.kind, BigQueryCodecErrorKind::NullForNonOption);
+            assert_eq!(err.row, Some(0));
+            assert_eq!(second, &person(2));
+        }
+        other => panic!("expected a row error then a row, got {other:?}"),
     }
+    Ok(())
+}
 
-    #[tokio::test]
-    async fn job_less_dml_reports_its_counts_and_query_id() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        let deleted = BigQueryDmlStats {
-            inserted: 0,
-            updated: 0,
-            deleted: 1,
-        };
-        fake.query("DELETE t")
-            .returns_dml(BigQueryStatementType::Delete, deleted)?;
+#[tokio::test]
+async fn destination_table_query_runs_as_a_job_and_reads_its_table() -> BigQueryResult<()> {
+    const ORDERS_COPY: crate::BigQueryTableId = crate::BigQueryTableId::from_static("orders_copy");
+    let fake = BigQueryFake::start().await?;
+    fake.create_dataset(SHOP);
+    fake.query(PEOPLE).returns_rows(
+        |columns| columns.from_type::<Person>(),
+        [person(1), person(2)],
+    )?;
 
-        let outcome = fake.db().fluent().query("DELETE t").execute().await?;
+    let people: Vec<Person> = fake
+        .db()
+        .fluent()
+        .query(PEOPLE)
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .obj::<Person>()
+        .query()
+        .await?;
+    let batches: Vec<RecordBatch> = fake
+        .db()
+        .fluent()
+        .query(PEOPLE)
+        .destination_table(SHOP.table(ORDERS_COPY))
+        .record_batches()
+        .await?
+        .try_collect()
+        .await?;
 
-        assert_eq!(outcome.job, None);
-        assert!(outcome.query_id.is_some());
-        assert_eq!(outcome.num_dml_affected_rows, Some(1));
-        assert_eq!(outcome.dml_stats, Some(deleted));
-        Ok(())
-    }
+    assert_eq!(people, [person(1), person(2)]);
+    assert_eq!(ids(&batches), [1, 2]);
+    assert_eq!(
+        fake.rows::<Person>(SHOP.table(ORDERS_EXPORT))?,
+        [person(1), person(2)]
+    );
+    Ok(())
+}
 
-    #[tokio::test]
-    async fn failed_query_is_the_status_of_the_query_call() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        let refusal = fake.query("SELEC 1").fails(BigQueryFakeFault::status(
-            BigQueryFakeCode::InvalidArgument,
-            "Syntax error: Unexpected identifier \"SELEC\" at [1:1]",
+#[tokio::test]
+async fn already_existing_other_job_on_a_retry_stays_an_error() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    fake.query("SELECT once")
+        .times(1)
+        .fails(BigQueryFakeFault::status(
+            BigQueryFakeCode::Unavailable,
+            "backend went away",
         ))?;
+    fake.query("SELECT once").fails(BigQueryFakeFault::status(
+        BigQueryFakeCode::AlreadyExists,
+        "Already Exists: Job fake-project:US.bigquery_rs_someone_else",
+    ))?;
 
-        match fake.db().fluent().query("SELEC 1").execute().await {
-            Err(BigQueryError::DatabaseError(err)) => {
-                assert!(err.details.contains("SELEC"), "{err}");
-                assert!(!err.retry_possible);
-            }
-            other => panic!("expected a database error, got {other:?}"),
-        }
-        assert_eq!(refusal.calls(), 1);
-        Ok(())
+    let result = fake
+        .db()
+        .fluent()
+        .query("SELECT once")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .execute()
+        .await;
+
+    assert!(
+        matches!(result, Err(BigQueryError::DataConflictError(_))),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn already_existing_job_on_a_first_attempt_is_a_conflict() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    let taken = fake.query("SELECT once").fails(BigQueryFakeFault::status(
+        BigQueryFakeCode::AlreadyExists,
+        "Already Exists: Job fake-project:US.taken",
+    ))?;
+
+    let result = fake
+        .db()
+        .fluent()
+        .query("SELECT once")
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .execute()
+        .await;
+
+    assert!(
+        matches!(result, Err(BigQueryError::DataConflictError(_))),
+        "{result:?}"
+    );
+    assert_eq!(taken.calls(), 1, "a first attempt is not retried");
+    Ok(())
+}
+
+#[tokio::test]
+async fn dry_run_with_a_destination_is_a_dry_run_job() -> BigQueryResult<()> {
+    let fake = BigQueryFake::start().await?;
+    fake.create_dataset(SHOP);
+    fake.query(PEOPLE)
+        .bytes_processed(1234)
+        .returns_rows(|columns| columns.from_type::<Person>(), [person(1)])?;
+
+    let result = fake
+        .db()
+        .fluent()
+        .query(PEOPLE)
+        .destination_table(SHOP.table(ORDERS_EXPORT))
+        .dry_run()
+        .await?;
+
+    assert_eq!(result.total_bytes_processed, Some(1234));
+    let fields: Vec<String> = result
+        .schema
+        .map(|schema| schema.fields.into_iter().map(|field| field.name).collect())
+        .unwrap_or_default();
+    assert_eq!(fields, ["id", "name"]);
+    let written = fake.rows::<Person>(SHOP.table(ORDERS_EXPORT));
+    assert!(
+        matches!(written, Err(BigQueryError::DataNotFoundError(_))),
+        "a dry run writes no table: {written:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_skipped_row_log_line_names_the_row_and_field_and_not_the_cell() -> BigQueryResult<()> {
+    #[derive(Deserialize, Debug)]
+    enum Plan {
+        Basic,
     }
-
-    #[tokio::test]
-    async fn job_error_result_is_a_job_error() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        fake.query("SELECT ERROR('boom')")
-            .fails_job(BigQueryFakeJobFailure {
-                reason: "invalidQuery".to_string(),
-                message: "boom".to_string(),
-            })?;
-
-        match fake
-            .db()
-            .fluent()
-            .query("SELECT ERROR('boom')")
-            .execute()
-            .await
-        {
-            Err(BigQueryError::JobError(err)) => {
-                assert_eq!(err.public.code, "invalidQuery");
-                assert!(err.job.is_some());
-                assert!(err.details.contains("boom"), "{}", err.details);
-                assert_eq!(err.errors.len(), 1);
-                assert_eq!(err.errors[0].reason, "invalidQuery");
-            }
-            other => panic!("expected a job error, got {other:?}"),
-        }
-        Ok(())
+    #[derive(Deserialize, Debug)]
+    struct Subscription {
+        #[allow(dead_code, reason = "the row only has to decode")]
+        name: Plan,
     }
+    const CELL: &str = "s3cr3t-cell";
+    let fake = BigQueryFake::start().await?;
+    let rows = [
+        Person {
+            id: 1,
+            name: "Basic".to_string(),
+        },
+        Person {
+            id: 2,
+            name: CELL.to_string(),
+        },
+    ];
+    fake.query(PEOPLE)
+        .returns_rows(|columns| columns.from_type::<Person>(), &rows)?;
+    let subscriptions = || fake.db().fluent().query(PEOPLE).obj::<Subscription>();
 
-    #[tokio::test]
-    async fn base_variant_skips_rows_that_fail_to_decode() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        let rows = [
-            MaybeNamed { id: 1, name: None },
-            MaybeNamed {
-                id: 2,
-                name: Some("Åsa 2".to_string()),
-            },
-        ];
-        fake.query(PEOPLE)
-            .returns_rows(|columns| columns.from_type::<MaybeNamed>(), &rows)?;
-        let people = || fake.db().fluent().query(PEOPLE).obj::<Person>();
+    let mut with_errors = subscriptions().stream_query_with_errors().await?;
+    assert!(with_errors.next().await.expect("the first row").is_ok());
+    let err = match with_errors.next().await.expect("the second row") {
+        Err(BigQueryError::DeserializeError(err)) => err,
+        other => panic!("expected a DeserializeError, got {other:?}"),
+    };
+    assert!(err.message.contains(CELL), "{err}");
 
-        let skipped: Vec<Person> = people().stream_query().await?.collect().await;
-        let with_errors: Vec<BigQueryResult<Person>> =
-            people().stream_query_with_errors().await?.collect().await;
-
-        assert_eq!(skipped, [person(2)]);
-        match &with_errors[..] {
-            [Err(BigQueryError::DeserializeError(err)), Ok(second)] => {
-                assert_eq!(err.kind, BigQueryCodecErrorKind::NullForNonOption);
-                assert_eq!(err.row, Some(0));
-                assert_eq!(second, &person(2));
-            }
-            other => panic!("expected a row error then a row, got {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn destination_table_query_runs_as_a_job_and_reads_its_table() -> BigQueryResult<()> {
-        const ORDERS_COPY: crate::BigQueryTableId =
-            crate::BigQueryTableId::from_static("orders_copy");
-        let fake = BigQueryFake::start().await?;
-        fake.create_dataset(SHOP);
-        fake.query(PEOPLE).returns_rows(
-            |columns| columns.from_type::<Person>(),
-            [person(1), person(2)],
-        )?;
-
-        let people: Vec<Person> = fake
-            .db()
-            .fluent()
-            .query(PEOPLE)
-            .destination_table(SHOP.table(ORDERS_EXPORT))
-            .obj::<Person>()
-            .query()
-            .await?;
-        let batches: Vec<RecordBatch> = fake
-            .db()
-            .fluent()
-            .query(PEOPLE)
-            .destination_table(SHOP.table(ORDERS_COPY))
-            .record_batches()
-            .await?
-            .try_collect()
-            .await?;
-
-        assert_eq!(people, [person(1), person(2)]);
-        assert_eq!(ids(&batches), [1, 2]);
-        assert_eq!(
-            fake.rows::<Person>(SHOP.table(ORDERS_EXPORT))?,
-            [person(1), person(2)]
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn already_existing_other_job_on_a_retry_stays_an_error() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        fake.query("SELECT once")
-            .times(1)
-            .fails(BigQueryFakeFault::status(
-                BigQueryFakeCode::Unavailable,
-                "backend went away",
-            ))?;
-        fake.query("SELECT once").fails(BigQueryFakeFault::status(
-            BigQueryFakeCode::AlreadyExists,
-            "Already Exists: Job fake-project:US.bigquery_rs_someone_else",
-        ))?;
-
-        let result = fake
-            .db()
-            .fluent()
-            .query("SELECT once")
-            .destination_table(SHOP.table(ORDERS_EXPORT))
-            .execute()
-            .await;
-
-        assert!(
-            matches!(result, Err(BigQueryError::DataConflictError(_))),
-            "{result:?}"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn already_existing_job_on_a_first_attempt_is_a_conflict() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        let taken = fake.query("SELECT once").fails(BigQueryFakeFault::status(
-            BigQueryFakeCode::AlreadyExists,
-            "Already Exists: Job fake-project:US.taken",
-        ))?;
-
-        let result = fake
-            .db()
-            .fluent()
-            .query("SELECT once")
-            .destination_table(SHOP.table(ORDERS_EXPORT))
-            .execute()
-            .await;
-
-        assert!(
-            matches!(result, Err(BigQueryError::DataConflictError(_))),
-            "{result:?}"
-        );
-        assert_eq!(taken.calls(), 1, "a first attempt is not retried");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn dry_run_with_a_destination_is_a_dry_run_job() -> BigQueryResult<()> {
-        let fake = BigQueryFake::start().await?;
-        fake.create_dataset(SHOP);
-        fake.query(PEOPLE)
-            .bytes_processed(1234)
-            .returns_rows(|columns| columns.from_type::<Person>(), [person(1)])?;
-
-        let result = fake
-            .db()
-            .fluent()
-            .query(PEOPLE)
-            .destination_table(SHOP.table(ORDERS_EXPORT))
-            .dry_run()
-            .await?;
-
-        assert_eq!(result.total_bytes_processed, Some(1234));
-        let fields: Vec<String> = result
-            .schema
-            .map(|schema| schema.fields.into_iter().map(|field| field.name).collect())
-            .unwrap_or_default();
-        assert_eq!(fields, ["id", "name"]);
-        let written = fake.rows::<Person>(SHOP.table(ORDERS_EXPORT));
-        assert!(
-            matches!(written, Err(BigQueryError::DataNotFoundError(_))),
-            "a dry run writes no table: {written:?}"
-        );
-        Ok(())
-    }
+    let (events, _guard) = CapturedEvents::capture();
+    let decoded: Vec<Subscription> = subscriptions().stream_query().await?.collect().await;
+    assert_eq!(decoded.len(), 1);
+    let logged = events.at(tracing::Level::ERROR);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    let fields = &logged[0];
+    assert_eq!(
+        fields.get("kind").map(String::as_str),
+        Some(err.kind.code())
+    );
+    assert_eq!(
+        fields.get("row"),
+        Some(&err.row.expect("a decoded row has an index").to_string())
+    );
+    assert_eq!(fields.get("path"), Some(&err.path));
+    assert!(
+        fields.values().all(|value| !value.contains(CELL)),
+        "{fields:?}"
+    );
+    Ok(())
 }
