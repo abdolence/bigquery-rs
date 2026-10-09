@@ -65,7 +65,7 @@ use bigquery::testing::BigQueryFake;
 let fake = BigQueryFake::start().await?;
 let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
 let rule = fake
-    .query(ORDERS_OF)
+    .when_query_match(ORDERS_OF)
     .param("customer", "Alice")
     .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
 
@@ -78,8 +78,7 @@ assert_eq!(rule.calls(), 1);
 The rows are any `Serialize` type, and their columns are declared as a table schema declares them,
 here with `|columns| columns.from_type::<Order>()`. A rule matches:
 
-- the SQL text exactly, with no whitespace or case folding. `query_matching(|sql| ...)` takes a
-  predicate over the text for looser matching;
+- the SQL text exactly, with no whitespace or case folding;
 - a statement from `sql_file!` by the text of its file;
 - any parameters, unless the rule declares some with `.param(..)`, `.params(..)` or
   `.positional_param(..)`. Then the call's named parameters must equal them as a set, and its
@@ -91,6 +90,43 @@ them. Besides `returns_rows`, a rule answers with `returns_dml` for a DML statem
 changed, `returns_statement` for DDL, `fails` for a refused call and `fails_job` for a job that
 fails once it runs. One rule answers every terminal of a call: the rows for `query()`, the stats
 for `execute()` and the schema for `dry_run()`, with `.bytes_processed(..)` if set.
+
+`fake.when_query(|query| ...)` matches with your own code instead of the SQL text. The closure
+gets the call's SQL and its parameters, read back as any `Deserialize` type:
+
+```rust
+# use bigquery::*;
+# use serde::{Deserialize, Serialize};
+# #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+# struct Order { id: i64, customer: String, total: f64 }
+# const ORDERS_OF: &str = "SELECT id, customer, total FROM shop.orders WHERE customer = @customer";
+# async fn orders_of(db: &BigQueryDb, customer: &str) -> BigQueryResult<Vec<Order>> {
+#     db.fluent().query(ORDERS_OF).param("customer", customer).obj().query().await
+# }
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> BigQueryResult<()> {
+use bigquery::testing::BigQueryFake;
+
+let fake = BigQueryFake::start().await?;
+let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
+let rule = fake
+    .when_query(|query| {
+        query.sql().contains("FROM shop.orders")
+            && query.param::<String>("customer").is_some_and(|name| name.starts_with('A'))
+    })
+    .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
+
+assert_eq!(orders_of(fake.db(), "Alice").await?, alice);
+assert_eq!(rule.calls(), 1);
+# Ok(())
+# }
+```
+
+`query.param::<T>(name)` reads a named parameter, with the name compared ignoring case as
+BigQuery compares it, and `query.positional_param::<T>(index)` a positional one, the first at 0.
+Both return `None` when the call has no such parameter or its value does not read as `T`. A STRUCT
+reads as a struct or a map, an ARRAY as a `Vec`, and a RANGE as `BigQueryRange`. `.param(..)` and
+`.positional_param(..)` narrow a `when_query` rule as they narrow a SQL one.
 
 ## Tables, reads and writes
 
@@ -164,10 +200,11 @@ BigQuery makes them visible for each write mode:
 - a pending stream: at its commit, and never without one.
 
 A table read is served the table's rows, projected to the selected columns. The fake evaluates
-no filter, so a read with a row restriction needs a rule, `fake.read(table).row_restriction(..)`,
-with the rows it returns. `fake.reject_rows::<T>(table, reason, |row| ...)` fails each append
-request that has a row the predicate accepts, with a row error per such row, and writes nothing
-of that request, as BigQuery does. A row written from a serde type fails the same way when it has
+no filter, so a read with a row restriction needs a rule,
+`fake.when_read(table).row_restriction(..)`, with the rows it returns.
+`fake.when_rows_rejected::<T>(table, reason, |row| ...)` fails each append request that has a row
+the predicate accepts, with a row error per such row, and writes nothing of that request, as
+BigQuery does. A row written from a serde type fails the same way when it has
 a value beyond the precision of its `NUMERIC(p,s)` or `BIGNUMERIC(p,s)` column, and a value with
 more decimal places than the scale is rounded.
 
@@ -179,8 +216,8 @@ the fake's state, and the admin calls are served from it.
 
 ## Faults and retries
 
-A query rule's `fails` scripts the failure of a query. `fake.fault(rpc).fails(..)` does the same
-for every other RPC, and `.on_table(..)` narrows it to the calls on one table. A fault answers
+A query rule's `fails` scripts the failure of a query. `fake.when_fault(rpc).fails(..)` does the
+same for every other RPC, and `.on_table(..)` narrows it to the calls on one table. A fault answers
 before every rule and before the tables, as one of:
 
 - `BigQueryFakeFault::status(code, message)`, a gRPC status, which the client maps as it maps
@@ -211,13 +248,13 @@ let fake = BigQueryFake::start().await?;
 let alice = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
 let unavailable =
     || BigQueryFakeFault::status(BigQueryFakeCode::Unavailable, "backend went away");
-let lost = fake.query(ORDERS_OF).times(1).fails(unavailable())?;
+let lost = fake.when_query_match(ORDERS_OF).times(1).fails(unavailable())?;
 let answer = fake
-    .query(ORDERS_OF)
+    .when_query_match(ORDERS_OF)
     .param("customer", "Alice")
     .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
 let outage = fake
-    .query(ORDERS_OF)
+    .when_query_match(ORDERS_OF)
     .param("customer", "Bob")
     .fails(unavailable())?;
 
@@ -251,7 +288,7 @@ let fake = BigQueryFake::start().await?;
 fake.table(SHOP.table(ORDERS), |columns| columns.from_type::<Order>())
     .create()?;
 let lost = fake
-    .fault(BigQueryFakeRpc::AppendRows)
+    .when_fault(BigQueryFakeRpc::AppendRows)
     .times(1)
     .fails(BigQueryFakeFault::ConnectionDropped)?;
 let orders = vec![Order { id: 1, customer: "Alice".into(), total: 120.0 }];
@@ -295,7 +332,7 @@ under test swallows its error:
 use bigquery::testing::BigQueryFake;
 
 let fake = BigQueryFake::start().await?;
-fake.query(ORDERS_OF)
+fake.when_query_match(ORDERS_OF)
     .param("customer", "Alice")
     .returns_rows(|columns| columns.from_type::<Order>(), Vec::<Order>::new())?;
 
@@ -365,7 +402,7 @@ fn seed(fake: &bigquery::testing::BigQueryFake) -> BigQueryResult<()> {
     fake.table(SHOP.table(ORDERS), |columns| columns.from_type::<Order>())
         .rows(&alice)
         .create()?;
-    fake.query(ORDERS_OF)
+    fake.when_query_match(ORDERS_OF)
         .returns_rows(|columns| columns.from_type::<Order>(), &alice)?;
     Ok(())
 }
