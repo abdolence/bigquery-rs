@@ -454,11 +454,12 @@ impl FakeState {
     }
 
     /// Writes a query's result into its destination `table` as the job's `write_disposition`
-    /// says, creating the table if it does not exist.
+    /// says, creating the table in its existing dataset if it does not exist.
     ///
     /// # Errors
-    /// `AlreadyExists` for `WRITE_EMPTY` into a table that holds rows, and `InvalidArgument`
-    /// for a result whose columns differ from those of the table it is appended to.
+    /// `NotFound` for a table whose dataset does not exist, `AlreadyExists` for `WRITE_EMPTY`
+    /// into a table that holds rows, and `InvalidArgument` for a result whose columns differ
+    /// from those of the table it is appended to.
     fn write_query_result(
         &mut self,
         table: &TableKey,
@@ -468,6 +469,9 @@ impl FakeState {
     ) -> Result<(), Status> {
         let generation = self.next_generation();
         let Some(existing) = self.tables.get_mut(table) else {
+            if !self.datasets.contains_key(&table.dataset) {
+                return Err(table.dataset.not_found());
+            }
             let created = FakeTable::new(schema.clone(), vec![rows], NonZeroUsize::MIN, generation);
             return self.create_table(table.clone(), created).map_err(|err| {
                 Status::internal(format!("bigquery fake: the destination table: {err}"))
@@ -605,6 +609,8 @@ mod tests {
         BigQueryJobType, BigQueryResult, BigQuerySchemaColumns, BigQuerySchemaColumnsBuilder,
         BigQueryStatementType, BigQueryTableId,
     };
+    use arrow_array::RecordBatch;
+    use futures::TryStreamExt;
     use gcloud_sdk::google::cloud::bigquery::v2::{PostQueryRequest, QueryRequest};
     use serde::{Deserialize, Serialize};
 
@@ -743,6 +749,7 @@ mod tests {
     #[tokio::test]
     async fn a_destination_table_is_written_by_its_disposition() -> BigQueryResult<()> {
         let fake = BigQueryFake::start().await?;
+        fake.create_dataset(SHOP);
         fake.query(BEST_ORDERS)
             .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
         let into = || fake.db().fluent().query(BEST_ORDERS);
@@ -765,6 +772,49 @@ mod tests {
             .execute()
             .await?;
         assert_eq!(fake.rows::<Order>(SHOP.table(TOP_ORDERS))?, best_orders());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_destination_in_a_missing_dataset_is_not_found() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        fake.query(BEST_ORDERS)
+            .returns_rows(|columns| columns.from_type::<Order>(), best_orders())?;
+
+        let refused = fake
+            .db()
+            .fluent()
+            .query(BEST_ORDERS)
+            .destination_table(SHOP.table(TOP_ORDERS))
+            .execute()
+            .await;
+
+        assert!(
+            matches!(refused, Err(BigQueryError::DataNotFoundError(_))),
+            "{refused:?}"
+        );
+        let table = fake.rows::<Order>(SHOP.table(TOP_ORDERS));
+        assert!(
+            matches!(table, Err(BigQueryError::DataNotFoundError(_))),
+            "{table:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rows_beyond_the_inline_limit_read_back_through_the_job_table() -> BigQueryResult<()> {
+        let fake = BigQueryFake::start().await?;
+        let orders = vec![order(1, "Alice"), order(2, "Bob"), order(3, "Carol")];
+        fake.query(BEST_ORDERS)
+            .returns_rows(|columns| columns.from_type::<Order>(), &orders)?;
+        let query = || fake.db().fluent().query(BEST_ORDERS).inline_rows_limit(1);
+
+        let rows: Vec<Order> = query().obj().query().await?;
+        let batches: Vec<RecordBatch> = query().record_batches().await?.try_collect().await?;
+
+        assert_eq!(rows, orders);
+        let batch_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        assert_eq!(batch_rows, orders.len());
         Ok(())
     }
 
