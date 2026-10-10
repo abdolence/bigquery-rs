@@ -2,9 +2,11 @@
 //! interleavings the protocol must survive are reproduced exactly rather than raced for. Outside
 //! tests a point is a no-op.
 
-/// A point one commit attempt passes.
+/// A point one commit attempt, or one load, passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CommitPoint {
+    /// A load has read the newest pointer, a live one, and not yet the metadata it names.
+    PointerRead,
     /// The attempt has loaded the pointer it builds on and has written nothing.
     Loaded,
     /// The attempt's pointer create succeeded and its predecessor is not read back yet.

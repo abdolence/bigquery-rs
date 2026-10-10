@@ -272,12 +272,8 @@ impl EngineCatalog {
         }
     }
 
-    /// Drops the table with a tombstone pointer, and returns the table as it was dropped and the
-    /// tombstone's version.
-    pub(crate) async fn drop_table(
-        &self,
-        table: &TableRef,
-    ) -> Result<(LoadedTable, PointerVersion), EngineError> {
+    /// Drops the table with a tombstone pointer, and returns the table as it was dropped.
+    pub(crate) async fn drop_table(&self, table: &TableRef) -> Result<LoadedTable, EngineError> {
         let lock = self.locks.table(table);
         let _guard = lock.lock().await;
         let mut retry = Retry::new(table, self.settings.commit_retry_deadline);
@@ -286,7 +282,7 @@ impl EngineCatalog {
             let attempt = retry.start();
             let loaded = self.load_for_attempt(table, attempt, &mut identity).await?;
             match self.attempt_drop(table, &loaded).await? {
-                Attempted::Landed(tombstone) => return Ok((loaded, tombstone)),
+                Attempted::Landed(()) => return Ok(loaded),
                 Attempted::Lost => retry.lost().await?,
             }
         }
@@ -451,7 +447,7 @@ impl EngineCatalog {
         &self,
         table: &TableRef,
         loaded: &LoadedTable,
-    ) -> Result<Attempted<PointerVersion>, EngineError> {
+    ) -> Result<Attempted<()>, EngineError> {
         let body = PointerBody::Tombstone(Tombstone {
             previous: loaded.metadata_location().to_string(),
             dropped_at_ms: now_ms(),
@@ -465,7 +461,7 @@ impl EngineCatalog {
         self.remember(table, None);
         info!(%table, pointer_version = head.version.number(), "Dropped the table.");
         self.prune(table).await;
-        Ok(Attempted::Landed(head.version))
+        Ok(Attempted::Landed(()))
     }
 
     /// Creates `body` as the successor of `base` and reads `base` back. `written` is the
@@ -672,29 +668,6 @@ impl EngineCatalog {
             debug!(%table, ?pruned, "Pruned catalog pointers.");
         }
         Ok(())
-    }
-
-    /// Deletes every pointer of `table` below `version`, bottom-up, stopping at the first
-    /// failure, which is logged: the pruning of later commits removes the rest.
-    pub(super) async fn delete_pointers_below(&self, table: &TableRef, version: PointerVersion) {
-        let dir = Self::pointer_dir(table);
-        let mut below: Vec<PointerVersion> = match self.pointer_versions(&dir).await {
-            Ok(versions) => versions
-                .into_iter()
-                .filter(|lower| *lower < version)
-                .collect(),
-            Err(err) => {
-                warn!(%table, %err, "Listing the pointers of a dropped table failed.");
-                return;
-            }
-        };
-        below.sort();
-        for lower in below {
-            if let Err(err) = self.backend.delete(&dir.join(lower.object_name())).await {
-                warn!(%table, %err, "Deleting a pointer of a dropped table failed.");
-                return;
-            }
-        }
     }
 
     /// Deletes the file at an Iceberg location, logging a failure: its callers delete files

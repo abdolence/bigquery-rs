@@ -474,3 +474,88 @@ async fn a_create_dropped_before_its_read_back_landed_and_stays_dropped() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_purged_before_its_read_back_landed_and_stays_dropped() {
+    let root = TempDir::new().expect("a temporary root");
+    let creator = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    let other = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&other).await;
+    let metadata = new_orders(&creator);
+    let mut created = creator.hooks.hold(CommitPoint::Created);
+    let create = tokio::spawn({
+        let creator = Arc::clone(&creator);
+        async move { creator.create_table(&orders(), metadata).await }
+    });
+    created.reached().await;
+    other
+        .purge(&orders())
+        .await
+        .expect("the other catalog purges the new table");
+    created.release();
+
+    let landed = create
+        .await
+        .expect("the creator runs")
+        .expect("the create landed");
+    assert_eq!(landed.version().number(), 0);
+    assert_eq!(pointer_versions(&other).await, BTreeSet::from([0, 1]));
+    let outcome = other.reload(&orders()).await;
+    assert!(
+        matches!(outcome, Err(EngineError::NotFound { .. })),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cached_table_is_not_served_once_another_catalog_purged_it() {
+    let root = TempDir::new().expect("a temporary root");
+    let reader = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    let other = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&other).await;
+    other
+        .create_table(&orders(), new_orders(&other))
+        .await
+        .expect("the table is created");
+    let cached = reader.load(&orders()).await.expect("the table loads");
+    assert_eq!(cached.version().number(), 0);
+    set_by_engine(&other, "late")
+        .await
+        .expect("an update commits");
+    other.purge(&orders()).await.expect("the table is purged");
+
+    let outcome = reader.load(&orders()).await;
+    assert!(
+        matches!(outcome, Err(EngineError::NotFound { .. })),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_load_whose_pointer_s_metadata_is_purged_under_it_finds_no_table() {
+    let root = TempDir::new().expect("a temporary root");
+    let reader = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    let other = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&other).await;
+    other
+        .create_table(&orders(), new_orders(&other))
+        .await
+        .expect("the table is created");
+    let mut read = reader.hooks.hold(CommitPoint::PointerRead);
+    let load = tokio::spawn({
+        let reader = Arc::clone(&reader);
+        async move { reader.reload(&orders()).await }
+    });
+    read.reached().await;
+    other.purge(&orders()).await.expect("the table is purged");
+    read.release();
+
+    let outcome = load.await.expect("the reader runs");
+    let Err(EngineError::NotFound {
+        what: Resource::Table(missing),
+    }) = outcome
+    else {
+        panic!("the table is not found, not {outcome:?}");
+    };
+    assert_eq!(missing, orders());
+}

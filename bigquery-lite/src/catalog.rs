@@ -18,7 +18,7 @@ mod pointer;
 
 pub(crate) use commit::{Change, EngineCommit};
 pub(crate) use datasets::{DatasetEntry, NewDataset};
-use hooks::CommitHooks;
+use hooks::{CommitHooks, CommitPoint};
 pub(crate) use pointer::PointerVersion;
 use pointer::{PointerBody, PointerHead};
 
@@ -272,6 +272,7 @@ impl EngineCatalog {
                 self.remember(table, None);
                 return Ok(NameState::Dropped(head));
             };
+            self.hooks.reach(CommitPoint::PointerRead).await;
             // Gone: it fell off the metadata log of a newer commit, so a newer pointer exists.
             let Some(metadata) = self.read_metadata(&live.metadata_location).await? else {
                 continue;
@@ -359,15 +360,18 @@ impl EngineCatalog {
             .await
     }
 
-    /// Drops `table` with a tombstone, deletes its files, then every pointer below the
-    /// tombstone.
+    /// Drops `table` with a tombstone and deletes its data and metadata files.
+    ///
+    /// The pointers below the tombstone stay, naming files that are gone, and leave only
+    /// through the pruning: a pointer deleted before its successor aged would let a cached
+    /// load's successor probe, or a commit's read-back of its predecessor, find the name free
+    /// and take the dropped table for live.
     ///
     /// # Errors
     /// [`EngineError::NotFound`] when the table does not exist, and the commit loop's errors.
     pub(crate) async fn purge(&self, table: &TableRef) -> Result<(), EngineError> {
-        let (dropped, tombstone) = self.drop_table(table).await?;
+        let dropped = self.drop_table(table).await?;
         iceberg::drop_table_data(&dropped.table).await?;
-        self.delete_pointers_below(table, tombstone).await;
         Ok(())
     }
 
