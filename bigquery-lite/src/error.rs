@@ -194,7 +194,9 @@ impl EngineError {
 
 /// The status a request that failed with this error answers: the iceberg kinds map as their
 /// names say, a commit that gave up is `Aborted`, which the client retries, and a table that
-/// lost a file is `DataLoss`, which it does not.
+/// lost a file is `DataLoss`, which it does not. A commit whose outcome is unknown is `Unknown`,
+/// which the `bigquery` client does not retry as long as the message does not read as a
+/// transport error, so a commit that may have landed is never sent again.
 impl From<&EngineError> for Status {
     fn from(error: &EngineError) -> Self {
         let code = match error {
@@ -211,9 +213,8 @@ impl From<&EngineError> for Status {
                 iceberg::ErrorKind::PreconditionFailed => Code::FailedPrecondition,
                 _ => Code::Internal,
             },
-            EngineError::Storage { .. }
-            | EngineError::Io(_)
-            | EngineError::CommitOutcomeUnknown { .. } => Code::Internal,
+            EngineError::Storage { .. } | EngineError::Io(_) => Code::Internal,
+            EngineError::CommitOutcomeUnknown { .. } => Code::Unknown,
             EngineError::MissingMetadata { .. } => Code::DataLoss,
             EngineError::Unsupported { .. } => Code::Unimplemented,
             EngineError::NotFound { .. } => Code::NotFound,

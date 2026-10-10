@@ -5,12 +5,20 @@
 use super::hooks::CommitPoint;
 use super::*;
 use crate::ids::Location;
+use crate::services::{Route, Services};
 use crate::storage::LocalBackend;
+use bigquery::errors::BigQueryError;
+use bigquery::gcloud_sdk::google_cloud_auth::credentials::anonymous;
+use bigquery::{
+    BigQueryDatasetId, BigQueryDbOptions, BigQueryLabels, BigQueryTableId,
+    BigQueryTableSchemaBuilder,
+};
 use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::TableUpdate;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 
 const PROJECT: &str = "lite-project";
@@ -628,6 +636,96 @@ async fn a_commit_whose_read_back_fails_has_an_unknown_outcome() {
         panic!("the outcome is unknown, not {outcome:?}");
     };
     assert_eq!(pointer_version, 1);
+}
+
+/// `catalog` served on a loopback port, and the number of `PatchTable` calls that reached it.
+async fn serve_counting_patches(
+    catalog: &Arc<EngineCatalog>,
+) -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("a loopback port binds");
+    let addr = listener.local_addr().expect("the listener has an address");
+    let patches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&patches);
+    let count = tower::util::MapRequestLayer::new(
+        move |request: tonic::codegen::http::Request<tonic::body::Body>| {
+            if request.uri().path().ends_with("/PatchTable") {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            request
+        },
+    );
+    let routes = Services::new(Arc::clone(catalog), Route::Tcp).routes();
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .layer(count)
+            .add_routes(routes)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .expect("the catalog serves");
+    });
+    (addr, patches, server)
+}
+
+/// `orders` as the client declares it, with a label when `labelled`.
+fn declared_orders(db: &bigquery::BigQueryDb, labelled: bool) -> BigQueryTableSchemaBuilder<'_> {
+    let labels: BigQueryLabels = if labelled {
+        [("stage", "test")].into_iter().collect()
+    } else {
+        BigQueryLabels::default()
+    };
+    db.fluent()
+        .schema()
+        .table(BigQueryDatasetId::from_static(DATASET).table(BigQueryTableId::from_static(ORDERS)))
+        .columns(|columns| columns.fields([columns.field("order_id").int64().required()]))
+        .labels(labels)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_sends_a_commit_with_an_unknown_outcome_once() {
+    let root = TempDir::new().expect("a temporary root");
+    let catalog = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&catalog).await;
+    let (addr, patches, server) = serve_counting_patches(&catalog).await;
+    let endpoint = url::Url::parse(&format!("http://{addr}")).expect("a loopback URL");
+    let options = BigQueryDbOptions::new(PROJECT.to_string())
+        .with_bigquery_api_url(endpoint.clone())
+        .with_bigquery_storage_api_url(endpoint);
+    let db = bigquery::BigQueryDb::with_options_auth(options, anonymous::Builder::new().build())
+        .await
+        .expect("the client connects");
+    declared_orders(&db, false)
+        .sync()
+        .await
+        .expect("the table is created");
+
+    let mut created = catalog.hooks.hold(CommitPoint::Created);
+    let patch = tokio::spawn(async move { declared_orders(&db, true).sync().await });
+    created.reached().await;
+    let first = root
+        .path()
+        .join("_bigquery_lite/catalog")
+        .join(PROJECT)
+        .join(DATASET)
+        .join(ORDERS)
+        .join(PointerVersion::FIRST.object_name());
+    std::fs::remove_file(&first).expect("v0 is removed");
+    std::fs::create_dir(&first).expect("a directory unreadable as v0 takes its name");
+    created.release();
+
+    let outcome = patch.await.expect("the sync runs");
+    server.abort();
+    assert_eq!(patches.load(Ordering::SeqCst), 1);
+    let Err(BigQueryError::DatabaseError(error)) = outcome else {
+        panic!("the sync fails with a database error, not {outcome:?}");
+    };
+    assert_eq!(error.public.code, format!("{:?}", tonic::Code::Unknown));
+    assert!(!error.retry_possible);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
