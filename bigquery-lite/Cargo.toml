@@ -1,0 +1,49 @@
+[package]
+name = "bigquery-lite"
+version = "0.1.0"
+authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
+edition = "2021"
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "A lightweight BigQuery engine over Apache Iceberg tables that serves the BigQuery gRPC APIs"
+homepage = "https://bigquery-rust.abdolence.dev"
+repository = "https://github.com/abdolence/bigquery-rs"
+keywords = ["bigquery", "iceberg", "embedded", "server"]
+categories = ["database-implementations"]
+# The generated server traits are committed, so a build needs neither the protos nor `protoc`.
+include = ["Cargo.toml", "src/**/*.rs"]
+
+[lib]
+name = "bigquery_lite"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+gcloud-sdk.workspace = true
+hyper-util.workspace = true
+iceberg.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+tower.workspace = true
+tracing.workspace = true
+typetag.workspace = true
+unicode-properties.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+bigquery.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

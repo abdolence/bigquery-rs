@@ -53,3 +53,14 @@ jobs:
       - name: 'Run all tests'
         run: cargo test --all-features
         if: github.ref == 'refs/heads/master'
+  msrv:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - name: 'Building the workspace on the minimum supported Rust version'
+        run: cargo build --workspace --all-features
+      - name: 'Running the lib tests on the minimum supported Rust version'
+        run: cargo test --workspace --lib --all-features

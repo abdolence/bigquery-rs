@@ -3,7 +3,7 @@ name = "bigquery"
 version = "0.9.0"
 authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
 edition = "2021"
-rust-version = "1.91"
+rust-version.workspace = true
 license = "Apache-2.0"
 description = "Library provides a simple API for Google BigQuery based on the gRPC Storage Read/Write and v2 APIs"
 homepage = "https://bigquery-rust.abdolence.dev"
@@ -15,6 +15,46 @@ readme = "README.md"
 # The published crate carries the library, the README, the licence, the book's pages and the
 # `.sql` files its doctests embed, and nothing else from the repository.
 include = ["Cargo.toml", "src/**/*.rs", "src/**/*.sql", "README.md", "LICENSE", "docs/src/**/*.md"]
+
+[workspace]
+members = ["bigquery-lite"]
+exclude = ["bench-compare"]
+
+[workspace.package]
+# One MSRV for every crate of the workspace: the engine's, which its storage and table-format
+# dependencies set.
+rust-version = "1.94.1"
+
+# Versions of the engine's dependencies. The client's own entries move here when its
+# dependencies are next rewritten, so that every shared version is declared once.
+[workspace.dependencies]
+bigquery = { path = "." }
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+gcloud-sdk = { version = "0.32.5", default-features = false, features = ["google-cloud-bigquery-v2", "google-cloud-bigquery-storage-v1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+iceberg = "0.10.1"
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "io-util"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel"] }
+tonic-prost = "0.14"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+typetag = "0.2"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+mod_module_files = "deny"
 
 [badges]
 maintenance = { status = "actively-developed" }
