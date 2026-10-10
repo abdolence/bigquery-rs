@@ -17,7 +17,7 @@
 //! | DATETIME | `timestamp` | `Timestamp(Microsecond, None)` |
 //! | TIMESTAMP | `timestamptz` | `Timestamp(Microsecond, "+00:00")` |
 //! | GEOGRAPHY, JSON | `string` | `Utf8` |
-//! | RANGE<T> | `struct<start T, end T>` | `Struct` |
+//! | `RANGE<T>` | `struct<start T, end T>` | `Struct` |
 //! | STRUCT | `struct` | `Struct` |
 //! | REPEATED T | `list<T>`, the element required | `List` |
 //!

@@ -36,8 +36,13 @@ jobs:
         if: github.ref == 'refs/heads/master'
       - name: 'Checking formatting and clippy'
         run: |
-          cargo fmt -- --check
+          cargo fmt --all -- --check
           cargo clippy --all-targets --all-features -- -Dwarnings
+      - name: 'Checking, documenting and testing the engine'
+        run: |
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+          cargo test -p bigquery-lite --all-targets --all-features
       - name: 'Checking documentation'
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
       - name: 'Compiling the book examples'
