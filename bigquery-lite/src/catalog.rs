@@ -92,7 +92,10 @@ enum NameState {
 #[derive(Debug)]
 struct Cached {
     loaded: LoadedTable,
-    filled: Instant,
+    /// A time at which the pointer was known to be the newest, no later than the listing or
+    /// the create that showed it: the cache's age, and the successor probe's soundness, count
+    /// from here.
+    observed: Instant,
 }
 
 /// The in-process locks: a table's commits run one at a time, and a dataset's tables are
@@ -224,34 +227,40 @@ impl EngineCatalog {
         let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         cache
             .get(table)
-            .map(|cached| (cached.loaded.clone(), cached.filled.elapsed()))
+            .map(|cached| (cached.loaded.clone(), cached.observed.elapsed()))
     }
 
-    fn remember(&self, table: &TableRef, loaded: Option<&LoadedTable>) {
+    /// Caches `loaded`, whose pointer was the newest at `observed`.
+    fn remember(&self, table: &TableRef, loaded: &LoadedTable, observed: Instant) {
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
-        match loaded {
-            Some(loaded) => {
-                cache.insert(
-                    table.clone(),
-                    Cached {
-                        loaded: loaded.clone(),
-                        filled: Instant::now(),
-                    },
-                );
-            }
-            None => {
-                cache.remove(table);
-            }
-        }
+        cache.insert(
+            table.clone(),
+            Cached {
+                loaded: loaded.clone(),
+                observed,
+            },
+        );
+    }
+
+    fn forget(&self, table: &TableRef) {
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.remove(table);
     }
 
     /// What the name holds now: the newest pointer by a listing, and the metadata it names.
+    ///
+    /// # Errors
+    /// [`EngineError::MissingMetadata`] when the newest pointer names a missing metadata file
+    /// on two listings in a row: a file that fell off the log of a newer commit, or that a
+    /// purge deleted after its tombstone, shows a newer pointer on the second.
     async fn load_name(&self, table: &TableRef) -> Result<NameState, EngineError> {
         let dir = Self::pointer_dir(table);
+        let mut missing = None;
         for _ in 0..LOAD_ATTEMPTS {
+            let observed = Instant::now();
             let newest = self.pointer_versions(&dir).await?.into_iter().max();
             let Some(version) = newest else {
-                self.remember(table, None);
+                self.forget(table);
                 return Ok(NameState::Empty);
             };
             // Gone between the listing and the read: only a purge or a sweep deletes the newest.
@@ -269,17 +278,23 @@ impl EngineCatalog {
                 )
             })?;
             let PointerBody::Live(live) = &head.body else {
-                self.remember(table, None);
+                self.forget(table);
                 return Ok(NameState::Dropped(head));
             };
             self.hooks.reach(CommitPoint::PointerRead).await;
-            // Gone: it fell off the metadata log of a newer commit, so a newer pointer exists.
             let Some(metadata) = self.read_metadata(&live.metadata_location).await? else {
+                if missing.replace(version) == Some(version) {
+                    return Err(EngineError::MissingMetadata {
+                        what: Resource::Table(table.clone()),
+                        pointer_version: version.number(),
+                        metadata_location: live.metadata_location.clone(),
+                    });
+                }
                 continue;
             };
             let location = live.metadata_location.clone();
             let loaded = self.loaded_table(table, head, metadata, location)?;
-            self.remember(table, Some(&loaded));
+            self.remember(table, &loaded, observed);
             return Ok(NameState::Live(Box::new(loaded)));
         }
         Err(EngineError::Aborted {

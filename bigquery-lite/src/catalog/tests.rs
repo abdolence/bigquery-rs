@@ -559,3 +559,106 @@ async fn a_load_whose_pointer_s_metadata_is_purged_under_it_finds_no_table() {
     };
     assert_eq!(missing, orders());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cache_entry_ages_from_before_the_load_that_filled_it() {
+    let root = TempDir::new().expect("a temporary root");
+    let min_age = Duration::from_secs(2);
+    let reader = catalog(root.path(), settings(min_age));
+    let other = catalog(root.path(), settings(min_age));
+    create_dataset(&other).await;
+    other
+        .create_table(&orders(), new_orders(&other))
+        .await
+        .expect("the table is created");
+    let mut read = reader.hooks.hold(CommitPoint::PointerRead);
+    let first = tokio::spawn({
+        let reader = Arc::clone(&reader);
+        async move { reader.load(&orders()).await }
+    });
+    read.reached().await;
+    commit_many(&other, "early", 2, Duration::ZERO).await;
+    tokio::time::sleep(min_age + Duration::from_millis(100)).await;
+    set_by_engine(&other, "late")
+        .await
+        .expect("an update commits");
+    assert_eq!(pointer_versions(&other).await, BTreeSet::from([2, 3]));
+    read.release();
+    let first = first
+        .await
+        .expect("the reader runs")
+        .expect("the table loads");
+    assert_eq!(first.version().number(), 0);
+
+    let next = reader.load(&orders()).await.expect("the table loads");
+    assert_eq!(next.version().number(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_whose_read_back_fails_has_an_unknown_outcome() {
+    let root = TempDir::new().expect("a temporary root");
+    let writer = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&writer).await;
+    writer
+        .create_table(&orders(), new_orders(&writer))
+        .await
+        .expect("the table is created");
+    let mut created = writer.hooks.hold(CommitPoint::Created);
+    let commit = tokio::spawn({
+        let writer = Arc::clone(&writer);
+        async move { set_by_engine(&writer, "unread").await }
+    });
+    created.reached().await;
+    let first = root
+        .path()
+        .join("_bigquery_lite/catalog")
+        .join(PROJECT)
+        .join(DATASET)
+        .join(ORDERS)
+        .join(PointerVersion::FIRST.object_name());
+    std::fs::remove_file(&first).expect("v0 is removed");
+    std::fs::create_dir(&first).expect("a directory unreadable as v0 takes its name");
+    created.release();
+
+    let outcome = commit.await.expect("the writer runs");
+    let Err(EngineError::CommitOutcomeUnknown {
+        pointer_version, ..
+    }) = outcome
+    else {
+        panic!("the outcome is unknown, not {outcome:?}");
+    };
+    assert_eq!(pointer_version, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_newest_pointer_whose_metadata_is_missing_fails_the_load() {
+    let root = TempDir::new().expect("a temporary root");
+    let catalog = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&catalog).await;
+    let created = catalog
+        .create_table(&orders(), new_orders(&catalog))
+        .await
+        .expect("the table is created");
+    let metadata = catalog
+        .backend
+        .object_path(created.metadata_location())
+        .expect("the location is under the root");
+    catalog
+        .backend
+        .delete(&metadata)
+        .await
+        .expect("the metadata file is deleted");
+
+    let outcome = catalog.reload(&orders()).await;
+    let Err(EngineError::MissingMetadata {
+        what: Resource::Table(table),
+        pointer_version,
+        metadata_location,
+    }) = outcome
+    else {
+        panic!("the metadata is missing, not {outcome:?}");
+    };
+    assert_eq!(table, orders());
+    assert_eq!(pointer_version, 0);
+    assert_eq!(metadata_location, created.metadata_location());
+}

@@ -91,6 +91,15 @@ impl PointerBody {
             PointerBody::Tombstone(_) => None,
         }
     }
+
+    /// The metadata file the pointer is about: the current one of a live pointer, the dropped
+    /// table's of a tombstone.
+    pub(crate) fn metadata_file(&self) -> &str {
+        match self {
+            PointerBody::Live(live) => &live.metadata_location,
+            PointerBody::Tombstone(tombstone) => &tombstone.previous,
+        }
+    }
 }
 
 /// A pointer as one read returned it.

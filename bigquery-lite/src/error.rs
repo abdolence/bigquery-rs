@@ -91,6 +91,21 @@ pub enum EngineError {
         /// The metadata file that pointer names.
         metadata_location: String,
     },
+    /// A table's newest catalog pointer names a metadata file that does not exist, and no newer
+    /// pointer explains why: the root lost a file the table needs. Retrying does not help; an
+    /// operator restores the file or reconciles the table.
+    #[error(
+        "{what}: catalog pointer version {pointer_version} names {metadata_location}, which \
+         does not exist"
+    )]
+    MissingMetadata {
+        /// The table.
+        what: Resource,
+        /// The version of the pointer.
+        pointer_version: u64,
+        /// The metadata file the pointer names.
+        metadata_location: String,
+    },
     /// A local I/O failure outside the storage backend, such as binding a listener.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -183,6 +198,7 @@ impl From<&EngineError> for Status {
             EngineError::Storage { .. }
             | EngineError::Io(_)
             | EngineError::CommitOutcomeUnknown { .. } => Code::Internal,
+            EngineError::MissingMetadata { .. } => Code::DataLoss,
             EngineError::Unsupported { .. } => Code::Unimplemented,
             EngineError::NotFound { .. } => Code::NotFound,
             EngineError::AlreadyExists { .. } => Code::AlreadyExists,
@@ -220,7 +236,8 @@ impl From<EngineError> for iceberg::Error {
             EngineError::Aborted { .. } => ErrorKind::CatalogCommitConflicts,
             EngineError::Storage { .. }
             | EngineError::Io(_)
-            | EngineError::CommitOutcomeUnknown { .. } => ErrorKind::Unexpected,
+            | EngineError::CommitOutcomeUnknown { .. }
+            | EngineError::MissingMetadata { .. } => ErrorKind::Unexpected,
         };
         match error {
             EngineError::Iceberg(inner) => inner,

@@ -100,6 +100,8 @@ enum Placed {
     Ours(ObjectIdentity),
     /// Another commit created the pointer version first.
     Taken,
+    /// A create's outcome was unknown and no read settled it, so it may still land.
+    Unknown(EngineError),
 }
 
 /// What reading the predecessor back after a successful create showed.
@@ -423,12 +425,17 @@ impl EngineCatalog {
             committed_at_ms: now_ms(),
         });
         let written = proposal.write.as_ref().map(|_| proposal.location.as_str());
+        let observed = Instant::now();
         let Attempted::Landed(head) = self.place(table, base, body, written).await? else {
             return Ok(Attempted::Lost);
         };
         let version = head.version;
-        let loaded = self.loaded_table(table, head, proposal.metadata, proposal.location)?;
-        self.remember(table, Some(&loaded));
+        let loaded = self
+            .loaded_table(table, head, proposal.metadata, proposal.location.clone())
+            .map_err(|err| {
+                EngineError::commit_outcome_unknown(table, version, &proposal.location, &err)
+            })?;
+        self.remember(table, &loaded, observed);
         info!(
             %table,
             pointer_version = version.number(),
@@ -458,7 +465,7 @@ impl EngineCatalog {
         else {
             return Ok(Attempted::Lost);
         };
-        self.remember(table, None);
+        self.forget(table);
         info!(%table, pointer_version = head.version.number(), "Dropped the table.");
         self.prune(table).await;
         Ok(Attempted::Landed(()))
@@ -467,6 +474,10 @@ impl EngineCatalog {
     /// Creates `body` as the successor of `base` and reads `base` back. `written` is the
     /// metadata file this attempt wrote, deleted when another commit took the version, since
     /// nothing else can ever name it.
+    ///
+    /// # Errors
+    /// Once the create may have reached the backend, every failure is
+    /// [`EngineError::CommitOutcomeUnknown`], so that no caller sends a landed commit again.
     async fn place(
         &self,
         table: &TableRef,
@@ -483,6 +494,14 @@ impl EngineCatalog {
         let sent = Instant::now();
         let identity = match self.create_pointer_object(&path, &body).await? {
             Placed::Ours(identity) => identity,
+            Placed::Unknown(err) => {
+                return Err(EngineError::commit_outcome_unknown(
+                    table,
+                    version,
+                    body.metadata_file(),
+                    &err,
+                ))
+            }
             Placed::Taken => {
                 if let Some(location) = written {
                     self.delete_location(location).await;
@@ -497,18 +516,20 @@ impl EngineCatalog {
         };
         self.hooks.reach(CommitPoint::Created).await;
         let read_back = match base {
-            Base::Head(head) => {
-                match self
-                    .backend
-                    .read_object(&dir.join(head.version.object_name()))
-                    .await?
-                {
+            Base::Head(head) => self
+                .backend
+                .read_object(&dir.join(head.version.object_name()))
+                .await
+                .map(|object| match object {
                     Some(object) if head.is(&object) => ReadBack::Landed,
                     _ => ReadBack::Gone,
-                }
-            }
-            Base::Empty => self.read_back_first(&dir, &body).await?,
-        };
+                })
+                .map_err(EngineError::from),
+            Base::Empty => self.read_back_first(&dir, &body).await,
+        }
+        .map_err(|err| {
+            EngineError::commit_outcome_unknown(table, version, body.metadata_file(), &err)
+        })?;
         let stalled = sent.elapsed();
         match read_back {
             ReadBack::Landed => Ok(Attempted::Landed(PointerHead {
@@ -517,20 +538,16 @@ impl EngineCatalog {
                 body,
             })),
             ReadBack::Gone if stalled >= self.settings.pointer_min_age / 2 => {
-                let metadata_location = body.metadata_location().unwrap_or_default().to_string();
-                error!(
-                    %table,
-                    pointer_version = version.number(),
-                    metadata_location,
-                    stalled_ms = stalled.as_millis(),
-                    "A commit stalled past half of pointer_min_age and its predecessor was \
-                     pruned; whether it landed is unknown.",
-                );
-                Err(EngineError::CommitOutcomeUnknown {
-                    what: Resource::Table(table.clone()),
-                    pointer_version: version.number(),
-                    metadata_location,
-                })
+                Err(EngineError::commit_outcome_unknown(
+                    table,
+                    version,
+                    body.metadata_file(),
+                    &format_args!(
+                        "the commit stalled {} ms, past half of pointer_min_age, and its \
+                         predecessor was pruned",
+                        stalled.as_millis()
+                    ),
+                ))
             }
             ReadBack::Gone | ReadBack::Lost => {
                 warn!(
@@ -565,7 +582,12 @@ impl EngineCatalog {
                     unknown = Some(err);
                 }
             }
-            match self.backend.read_object(path).await? {
+            let stored = match self.backend.read_object(path).await {
+                Ok(stored) => stored,
+                Err(err) if unknown.is_some() => return Ok(Placed::Unknown(err.into())),
+                Err(err) => return Err(err.into()),
+            };
+            match stored {
                 Some(object) => {
                     let ours = serde_json::from_slice::<PointerBody>(&object.bytes)
                         .is_ok_and(|stored| stored == *body);
@@ -578,18 +600,20 @@ impl EngineCatalog {
                 None => continue,
             }
         }
-        Err(match unknown {
-            Some(err) => err.into(),
-            None => EngineError::invalid(
-                format!("catalog pointer {path}"),
-                "the name was reported taken but holds no object",
-            ),
-        })
+        match unknown {
+            Some(err) => Ok(Placed::Unknown(err.into())),
+            None => Err(EngineError::Storage {
+                backend: self.backend.kind(),
+                operation: "create",
+                detail: format!("{path}: the name was reported taken but holds no object"),
+            }),
+        }
     }
 
     /// The read-back of a name's first pointer, which has no predecessor: `v0` alone, or a `v1`
-    /// created on this commit's metadata (a commit or a drop), is landed; `v0` beside a higher pointer without such a
-    /// `v1` is lost, since pointers leave bottom-up and a `v1` cannot go while `v0` stays.
+    /// created on this commit's metadata (a commit or a drop), is landed; `v0` beside a higher
+    /// pointer without such a `v1` is lost, since pointers leave bottom-up and a `v1` cannot go
+    /// while `v0` stays.
     async fn read_back_first(
         &self,
         dir: &ObjectPath,
@@ -693,6 +717,30 @@ fn jitter(base: Duration, attempt: u32) -> Duration {
     let cap = grown.min(ceiling);
     let micros = u64::try_from(cap.as_micros()).unwrap_or(u64::MAX);
     Duration::from_micros(rand::random_range(0..=micros))
+}
+
+impl EngineError {
+    /// The commit of `table` as pointer `version`, naming `metadata_location`, may have landed
+    /// and the engine cannot tell; logged at `error` with `cause` for an operator to reconcile.
+    fn commit_outcome_unknown(
+        table: &TableRef,
+        version: PointerVersion,
+        metadata_location: &str,
+        cause: &dyn std::fmt::Display,
+    ) -> Self {
+        error!(
+            %table,
+            pointer_version = version.number(),
+            metadata_location,
+            %cause,
+            "Whether a commit landed is unknown.",
+        );
+        EngineError::CommitOutcomeUnknown {
+            what: Resource::Table(table.clone()),
+            pointer_version: version.number(),
+            metadata_location: metadata_location.to_string(),
+        }
+    }
 }
 
 fn lost_race(table: &TableRef) -> iceberg::Error {
