@@ -1,0 +1,14 @@
+[package]
+name = "bigquery-lite-proto-generator"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Regenerates the tonic server traits of bigquery-lite from the vendored protos"
+
+# Its own workspace, so that the bigquery-rs workspace never builds the generator or resolves
+# its dependencies.
+[workspace]
+
+[dependencies]
+# Pinned: the committed output is byte-for-byte what this version emits.
+tonic-prost-build = "=0.14.6"
