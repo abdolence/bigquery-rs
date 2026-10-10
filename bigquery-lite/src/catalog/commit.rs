@@ -99,6 +99,22 @@ pub(super) enum Lost {
     Unmet(String),
 }
 
+impl Lost {
+    /// The error an Iceberg caller sees for an attempt on `table` that did not land: never
+    /// retryable, so that `Transaction::commit` makes one attempt and the engine's commit loop
+    /// decides what follows.
+    fn conflict(&self, table: &TableRef) -> iceberg::Error {
+        let detail = match self {
+            Lost::Race => {
+                format!("{table}: a concurrent commit created the next catalog pointer first")
+            }
+            Lost::Unmet(detail) => format!("{table}: {detail}"),
+        };
+        iceberg::Error::new(iceberg::ErrorKind::CatalogCommitConflicts, detail)
+            .with_retryable(false)
+    }
+}
+
 /// What a change makes of the loaded table.
 enum Proposed {
     /// New metadata, to be committed.
@@ -370,7 +386,7 @@ impl EngineCatalog {
         };
         match attempted {
             Attempted::Landed(loaded) => Ok(loaded),
-            Attempted::Lost(lost) => Err(conflict(&table, &lost).into()),
+            Attempted::Lost(lost) => Err(lost.conflict(&table).into()),
         }
     }
 
@@ -813,18 +829,6 @@ impl EngineError {
     }
 }
 
-/// The error an Iceberg caller sees for an attempt that did not land: never retryable, so that
-/// `Transaction::commit` makes one attempt and the engine's commit loop decides what follows.
-fn conflict(table: &TableRef, lost: &Lost) -> iceberg::Error {
-    let detail = match lost {
-        Lost::Race => {
-            format!("{table}: a concurrent commit created the next catalog pointer first")
-        }
-        Lost::Unmet(detail) => format!("{table}: {detail}"),
-    };
-    iceberg::Error::new(iceberg::ErrorKind::CatalogCommitConflicts, detail).with_retryable(false)
-}
-
 /// The catalog an Iceberg transaction sees during one attempt: the table the attempt loaded, and
 /// a commit that runs the attempt's protocol and records its outcome for the commit loop.
 #[derive(Debug)]
@@ -940,7 +944,7 @@ impl Catalog for AttemptCatalog<'_> {
         };
         let answer = match &outcome {
             Ok(Attempted::Landed(loaded)) => Ok(loaded.table.clone()),
-            Ok(Attempted::Lost(lost)) => Err(conflict(self.table, lost)),
+            Ok(Attempted::Lost(lost)) => Err(lost.conflict(self.table)),
             Err(err) => Err(iceberg::Error::new(
                 iceberg::ErrorKind::Unexpected,
                 err.to_string(),
