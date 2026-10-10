@@ -6,6 +6,8 @@ use bigquery::gcloud_sdk::google_cloud_auth::credentials::anonymous;
 use bigquery::{BigQueryDb, BigQueryDbOptions};
 use smallquery::{Engine, EngineConfig, TcpEndpoint};
 use std::net::SocketAddr;
+#[cfg(feature = "cli")]
+use std::path::Path;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
@@ -18,6 +20,14 @@ pub(crate) struct Served {
     pub addr: SocketAddr,
     server: JoinHandle<()>,
     _root: TempDir,
+}
+
+impl Served {
+    /// The directory the engine's root lives in.
+    #[cfg(feature = "cli")]
+    pub(crate) fn root(&self) -> &Path {
+        self._root.path()
+    }
 }
 
 impl Drop for Served {

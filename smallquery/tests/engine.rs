@@ -4,6 +4,8 @@
 mod engine {
     pub(crate) mod support;
 
+    #[cfg(feature = "cli")]
+    mod cli;
     mod datasets_and_tables;
     mod in_process;
     mod listener;
