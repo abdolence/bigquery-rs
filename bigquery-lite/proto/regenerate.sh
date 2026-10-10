@@ -6,8 +6,9 @@
 # Needs `protoc` on PATH (or PROTOC set). Honours CARGO_TARGET_DIR; without it the generator
 # builds into proto/generator/target.
 #
-# The vendored protos are googleapis at commit 8503ac3ea32d7d6e0643a62322f69422ea272281 (the
-# commit gcloud-sdk 0.32.5 was generated from), plus the protobuf well-known types they import.
+# The vendored protos are googleapis at commit 8503ac3ea32d7d6e0643a62322f69422ea272281, the
+# commit gcloud-sdk's own BigQuery types were generated from, which they must stay: every message
+# the traits name is gcloud-sdk's. The protobuf well-known types they import come with them.
 # They are exactly the import closure of the generator's SERVICE_PROTOS. When gcloud-sdk moves
 # to a newer googleapis commit, refresh them from a checkout of that commit and the matching
 # protobuf `src` directory, then regenerate:
