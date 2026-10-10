@@ -662,3 +662,42 @@ async fn a_newest_pointer_whose_metadata_is_missing_fails_the_load() {
     assert_eq!(pointer_version, 0);
     assert_eq!(metadata_location, created.metadata_location());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requirement_unmet_by_the_stored_table_fails_the_commit() {
+    let root = TempDir::new().expect("a temporary root");
+    let catalog = catalog(
+        root.path(),
+        CatalogSettings {
+            commit_retry_deadline: Duration::from_secs(2),
+            ..settings(Duration::from_secs(15 * 60))
+        },
+    );
+    create_dataset(&catalog).await;
+    catalog
+        .create_table(&orders(), new_orders(&catalog))
+        .await
+        .expect("the table is created");
+    let another_table = uuid::Uuid::new_v4();
+    for updates in [
+        Vec::new(),
+        vec![TableUpdate::SetProperties {
+            updates: HashMap::from([("unmet".to_string(), "set".to_string())]),
+        }],
+    ] {
+        let outcome = catalog
+            .commit(&orders(), |_| {
+                Ok(Change::Engine(EngineCommit {
+                    requirements: vec![iceberg::TableRequirement::UuidMatch {
+                        uuid: another_table,
+                    }],
+                    updates: updates.clone(),
+                }))
+            })
+            .await;
+        assert!(
+            matches!(outcome, Err(EngineError::Precondition { .. })),
+            "{outcome:?}"
+        );
+    }
+}

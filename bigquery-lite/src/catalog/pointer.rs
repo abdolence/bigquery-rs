@@ -5,8 +5,10 @@
 //! detects by reading the predecessor back.
 
 use crate::storage::{ObjectIdentity, StoredObject};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
+use uuid::Uuid;
 
 /// A pointer's version: 0 for a name's first commit, one more for each commit on top. It is the
 /// table's etag.
@@ -67,6 +69,9 @@ pub(crate) enum PointerBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LivePointer {
+    /// Unique per pointer, so that reading a create back tells this pointer from another
+    /// with the same content.
+    pub id: Uuid,
     pub metadata_location: String,
     /// The metadata location of the pointer this one was created on; `None` for a name's
     /// first pointer and for a table created on a tombstone.
@@ -78,6 +83,8 @@ pub(crate) struct LivePointer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Tombstone {
+    /// Unique per pointer, as [`LivePointer::id`].
+    pub id: Uuid,
     /// The metadata location of the dropped table.
     pub previous: String,
     pub dropped_at_ms: i64,
@@ -102,12 +109,13 @@ impl PointerBody {
     }
 }
 
-/// A pointer as one read returned it.
+/// A pointer as one read returned it, with its body as `B`: any pointer, or one known to be live
+/// or a tombstone.
 #[derive(Debug, Clone)]
-pub(crate) struct PointerHead {
+pub(crate) struct PointerHead<B = PointerBody> {
     pub version: PointerVersion,
     pub identity: ObjectIdentity,
-    pub body: PointerBody,
+    pub body: B,
 }
 
 impl PointerHead {
@@ -125,12 +133,13 @@ impl PointerHead {
             body: serde_json::from_slice(&object.bytes)?,
         })
     }
+}
 
+impl<B: PartialEq + DeserializeOwned> PointerHead<B> {
     /// Whether `object`, read back later, is still this pointer: the same object with the same
     /// content.
     pub(crate) fn is(&self, object: &StoredObject) -> bool {
         object.identity == self.identity
-            && serde_json::from_slice::<PointerBody>(&object.bytes)
-                .is_ok_and(|body| body == self.body)
+            && serde_json::from_slice::<B>(&object.bytes).is_ok_and(|body| body == self.body)
     }
 }

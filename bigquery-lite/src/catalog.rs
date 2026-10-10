@@ -20,7 +20,7 @@ pub(crate) use commit::{Change, EngineCommit};
 pub(crate) use datasets::{DatasetEntry, NewDataset};
 use hooks::{CommitHooks, CommitPoint};
 pub(crate) use pointer::PointerVersion;
-use pointer::{PointerBody, PointerHead};
+use pointer::{LivePointer, PointerBody, PointerHead, Tombstone};
 
 use crate::config::EngineConfig;
 use crate::error::{EngineError, Resource};
@@ -60,7 +60,7 @@ impl From<&EngineConfig> for CatalogSettings {
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedTable {
     pub table: Table,
-    head: PointerHead,
+    head: PointerHead<LivePointer>,
 }
 
 impl LoadedTable {
@@ -74,7 +74,7 @@ impl LoadedTable {
     }
 
     pub(crate) fn metadata_location(&self) -> &str {
-        self.head.body.metadata_location().unwrap_or_default()
+        &self.head.body.metadata_location
     }
 }
 
@@ -84,7 +84,7 @@ enum NameState {
     /// No pointer was ever created under the name, or every one was deleted.
     Empty,
     /// The newest pointer is a tombstone.
-    Dropped(PointerHead),
+    Dropped(PointerHead<Tombstone>),
     Live(Box<LoadedTable>),
 }
 
@@ -277,9 +277,21 @@ impl EngineCatalog {
                     err.to_string(),
                 )
             })?;
-            let PointerBody::Live(live) = &head.body else {
-                self.forget(table);
-                return Ok(NameState::Dropped(head));
+            let PointerHead {
+                version,
+                identity,
+                body,
+            } = head;
+            let live = match body {
+                PointerBody::Live(live) => live,
+                PointerBody::Tombstone(tombstone) => {
+                    self.forget(table);
+                    return Ok(NameState::Dropped(PointerHead {
+                        version,
+                        identity,
+                        body: tombstone,
+                    }));
+                }
             };
             self.hooks.reach(CommitPoint::PointerRead).await;
             let Some(metadata) = self.read_metadata(&live.metadata_location).await? else {
@@ -287,13 +299,17 @@ impl EngineCatalog {
                     return Err(EngineError::MissingMetadata {
                         what: Resource::Table(table.clone()),
                         pointer_version: version.number(),
-                        metadata_location: live.metadata_location.clone(),
+                        metadata_location: live.metadata_location,
                     });
                 }
                 continue;
             };
-            let location = live.metadata_location.clone();
-            let loaded = self.loaded_table(table, head, metadata, location)?;
+            let head = PointerHead {
+                version,
+                identity,
+                body: live,
+            };
+            let loaded = self.loaded_table(table, head, metadata)?;
             self.remember(table, &loaded, observed);
             return Ok(NameState::Live(Box::new(loaded)));
         }
@@ -333,14 +349,13 @@ impl EngineCatalog {
     fn loaded_table(
         &self,
         table: &TableRef,
-        head: PointerHead,
+        head: PointerHead<LivePointer>,
         metadata: TableMetadata,
-        metadata_location: String,
     ) -> Result<LoadedTable, EngineError> {
         let table = Table::builder()
             .identifier(TableIdent::from(table))
             .metadata(metadata)
-            .metadata_location(metadata_location)
+            .metadata_location(head.body.metadata_location.clone())
             .file_io(self.file_io.clone())
             .runtime(self.runtime.handle())
             .build()?;

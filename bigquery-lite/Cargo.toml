@@ -44,7 +44,7 @@ tracing.workspace = true
 typetag.workspace = true
 unicode-properties.workspace = true
 url.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 bigquery = { workspace = true, features = ["tls-webpki-roots"] }
