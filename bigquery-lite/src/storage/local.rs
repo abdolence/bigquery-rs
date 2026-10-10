@@ -23,6 +23,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
+/// The longest file name, in bytes, of the filesystems the backend runs on.
+const NAME_MAX: usize = 255;
+
+/// The bytes a staging file adds to its target's name: `.`, a UUID and `.tmp`.
+const STAGING_SUFFIX: usize = 41;
+
 /// The identity of a local file: its inode, and its birth time where the filesystem records
 /// one, since an inode number can be reused once its file is deleted. The change time is left
 /// out: removing the staging file after the link changes it.
@@ -96,6 +102,43 @@ impl LocalBackend {
         self.root.join(path.as_str())
     }
 
+    /// Refuses a path the filesystem would: a segment longer than a file name, or, for a write
+    /// that stages its file beside the target, a name too long to take the staging suffix. IDs
+    /// are as long as BigQuery allows, so a long one reaches the caller as a refusal naming the
+    /// limit rather than as a failed syscall.
+    fn check_length(
+        &self,
+        operation: &'static str,
+        path: &ObjectPath,
+        staged: bool,
+    ) -> Result<(), StorageError> {
+        let segments: Vec<&str> = path.as_str().split('/').collect();
+        let too_long = segments.iter().enumerate().find_map(|(index, segment)| {
+            let limit = if staged && index + 1 == segments.len() {
+                NAME_MAX - STAGING_SUFFIX
+            } else {
+                NAME_MAX
+            };
+            (segment.len() > limit).then_some((segment, limit))
+        });
+        match too_long {
+            None => Ok(()),
+            Some((segment, limit)) => Err(self.error(
+                operation,
+                &self.fs_path(path),
+                io::Error::new(
+                    io::ErrorKind::InvalidFilename,
+                    format!(
+                        "the name {segment:?} is {} bytes, over the local backend's limit of \
+                         {limit} bytes ({NAME_MAX} for a file name, less {STAGING_SUFFIX} for \
+                         the staging suffix of a file it writes)",
+                        segment.len()
+                    ),
+                ),
+            )),
+        }
+    }
+
     fn error(&self, operation: &'static str, path: &Path, source: io::Error) -> StorageError {
         StorageError {
             backend: BackendKind::Local,
@@ -116,6 +159,7 @@ impl LocalBackend {
         T: Send + 'static,
         F: FnOnce(&Path, &Path) -> io::Result<T> + Send + 'static,
     {
+        self.check_length(name, path, false)?;
         let root = self.root.clone();
         let target = self.fs_path(path);
         let for_error = target.clone();
@@ -167,6 +211,7 @@ impl LocalBackend {
     }
 
     pub(super) async fn write(&self, path: &ObjectPath, bytes: Bytes) -> Result<(), StorageError> {
+        self.check_length("write", path, true)?;
         self.blocking("write", path, move |root, target| {
             ensure_parent(root, target)?;
             let staging = staging_path(target);
@@ -186,6 +231,7 @@ impl LocalBackend {
         path: &ObjectPath,
         bytes: Bytes,
     ) -> Result<Created, StorageError> {
+        self.check_length("create", path, true)?;
         self.blocking("create", path, move |root, target| {
             ensure_parent(root, target)?;
             let staging = staging_path(target);
@@ -284,6 +330,7 @@ impl LocalBackend {
     }
 
     pub(super) async fn writer(&self, path: &ObjectPath) -> Result<LocalFileWrite, StorageError> {
+        self.check_length("open", path, true)?;
         let target = self.fs_path(path);
         let staging = staging_path(&target);
         let file = self

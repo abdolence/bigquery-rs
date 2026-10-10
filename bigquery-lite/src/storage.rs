@@ -109,8 +109,22 @@ pub(crate) struct StorageError {
     source: std::io::Error,
 }
 
+impl StorageError {
+    /// Whether the backend refused the path's name, which comes from a request's IDs, rather
+    /// than failing to store it.
+    fn is_invalid_name(&self) -> bool {
+        self.source.kind() == std::io::ErrorKind::InvalidFilename
+    }
+}
+
 impl From<StorageError> for EngineError {
     fn from(error: StorageError) -> Self {
+        if error.is_invalid_name() {
+            return EngineError::invalid(
+                format!("storage path {}", error.path),
+                error.source.to_string(),
+            );
+        }
         EngineError::Storage {
             backend: error.backend,
             operation: error.operation,
@@ -121,7 +135,12 @@ impl From<StorageError> for EngineError {
 
 impl From<StorageError> for iceberg::Error {
     fn from(error: StorageError) -> Self {
-        iceberg::Error::new(iceberg::ErrorKind::Unexpected, error.to_string()).with_source(error)
+        let kind = if error.is_invalid_name() {
+            iceberg::ErrorKind::DataInvalid
+        } else {
+            iceberg::ErrorKind::Unexpected
+        };
+        iceberg::Error::new(kind, error.to_string()).with_source(error)
     }
 }
 

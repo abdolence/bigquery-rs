@@ -265,3 +265,61 @@ async fn an_unserved_method_is_unimplemented_by_name() {
         .message()
         .contains("google.cloud.bigquery.v2.DatasetService/PatchDataset"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ids_longer_than_a_local_file_name_allows_are_invalid() -> BigQueryResult<()> {
+    let served = serve().await;
+    let db = client(served.addr).await;
+    let long_dataset = "d".repeat(210);
+    let refused = db
+        .dataset_client()
+        .insert_dataset(v2::InsertDatasetRequest {
+            project_id: PROJECT.to_string(),
+            dataset: Some(v2::Dataset {
+                dataset_reference: Some(v2::DatasetReference {
+                    dataset_id: long_dataset,
+                    project_id: PROJECT.to_string(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a dataset ID over the local limit is refused");
+    assert_eq!(refused.code(), Code::InvalidArgument);
+
+    db.fluent()
+        .schema()
+        .dataset(SHOP)
+        .create()
+        .execute()
+        .await?;
+    let (project_id, dataset_id, _) = table_request("");
+    let table_id = "t".repeat(300);
+    let refused = db
+        .table_client()
+        .insert_table(v2::InsertTableRequest {
+            project_id: project_id.clone(),
+            dataset_id: dataset_id.clone(),
+            table: Some(v2::Table {
+                table_reference: Some(v2::TableReference {
+                    project_id,
+                    dataset_id,
+                    table_id,
+                }),
+                schema: Some(v2::TableSchema {
+                    fields: vec![v2::TableFieldSchema {
+                        name: "id".to_string(),
+                        r#type: "INT64".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect_err("a table ID over the local limit is refused");
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    Ok(())
+}
