@@ -18,7 +18,7 @@ name = "bigquery_lite"
 path = "src/lib.rs"
 
 [features]
-default = ["tls-roots"]
+default = ["tls-webpki-roots"]
 # gcloud-sdk builds its client channels with one of these two; with neither it does not
 # compile, so a build without the default feature enables the other.
 tls-roots = ["gcloud-sdk/tls-roots"]
@@ -47,7 +47,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-bigquery.workspace = true
+bigquery = { workspace = true, features = ["tls-webpki-roots"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
