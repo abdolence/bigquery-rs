@@ -315,6 +315,14 @@ pub struct DatasetRef {
 }
 
 impl DatasetRef {
+    /// The dataset a request names by its two IDs.
+    pub(crate) fn parse(project_id: &str, dataset_id: &str) -> Result<Self, EngineError> {
+        Ok(Self {
+            project: project_id.parse()?,
+            dataset: dataset_id.parse()?,
+        })
+    }
+
     /// The table `table` of this dataset.
     pub fn table(&self, table: TableId) -> TableRef {
         TableRef {
@@ -344,6 +352,15 @@ pub struct TableRef {
 }
 
 impl TableRef {
+    /// The table a request names by its three IDs.
+    pub(crate) fn parse(
+        project_id: &str,
+        dataset_id: &str,
+        table_id: &str,
+    ) -> Result<Self, EngineError> {
+        Ok(DatasetRef::parse(project_id, dataset_id)?.table(table_id.parse()?))
+    }
+
     /// The dataset that holds the table.
     pub fn dataset_ref(&self) -> DatasetRef {
         DatasetRef {

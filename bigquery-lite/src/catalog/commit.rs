@@ -48,6 +48,11 @@ pub(crate) struct EngineCommit {
 /// again on every attempt, from the table that attempt loaded.
 pub(crate) enum Change {
     /// An Iceberg transaction built on the loaded table; its actions run inside the attempt.
+    #[allow(
+        dead_code,
+        reason = "Iceberg's own actions, `fast_append` above all, commit through it; no RPC \
+                  the engine serves builds one before the write path exists"
+    )]
     Transaction(Transaction),
     /// A change the engine computed from the loaded table.
     Engine(EngineCommit),
@@ -199,6 +204,8 @@ impl EngineCatalog {
             let attempt = retry.start();
             let loaded = self.load_for_attempt(table, attempt, &mut identity).await?;
             let attempted = match change(&loaded)? {
+                // Nothing changes, so nothing is written: the table stays at its pointer.
+                Change::Engine(commit) if commit.updates.is_empty() => Attempted::Landed(loaded),
                 Change::Engine(commit) => match self.propose(&loaded, commit)? {
                     Some(proposal) => {
                         self.attempt_metadata(table, Base::Head(&loaded.head), proposal)
@@ -592,13 +599,7 @@ impl EngineCatalog {
         dir: &ObjectPath,
         body: &PointerBody,
     ) -> Result<ReadBack, EngineError> {
-        let versions: Vec<PointerVersion> = self
-            .backend
-            .list(dir)
-            .await?
-            .iter()
-            .filter_map(|listed| PointerVersion::from_object_name(&listed.name))
-            .collect();
+        let versions = self.pointer_versions(dir).await?;
         if !versions.contains(&PointerVersion::FIRST) {
             return Ok(ReadBack::Gone);
         }
@@ -674,18 +675,16 @@ impl EngineCatalog {
     /// failure, which is logged: the pruning of later commits removes the rest.
     pub(super) async fn delete_pointers_below(&self, table: &TableRef, version: PointerVersion) {
         let dir = Self::pointer_dir(table);
-        let listed = match self.backend.list(&dir).await {
-            Ok(listed) => listed,
+        let mut below: Vec<PointerVersion> = match self.pointer_versions(&dir).await {
+            Ok(versions) => versions
+                .into_iter()
+                .filter(|lower| *lower < version)
+                .collect(),
             Err(err) => {
                 warn!(%table, %err, "Listing the pointers of a dropped table failed.");
                 return;
             }
         };
-        let mut below: Vec<PointerVersion> = listed
-            .iter()
-            .filter_map(|listed| PointerVersion::from_object_name(&listed.name))
-            .filter(|lower| *lower < version)
-            .collect();
         below.sort();
         for lower in below {
             if let Err(err) = self.backend.delete(&dir.join(lower.object_name())).await {

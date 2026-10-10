@@ -85,7 +85,7 @@ enum NameState {
     Empty,
     /// The newest pointer is a tombstone.
     Dropped(PointerHead),
-    Live(LoadedTable),
+    Live(Box<LoadedTable>),
 }
 
 /// A loaded table kept for the next statement, trusted only after a probe for a newer commit.
@@ -213,7 +213,7 @@ impl EngineCatalog {
     /// [`EngineError::NotFound`] when the table does not exist.
     pub(crate) async fn reload(&self, table: &TableRef) -> Result<LoadedTable, EngineError> {
         match self.load_name(table).await? {
-            NameState::Live(loaded) => Ok(loaded),
+            NameState::Live(loaded) => Ok(*loaded),
             NameState::Empty | NameState::Dropped(_) => Err(EngineError::NotFound {
                 what: Resource::Table(table.clone()),
             }),
@@ -249,13 +249,7 @@ impl EngineCatalog {
     async fn load_name(&self, table: &TableRef) -> Result<NameState, EngineError> {
         let dir = Self::pointer_dir(table);
         for _ in 0..LOAD_ATTEMPTS {
-            let newest = self
-                .backend
-                .list(&dir)
-                .await?
-                .iter()
-                .filter_map(|listed| PointerVersion::from_object_name(&listed.name))
-                .max();
+            let newest = self.pointer_versions(&dir).await?.into_iter().max();
             let Some(version) = newest else {
                 self.remember(table, None);
                 return Ok(NameState::Empty);
@@ -285,12 +279,24 @@ impl EngineCatalog {
             let location = live.metadata_location.clone();
             let loaded = self.loaded_table(table, head, metadata, location)?;
             self.remember(table, Some(&loaded));
-            return Ok(NameState::Live(loaded));
+            return Ok(NameState::Live(Box::new(loaded)));
         }
         Err(EngineError::Aborted {
             what: Resource::Table(table.clone()),
             attempts: LOAD_ATTEMPTS,
         })
+    }
+
+    /// The versions of the pointers in `dir`, in listing order; staging files and anything else
+    /// that is not a pointer are left out.
+    async fn pointer_versions(&self, dir: &ObjectPath) -> Result<Vec<PointerVersion>, EngineError> {
+        Ok(self
+            .backend
+            .list(dir)
+            .await?
+            .iter()
+            .filter_map(|listed| PointerVersion::from_object_name(&listed.name))
+            .collect())
     }
 
     /// The metadata file at `location`, or `None` when it does not exist.
@@ -391,7 +397,7 @@ impl EngineCatalog {
             };
             let table = dataset.table(id.clone());
             if let NameState::Live(loaded) = self.load_name(&table).await? {
-                tables.push((id, loaded));
+                tables.push((id, *loaded));
             }
         }
         tables.sort_by(|(a, _), (b, _)| a.cmp(b));

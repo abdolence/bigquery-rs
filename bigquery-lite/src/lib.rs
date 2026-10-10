@@ -8,7 +8,10 @@ mod error;
 mod ids;
 mod proto;
 mod runtime;
+mod services;
 mod storage;
+mod table;
+mod types;
 
 pub use config::{ByteSize, EngineConfig, Maintenance, StorageOptions, TcpEndpoint};
 pub use error::{BackendKind, EngineError, Resource};

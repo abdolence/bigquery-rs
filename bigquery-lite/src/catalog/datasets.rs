@@ -6,9 +6,9 @@ use super::{now_ms, EngineCatalog};
 use crate::error::{EngineError, Resource};
 use crate::ids::{DatasetId, DatasetRef, Location, ProjectId};
 use crate::storage::{Created, ListedKind};
+use crate::types::Labels;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// A dataset as the catalog stores it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,7 +16,7 @@ pub(crate) struct DatasetEntry {
     /// Recorded at creation and never changed.
     pub location: Location,
     pub description: Option<String>,
-    pub labels: BTreeMap<String, String>,
+    pub labels: Labels,
     pub default_table_expiration_ms: Option<i64>,
     /// Counts the dataset's changes; it is the dataset's etag.
     pub generation: u64,
@@ -29,7 +29,7 @@ pub(crate) struct DatasetEntry {
 pub(crate) struct NewDataset {
     pub location: Location,
     pub description: Option<String>,
-    pub labels: BTreeMap<String, String>,
+    pub labels: Labels,
     pub default_table_expiration_ms: Option<i64>,
 }
 
