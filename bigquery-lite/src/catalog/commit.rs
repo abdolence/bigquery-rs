@@ -592,7 +592,7 @@ impl EngineCatalog {
     }
 
     /// The read-back of a name's first pointer, which has no predecessor: `v0` alone, or a `v1`
-    /// created on this commit's metadata, is landed; `v0` beside a higher pointer without such a
+    /// created on this commit's metadata (a commit or a drop), is landed; `v0` beside a higher pointer without such a
     /// `v1` is lost, since pointers leave bottom-up and a `v1` cannot go while `v0` stays.
     async fn read_back_first(
         &self,
@@ -613,7 +613,10 @@ impl EngineCatalog {
         let on_ours = match self.backend.read_object(&second).await? {
             Some(object) => match serde_json::from_slice::<PointerBody>(&object.bytes) {
                 Ok(PointerBody::Live(live)) => live.previous.as_deref() == body.metadata_location(),
-                _ => false,
+                Ok(PointerBody::Tombstone(tombstone)) => {
+                    body.metadata_location() == Some(tombstone.previous.as_str())
+                }
+                Err(_) => false,
             },
             None => false,
         };

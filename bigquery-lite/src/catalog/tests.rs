@@ -440,3 +440,37 @@ async fn pointers_are_pruned_bottom_up_once_their_successor_aged() {
         .expect("an update commits");
     assert_eq!(pointer_versions(&catalog).await, BTreeSet::from([4, 5, 6]));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_dropped_before_its_read_back_landed_and_stays_dropped() {
+    let root = TempDir::new().expect("a temporary root");
+    let creator = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    let other = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&other).await;
+    let metadata = new_orders(&creator);
+    let mut created = creator.hooks.hold(CommitPoint::Created);
+    let create = tokio::spawn({
+        let creator = Arc::clone(&creator);
+        async move { creator.create_table(&orders(), metadata).await }
+    });
+    created.reached().await;
+    other
+        .drop_table(&orders())
+        .await
+        .expect("the other catalog drops the new table");
+    created.release();
+
+    let landed = create
+        .await
+        .expect("the creator runs")
+        .expect("the create landed");
+    assert_eq!(landed.version().number(), 0);
+    assert_eq!(pointer_versions(&other).await, BTreeSet::from([0, 1]));
+    for catalog in [&creator, &other] {
+        let outcome = catalog.load(&orders()).await;
+        assert!(
+            matches!(outcome, Err(EngineError::NotFound { .. })),
+            "{outcome:?}"
+        );
+    }
+}
