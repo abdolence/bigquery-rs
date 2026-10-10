@@ -1,8 +1,8 @@
 //! The engine's Iceberg catalog. Its whole state lives in the root:
 //!
 //! ```text
-//! <root>/_bigquery_lite/catalog/<project>/<dataset>.json          a dataset
-//! <root>/_bigquery_lite/catalog/<project>/<dataset>/<table>/v…    a table's catalog pointers
+//! <root>/_smallquery/catalog/<project>/<dataset>.json          a dataset
+//! <root>/_smallquery/catalog/<project>/<dataset>/<table>/v…    a table's catalog pointers
 //! <root>/<project>/<dataset>/<table>/{metadata,data}/              the Iceberg table location
 //! ```
 //!
@@ -156,7 +156,7 @@ impl EngineCatalog {
     }
 
     fn catalog_dir() -> ObjectPath {
-        ObjectPath::segment("_bigquery_lite").join("catalog")
+        ObjectPath::segment("_smallquery").join("catalog")
     }
 
     fn project_dir(project: &ProjectId) -> ObjectPath {
@@ -546,7 +546,7 @@ impl EngineCatalog {
 fn unsupported(method: &str, detail: &str) -> iceberg::Error {
     iceberg::Error::new(
         iceberg::ErrorKind::FeatureUnsupported,
-        format!("{method} is not supported by bigquery-lite's catalog: {detail}"),
+        format!("{method} is not supported by smallquery's catalog: {detail}"),
     )
 }
 

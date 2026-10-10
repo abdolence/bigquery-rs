@@ -1,9 +1,9 @@
 [package]
-name = "bigquery-lite-proto-generator"
+name = "smallquery-proto-generator"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Regenerates the tonic server traits of bigquery-lite from the vendored protos"
+description = "Regenerates the tonic server traits of smallquery from the vendored protos"
 
 # Its own workspace, so that the bigquery-rs workspace never builds the generator or resolves
 # its dependencies.

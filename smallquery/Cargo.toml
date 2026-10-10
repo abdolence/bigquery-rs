@@ -1,5 +1,5 @@
 [package]
-name = "bigquery-lite"
+name = "smallquery"
 version = "0.1.0"
 authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
 edition = "2021"
@@ -14,7 +14,7 @@ categories = ["database-implementations"]
 include = ["Cargo.toml", "src/**/*.rs"]
 
 [lib]
-name = "bigquery_lite"
+name = "smallquery"
 path = "src/lib.rs"
 
 [features]

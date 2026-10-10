@@ -86,11 +86,11 @@ impl Services {
     /// method is the `otel.name` field, which tracing exporters use as the span's name.
     fn span(&self, method: &'static str, project: &str) -> Span {
         tracing::info_span!(
-            "bigquery_lite.rpc",
+            "smallquery.rpc",
             otel.name = method,
-            bigquery_lite.route = %self.route,
-            bigquery_lite.auth = "none",
-            bigquery_lite.project = project,
+            smallquery.route = %self.route,
+            smallquery.auth = "none",
+            smallquery.project = project,
         )
     }
 }

@@ -619,7 +619,7 @@ async fn a_commit_whose_read_back_fails_has_an_unknown_outcome() {
     created.reached().await;
     let first = root
         .path()
-        .join("_bigquery_lite/catalog")
+        .join("_smallquery/catalog")
         .join(PROJECT)
         .join(DATASET)
         .join(ORDERS)
@@ -709,7 +709,7 @@ async fn a_client_sends_a_commit_with_an_unknown_outcome_once() {
     created.reached().await;
     let first = root
         .path()
-        .join("_bigquery_lite/catalog")
+        .join("_smallquery/catalog")
         .join(PROJECT)
         .join(DATASET)
         .join(ORDERS)

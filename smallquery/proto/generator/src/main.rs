@@ -1,5 +1,5 @@
-//! Writes the tonic server traits of the six services `bigquery-lite` serves into
-//! `bigquery-lite/src/proto/`, from the protos vendored in `bigquery-lite/proto/googleapis`.
+//! Writes the tonic server traits of the six services `smallquery` serves into
+//! `smallquery/src/proto/`, from the protos vendored in `smallquery/proto/googleapis`.
 //!
 //! Every message type the traits name is mapped onto gcloud-sdk's, so that the engine's
 //! requests and responses are the very types the `bigquery` client sends; only the server

@@ -46,7 +46,7 @@ const COLUMN_PROPERTY: &str = "bigquery.column.";
 
 /// A column name as BigQuery allows it: 1 to 300 characters of letters, digits and `_`,
 /// starting with a letter or `_`, and none of BigQuery's reserved prefixes nor the engine's own,
-/// `_bigquery_lite_`, compared without case.
+/// `_smallquery_`, compared without case.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) struct ColumnName(String);
@@ -67,7 +67,7 @@ const RESERVED_PREFIXES: &[&str] = &[
 ];
 
 /// The prefix of the engine's hidden columns, which no table lists.
-pub(crate) const HIDDEN_PREFIX: &str = "_bigquery_lite_";
+pub(crate) const HIDDEN_PREFIX: &str = "_smallquery_";
 
 impl ColumnName {
     pub(crate) fn as_str(&self) -> &str {
@@ -860,7 +860,7 @@ mod tests {
         for name in [
             "_change_type",
             "_PARTITIONTIME",
-            "_bigquery_lite_change",
+            "_smallquery_change",
             "_Table_suffix",
         ] {
             let refused = ColumnName::try_from(name.to_string());

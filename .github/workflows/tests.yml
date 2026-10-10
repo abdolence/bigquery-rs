@@ -42,7 +42,7 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-          cargo test -p bigquery-lite --all-targets --all-features
+          cargo test -p smallquery --all-targets --all-features
       - name: 'Checking documentation'
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
       - name: 'Compiling the book examples'

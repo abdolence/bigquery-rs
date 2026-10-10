@@ -1,6 +1,6 @@
 //! The TCP listener's address rules.
 
-use bigquery_lite::{Engine, EngineConfig, EngineError, TcpEndpoint};
+use smallquery::{Engine, EngineConfig, EngineError, TcpEndpoint};
 use std::net::SocketAddr;
 use tempfile::TempDir;
 

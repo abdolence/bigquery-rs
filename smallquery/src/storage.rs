@@ -276,7 +276,7 @@ struct BackendFactory {
     backend: Backend,
 }
 
-#[typetag::serde(name = "bigquery_lite::BackendFactory")]
+#[typetag::serde(name = "smallquery::BackendFactory")]
 impl StorageFactory for BackendFactory {
     fn build(&self, _config: &StorageConfig) -> iceberg::Result<Arc<dyn Storage>> {
         Ok(Arc::new(self.backend.clone()))
@@ -284,7 +284,7 @@ impl StorageFactory for BackendFactory {
 }
 
 #[async_trait]
-#[typetag::serde(name = "bigquery_lite::Backend")]
+#[typetag::serde(name = "smallquery::Backend")]
 impl Storage for Backend {
     async fn exists(&self, path: &str) -> iceberg::Result<bool> {
         Ok(Backend::exists(self, &self.object_path(path)?).await?)

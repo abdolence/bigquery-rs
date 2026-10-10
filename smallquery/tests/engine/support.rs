@@ -4,7 +4,7 @@
 
 use bigquery::gcloud_sdk::google_cloud_auth::credentials::anonymous;
 use bigquery::{BigQueryDb, BigQueryDbOptions};
-use bigquery_lite::{Engine, EngineConfig, TcpEndpoint};
+use smallquery::{Engine, EngineConfig, TcpEndpoint};
 use std::net::SocketAddr;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;

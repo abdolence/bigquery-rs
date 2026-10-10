@@ -32,7 +32,7 @@ pub enum EngineError {
         detail: String,
     },
     /// A construct the engine does not implement, named as BigQuery names it.
-    #[error("{construct} is not supported by bigquery-lite: {detail}")]
+    #[error("{construct} is not supported by smallquery: {detail}")]
     Unsupported {
         /// The construct: an option, a type, a method.
         construct: String,

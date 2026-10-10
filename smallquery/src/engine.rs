@@ -20,10 +20,10 @@ use tracing::{info, warn};
 /// The buffer of one in-process connection, in each direction.
 const DUPLEX_BUFFER: usize = 1024 * 1024;
 
-/// The layout version of a root, which `_bigquery_lite/engine.json` records.
+/// The layout version of a root, which `_smallquery/engine.json` records.
 const FORMAT_VERSION: u32 = 1;
 
-/// What `_bigquery_lite/engine.json` holds: written once, when the root is initialized.
+/// What `_smallquery/engine.json` holds: written once, when the root is initialized.
 #[derive(Debug, Serialize, Deserialize)]
 struct RootMarker {
     format_version: u32,
@@ -196,7 +196,7 @@ impl TcpServer {
 impl RootMarker {
     /// Writes the root's marker on an empty root, or checks the one an earlier engine wrote.
     async fn initialize(backend: &Backend, root: &url::Url) -> Result<(), EngineError> {
-        let path = ObjectPath::segment("_bigquery_lite").join("engine.json");
+        let path = ObjectPath::segment("_smallquery").join("engine.json");
         let marker = RootMarker {
             format_version: FORMAT_VERSION,
             created_at_ms: crate::catalog::now_ms(),
@@ -268,7 +268,7 @@ impl InProcess {
                 Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(client))
             }
         });
-        let channel = Endpoint::from_static("http://in-process.bigquery-lite")
+        let channel = Endpoint::from_static("http://in-process.smallquery")
             .connect_with_connector_lazy(connector);
         Self { channel, server }
     }

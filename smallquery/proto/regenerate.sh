@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Regenerates bigquery-lite/src/proto/ from the protos vendored in proto/googleapis.
+# Regenerates smallquery/src/proto/ from the protos vendored in proto/googleapis.
 #
-#   bash bigquery-lite/proto/regenerate.sh
+#   bash smallquery/proto/regenerate.sh
 #
 # Needs `protoc` on PATH (or PROTOC set). Honours CARGO_TARGET_DIR; without it the generator
 # builds into proto/generator/target.
@@ -13,7 +13,7 @@
 # to a newer googleapis commit, refresh them from a checkout of that commit and the matching
 # protobuf `src` directory, then regenerate:
 #
-#   bash bigquery-lite/proto/regenerate.sh vendor <googleapis-checkout> <protobuf-include-dir>
+#   bash smallquery/proto/regenerate.sh vendor <googleapis-checkout> <protobuf-include-dir>
 #
 # and update the commit named above.
 set -euo pipefail

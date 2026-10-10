@@ -17,7 +17,7 @@ readme = "README.md"
 include = ["Cargo.toml", "src/**/*.rs", "src/**/*.sql", "README.md", "LICENSE", "docs/src/**/*.md"]
 
 [workspace]
-members = ["bigquery-lite"]
+members = ["smallquery"]
 exclude = ["bench-compare"]
 
 [workspace.package]

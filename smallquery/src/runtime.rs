@@ -14,7 +14,7 @@ impl IcebergRuntime {
     pub(crate) fn new(threads: usize) -> Result<Self, EngineError> {
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(threads)
-            .thread_name("bigquery-lite-iceberg")
+            .thread_name("smallquery-iceberg")
             .enable_all()
             .build()?;
         let handle = iceberg::Runtime::new(&tokio);
