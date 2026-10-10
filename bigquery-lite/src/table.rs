@@ -338,9 +338,9 @@ pub(crate) struct TableDefinition {
     pub max_staleness: Option<String>,
 }
 
-/// Refuses the settable fields of a table body the engine does not implement.
-fn refuse_unsupported(body: &v2::Table) -> Result<(), EngineError> {
-    let refused = [
+/// The settable fields of a table body the engine does not implement, and whether each is set.
+fn unsupported_fields(body: &v2::Table) -> [(&'static str, bool); 17] {
+    [
         (
             "friendly_name",
             body.friendly_name.as_ref().is_some_and(|v| !v.is_empty()),
@@ -383,11 +383,7 @@ fn refuse_unsupported(body: &v2::Table) -> Result<(), EngineError> {
                 .as_ref()
                 .is_some_and(|c| !c.foreign_keys.is_empty()),
         ),
-    ];
-    match refused.iter().find(|(_, set)| *set) {
-        Some((construct, _)) => Err(EngineError::unsupported(*construct, "set on a table")),
-        None => Ok(()),
-    }
+    ]
 }
 
 fn column_names(names: &[String]) -> Result<Vec<ColumnName>, EngineError> {
@@ -417,7 +413,7 @@ impl TryFrom<&v2::Table> for TableDefinition {
     type Error = EngineError;
 
     fn try_from(body: &v2::Table) -> Result<Self, Self::Error> {
-        refuse_unsupported(body)?;
+        EngineError::refuse_unsupported("table", &unsupported_fields(body))?;
         let schema = body
             .schema
             .as_ref()
@@ -476,7 +472,7 @@ impl TableDefinition {
     /// This definition with what a `PatchTable` body sets, keeping what it leaves out; labels
     /// merge.
     pub(crate) fn patched(&self, body: &v2::Table) -> Result<Self, EngineError> {
-        refuse_unsupported(body)?;
+        EngineError::refuse_unsupported("table", &unsupported_fields(body))?;
         let mut patched = self.clone();
         if let Some(schema) = &body.schema {
             patched.columns = Columns::try_from(schema)?;

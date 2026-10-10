@@ -11,7 +11,8 @@ use std::str::FromStr;
 use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
 
 /// A Google Cloud project ID: 6 to 30 characters of `a-z`, `0-9` and `-` that start with a
-/// letter, optionally behind a domain scope, as in `example.com:my-project`.
+/// letter and do not end with `-`, optionally behind a domain scope, as in
+/// `example.com:my-project`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct ProjectId(String);
@@ -48,6 +49,9 @@ impl TryFrom<String> for ProjectId {
         }
         if !project.starts_with(|c: char| c.is_ascii_lowercase()) {
             return Err(invalid("a project ID starts with a lowercase letter"));
+        }
+        if project.ends_with('-') {
+            return Err(invalid("a project ID does not end with `-`"));
         }
         if !project
             .bytes()
@@ -274,6 +278,8 @@ impl Hash for Location {
         for byte in self.0.bytes() {
             state.write_u8(byte.to_ascii_lowercase());
         }
+        // As `str` does, so that a location hashed beside another value never runs into it.
+        state.write_u8(0xff);
     }
 }
 
@@ -374,5 +380,24 @@ impl TableRef {
 impl Display for TableRef {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}.{}", self.project, self.dataset, self.table)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_project_id_ends_with_a_letter_or_a_digit() {
+        for id in ["lite-project", "example.com:lite-project-2"] {
+            assert!(id.parse::<ProjectId>().is_ok(), "{id}");
+        }
+        for id in ["lite-project-", "example.com:lite-project-"] {
+            let refused = id.parse::<ProjectId>();
+            assert!(
+                matches!(refused, Err(EngineError::Invalid { .. })),
+                "{id}: {refused:?}"
+            );
+        }
     }
 }

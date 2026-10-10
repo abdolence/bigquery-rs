@@ -159,6 +159,22 @@ impl EngineError {
         }
     }
 
+    /// Refuses the first of a request's `fields` on `resource` that is set, as
+    /// [`EngineError::Unsupported`] naming it; `fields` pairs each field's name with whether
+    /// the request sets it.
+    pub(crate) fn refuse_unsupported(
+        resource: &str,
+        fields: &[(&'static str, bool)],
+    ) -> Result<(), Self> {
+        match fields.iter().find(|(_, set)| *set) {
+            Some((construct, _)) => Err(Self::unsupported(
+                *construct,
+                format!("set on a {resource}"),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// An [`EngineError::Invalid`] for `what`.
     pub(crate) fn invalid(what: impl Into<String>, detail: impl Into<String>) -> Self {
         EngineError::Invalid {
@@ -176,9 +192,9 @@ impl EngineError {
     }
 }
 
-/// The status a request that failed with this error answers, by the mapping of the RPC subset:
-/// the iceberg kinds map as their names say, a commit that gave up is `Aborted`, which the
-/// client retries.
+/// The status a request that failed with this error answers: the iceberg kinds map as their
+/// names say, a commit that gave up is `Aborted`, which the client retries, and a table that
+/// lost a file is `DataLoss`, which it does not.
 impl From<&EngineError> for Status {
     fn from(error: &EngineError) -> Self {
         let code = match error {
@@ -241,19 +257,7 @@ impl From<EngineError> for iceberg::Error {
         };
         match error {
             EngineError::Iceberg(inner) => inner,
-            other => iceberg::Error::new(kind, other.to_string()),
+            other => iceberg::Error::new(kind, other.to_string()).with_source(other),
         }
-    }
-}
-
-impl From<DatasetRef> for Resource {
-    fn from(dataset: DatasetRef) -> Self {
-        Resource::Dataset(dataset)
-    }
-}
-
-impl From<TableRef> for Resource {
-    fn from(table: TableRef) -> Self {
-        Resource::Table(table)
     }
 }

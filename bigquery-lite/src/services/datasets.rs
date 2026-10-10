@@ -53,9 +53,10 @@ impl From<&DatasetRef> for v2::DatasetReference {
     }
 }
 
-/// Refuses the settable fields of a dataset body the engine does not implement.
-fn refuse_unsupported(body: &v2::Dataset) -> Result<(), EngineError> {
-    let refused = [
+/// The settable fields of a dataset body the engine does not implement, and whether each is
+/// set.
+fn unsupported_fields(body: &v2::Dataset) -> [(&'static str, bool); 14] {
+    [
         (
             "friendly_name",
             body.friendly_name.as_ref().is_some_and(|v| !v.is_empty()),
@@ -97,11 +98,7 @@ fn refuse_unsupported(body: &v2::Dataset) -> Result<(), EngineError> {
         ("storage_billing_model", body.storage_billing_model != 0),
         ("restrictions", body.restrictions.is_some()),
         ("resource_tags", !body.resource_tags.is_empty()),
-    ];
-    match refused.iter().find(|(_, set)| *set) {
-        Some((construct, _)) => Err(EngineError::unsupported(*construct, "set on a dataset")),
-        None => Ok(()),
-    }
+    ]
 }
 
 impl Datasets {
@@ -109,7 +106,7 @@ impl Datasets {
         let body = request
             .dataset
             .ok_or_else(|| EngineError::invalid("dataset", "the request carries no dataset"))?;
-        refuse_unsupported(&body)?;
+        EngineError::refuse_unsupported("dataset", &unsupported_fields(&body))?;
         let reference = body.dataset_reference.clone().unwrap_or_default();
         let project_id = match reference.project_id.as_str() {
             "" => request.project_id.as_str(),
@@ -156,7 +153,7 @@ impl Datasets {
         let body = request
             .dataset
             .ok_or_else(|| EngineError::invalid("dataset", "the request carries no dataset"))?;
-        refuse_unsupported(&body)?;
+        EngineError::refuse_unsupported("dataset", &unsupported_fields(&body))?;
         let location = Some(body.location.as_str())
             .filter(|location| !location.is_empty())
             .map(str::parse::<Location>)

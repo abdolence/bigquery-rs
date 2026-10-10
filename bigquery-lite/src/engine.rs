@@ -177,9 +177,15 @@ impl TcpServer {
     pub async fn serve(self) -> Result<(), EngineError> {
         info!(addr = %self.local_addr, "Serving the BigQuery APIs on TCP.");
         let mut shutdown = self.shutdown;
+        // gRPC sends small frames whose replies the peer waits for; Nagle would hold them.
+        let incoming = TcpListenerStream::new(self.listener).map(|accepted| {
+            let stream = accepted?;
+            stream.set_nodelay(true)?;
+            Ok::<_, std::io::Error>(stream)
+        });
         Server::builder()
             .add_routes(self.services.routes())
-            .serve_with_incoming_shutdown(TcpListenerStream::new(self.listener), async move {
+            .serve_with_incoming_shutdown(incoming, async move {
                 let _ = shutdown.wait_for(|stop| *stop).await;
             })
             .await

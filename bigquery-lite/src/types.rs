@@ -646,11 +646,19 @@ impl TryFrom<&v2::TableFieldSchema> for Column {
                         })?;
                     let scale = u32::try_from(scale)
                         .ok()
-                        .filter(|s| *s <= 9 && *s <= precision)
+                        .filter(|s| {
+                            *s <= 9
+                                && precision
+                                    .checked_sub(*s)
+                                    .is_some_and(|whole| (1..=29).contains(&whole))
+                        })
                         .ok_or_else(|| {
                             invalid(
                                 "scale",
-                                format!("{scale} is not 0 to 9 and at most the precision"),
+                                format!(
+                                    "{scale} is not 0 to 9 with 1 to 29 digits before the point \
+                                     in a precision of {precision}"
+                                ),
                             )
                         })?;
                     Some(DecimalParams { precision, scale })
@@ -819,6 +827,30 @@ mod tests {
             assert!(
                 matches!(&refused, Err(EngineError::Unsupported { construct: c, .. }) if c == construct),
                 "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_columns_keep_1_to_29_digits_before_the_point() {
+        let numeric = |precision: i64, scale: i64| {
+            Column::try_from(&v2::TableFieldSchema {
+                precision,
+                scale,
+                ..field("amount", "NUMERIC")
+            })
+        };
+        for (precision, scale) in [(29, 0), (38, 9), (1, 0), (10, 9)] {
+            assert!(
+                numeric(precision, scale).is_ok(),
+                "NUMERIC({precision}, {scale})"
+            );
+        }
+        for (precision, scale) in [(30, 0), (38, 8), (9, 9)] {
+            let refused = numeric(precision, scale);
+            assert!(
+                matches!(refused, Err(EngineError::Invalid { .. })),
+                "NUMERIC({precision}, {scale}): {refused:?}"
             );
         }
     }
