@@ -1,4 +1,6 @@
-use crate::BigQueryLocation;
+use super::table_ref::check_project_id;
+use crate::errors::BigQueryError;
+use crate::{BigQueryLocation, BigQueryResult};
 use gcloud_sdk::GoogleEnvironment;
 use rsb_derive::Builder;
 use url::Url;
@@ -53,8 +55,9 @@ pub struct BigQueryDbOptions {
 
 impl BigQueryDbOptions {
     /// Builds options for the project detected from the environment: the `GCP_PROJECT`,
-    /// `PROJECT_ID` or `GCP_PROJECT_ID` variables, the quota project of the local credentials,
-    /// or the GCE metadata server. Returns `None` if none of them names a project.
+    /// `PROJECT_ID`, `GCP_PROJECT_ID` or `GOOGLE_CLOUD_PROJECT` variables, the project or quota
+    /// project of the application default credentials, or the GCE metadata server. Returns `None`
+    /// if none of them names a project.
     pub async fn for_default_project_id() -> Option<BigQueryDbOptions> {
         GoogleEnvironment::detect_google_project_id()
             .await
@@ -75,6 +78,42 @@ impl BigQueryDbOptions {
                 .expect("BIGQUERY_STORAGE_API_URL is an absolute https URL")
         })
     }
+
+    /// Checks what a client cannot be created without: a project ID that fits a resource path,
+    /// and two endpoints a gRPC channel can open.
+    ///
+    /// # Errors
+    /// [`BigQueryError::InvalidParametersError`] naming the option, see
+    /// [`BigQueryDb::with_options_auth`](crate::BigQueryDb::with_options_auth).
+    pub(crate) fn check(&self) -> BigQueryResult<()> {
+        check_project_id("google_project_id", &self.google_project_id)?;
+        check_grpc_endpoint("bigquery_api_url", &self.effective_bigquery_api_url())?;
+        check_grpc_endpoint(
+            "bigquery_storage_api_url",
+            &self.effective_bigquery_storage_api_url(),
+        )
+    }
+}
+
+/// Checks that a gRPC channel can open `url`, with `field` naming the option in the error.
+///
+/// # Errors
+/// [`BigQueryError::InvalidParametersError`] if the scheme is not `http` or `https`, or the URL
+/// has no host.
+fn check_grpc_endpoint(field: &'static str, url: &Url) -> BigQueryResult<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(BigQueryError::invalid_parameters(
+            field,
+            format!("must start with http:// or https://, was \"{url}\""),
+        ));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(BigQueryError::invalid_parameters(
+            field,
+            format!("must name a host, was \"{url}\""),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

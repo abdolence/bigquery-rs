@@ -27,8 +27,10 @@ use crate::db::RetryBackoff;
 use crate::{BigQueryDatasetId, BigQueryTableId};
 use crate::{BigQueryDb, BigQueryDbOptions, BigQueryResult};
 use futures::future::BoxFuture;
+use gcloud_sdk::google_cloud_auth::credentials::anonymous;
 use gcloud_sdk::prost::{DecodeError, Message};
 use gcloud_sdk::tonic::Code;
+use gcloud_sdk::GoogleAuthHeaders;
 use h2::server::SendResponse;
 use h2::{RecvStream, SendStream};
 use hyper::body::Bytes;
@@ -110,8 +112,7 @@ impl FakeServer {
     }
 
     /// A client whose v2 and Storage endpoints both point at this server, with the project,
-    /// location and `max_retries` of `options`. It authenticates with a token the server never
-    /// checks.
+    /// location and `max_retries` of `options`. It sends no token, since the server checks none.
     pub(crate) async fn client(
         &self,
         options: BigQueryDbOptions,
@@ -122,8 +123,7 @@ impl FakeServer {
             .with_bigquery_storage_api_url(self.endpoint.clone());
         BigQueryDb::connect(
             options,
-            Vec::new(),
-            gcloud_sdk::TokenSourceType::ExternalSource(Box::new(FakeTokenSource)),
+            GoogleAuthHeaders::from(anonymous::Builder::new().build()),
             backoff,
         )
         .await
@@ -354,20 +354,6 @@ impl FakeCall {
     /// Never answers and keeps the call open, as a call stuck in flight.
     pub async fn hang(self) {
         std::future::pending::<()>().await;
-    }
-}
-
-/// Accepts any token, since the fake server checks none.
-struct FakeTokenSource;
-
-#[async_trait::async_trait]
-impl gcloud_sdk::Source for FakeTokenSource {
-    async fn token(&self) -> gcloud_sdk::error::Result<gcloud_sdk::Token> {
-        Ok(gcloud_sdk::Token::new(
-            "Bearer".to_string(),
-            "fake-token".to_string().into(),
-            jiff::Timestamp::MAX,
-        ))
     }
 }
 
@@ -639,13 +625,9 @@ mod tests {
             .options()
             .clone()
             .with_bigquery_api_url(endpoint.join("prefix/").expect("a relative path joins"));
-        let db = BigQueryDb::with_options_token_source(
-            options,
-            Vec::new(),
-            gcloud_sdk::TokenSourceType::ExternalSource(Box::new(FakeTokenSource)),
-        )
-        .await
-        .expect("a client for the fake server");
+        let db = BigQueryDb::with_options_auth(options, anonymous::Builder::new().build())
+            .await
+            .expect("a client for the fake server");
         for (db, table_id) in [(&fake.db, "t1"), (&db, "t2")] {
             db.table_client()
                 .get_table(GetTableRequest {

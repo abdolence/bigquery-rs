@@ -4,18 +4,51 @@ Cargo.toml:
 
 ```toml
 [dependencies]
-bigquery = "0.8"
+bigquery = "0.9"
 ```
 
 The default feature `tls-roots` uses the native TLS roots of your system. Use
-`tls-webpki-roots` instead if you want the bundled Mozilla roots:
+`tls-webpki-roots` instead if you want the bundled Mozilla roots. It needs
+`default-features = false`, which also turns off the default feature `auth-default-crypto`, so
+enable it again, see [Crypto provider](#crypto-provider):
 
 ```toml
 [dependencies]
-bigquery = { version = "0.8", default-features = false, features = ["tls-webpki-roots"] }
+bigquery = { version = "0.9", default-features = false, features = ["tls-webpki-roots", "auth-default-crypto"] }
 ```
 
-## Crypto provider error
+## Crypto provider
+
+Service account keys sign a JWT, and `google-cloud-auth` signs it with a rustls crypto provider.
+The default feature `auth-default-crypto` gives it the aws-lc-rs provider, which is built from C
+sources.
+
+`tls-webpki-roots` builds aws-lc-rs for rustls already, so `auth-default-crypto` adds no C build
+with it. `tls-roots` without `auth-default-crypto` builds no aws-lc-rs.
+
+Without `auth-default-crypto`, install a rustls provider before creating a client, with the same
+`rustls` version as `google-cloud-auth` (0.23):
+
+```toml
+[dependencies]
+bigquery = { version = "0.9", default-features = false, features = ["tls-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+```
+
+```rust,ignore
+rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+```
+
+Without a provider:
+
+- `BigQueryDb::new`, `with_options` and `for_default_project_id` fail with a `SystemError` whose
+  code is `CryptoProviderMissing`, when the application default credentials are a service account
+  key, used directly or as the source of an impersonation;
+- `with_options_service_account_key_file` fails with the same error;
+- credentials passed to `with_options_auth` are not checked, and the first call that signs with a
+  key panics.
+
+### Crypto provider error
 
 Depends on your other dependencies you may see the error like:
 
@@ -23,20 +56,9 @@ Depends on your other dependencies you may see the error like:
 no process-level CryptoProvider available -- call CryptoProvider::install_default() before this point
 ```
 
-The TLS crypto providers are not installed by default, so you can choose one. The easiest way to
-fix it is to include one, for example:
-
-```toml
-[dependencies]
-rustls = "0.23"
-```
-
-If you have several, you may need to call `CryptoProvider::install_default()` before creating the
-client:
-
-```rust,ignore
-rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
-```
+It appears when rustls cannot pick a provider by itself, because none or more than one is compiled
+into your application. Install one with `CryptoProvider::install_default()` before creating the
+client, as above.
 
 ## Creating a client
 
@@ -90,17 +112,22 @@ a client was created with.
 
 ## Google authentication
 
-Looks for credentials in the following places, preferring the first location found:
+`BigQueryDb::new`, `with_options` and `for_default_project_id` use the application default
+credentials for the `cloud-platform` scope. They look for credentials in the following places,
+preferring the first location found:
 
 - A JSON file whose path is specified by the `GOOGLE_APPLICATION_CREDENTIALS` environment variable;
 - A JSON file in a location known to the gcloud command-line tool using
   `gcloud auth application-default login`;
-- On Google Compute Engine, it fetches credentials from the metadata server.
+- On Google Compute Engine, Cloud Run, GKE, etc., the metadata server.
+
+The JSON file can be a service account key, user credentials, impersonated service account
+credentials or a workload identity federation configuration.
 
 For local development don't confuse `gcloud auth login` with `gcloud auth application-default login`,
 since the first one authorizes only the `gcloud` tool to access the Cloud Platform.
 
-To use a service account key file directly:
+### Service account key file
 
 ```rust,no_run
 use bigquery::*;
@@ -116,19 +143,37 @@ let db = BigQueryDb::with_options_service_account_key_file(
 # }
 ```
 
-For full control over the OAuth2 scopes and the token source there is
-`with_options_token_source`. Its `TokenSourceType` comes from
-[gcloud-sdk](https://github.com/abdolence/gcloud-sdk-rs), which the library does not re-export, so
-add `gcloud-sdk` to your dependencies to use it:
+The key is used for the `cloud-platform` scope.
+
+### Other credentials
+
+`with_options_auth` takes anything that converts into `GoogleAuthHeaders` of
+[gcloud-sdk](https://github.com/abdolence/gcloud-sdk-rs):
+
+- `Credentials` built with [google-cloud-auth](https://crates.io/crates/google-cloud-auth):
+  impersonation, the metadata server, workload identity federation, a service account key with
+  settings of your own, or a `CredentialsProvider` of your own;
+- `IDTokenCredentials`, for a server that takes Google ID tokens;
+- a `GoogleAuthHeaders`, for example the application default credentials or a service account key
+  for other scopes.
+
+The library re-exports the gcloud-sdk version it is built against as `bigquery::gcloud_sdk`, and
+google-cloud-auth as `bigquery::gcloud_sdk::google_cloud_auth`.
+
+The application default credentials for other OAuth2 scopes:
 
 ```rust,no_run
+use bigquery::gcloud_sdk::GoogleAuthHeaders;
 use bigquery::*;
 
-# async fn example(service_account_json: String) -> BigQueryResult<()> {
-let db = BigQueryDb::with_options_token_source(
+# async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let auth = GoogleAuthHeaders::from_adc_with_scopes(vec![
+    "https://www.googleapis.com/auth/bigquery".to_string(),
+])
+.await?;
+let db = BigQueryDb::with_options_auth(
     BigQueryDbOptions::new("my-gcp-project-id".to_string()),
-    gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
-    gcloud_sdk::TokenSourceType::Json(service_account_json),
+    auth,
 )
 .await?;
 # let _ = db;
@@ -136,10 +181,37 @@ let db = BigQueryDb::with_options_token_source(
 # }
 ```
 
-Both channels share one token, so the token source is asked for a new one only when it expires.
+A service account key built with google-cloud-auth, here to bill another project for quota:
+
+```rust,no_run
+use bigquery::gcloud_sdk::google_cloud_auth::credentials::service_account;
+use bigquery::*;
+
+# async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let key = std::fs::read("/path/to/service-account.json")?;
+let credentials = service_account::Builder::new(serde_json::from_slice(&key)?)
+    .with_quota_project_id("my-quota-project-id")
+    .build()?;
+let db = BigQueryDb::with_options_auth(
+    BigQueryDbOptions::new("my-gcp-project-id".to_string()),
+    credentials,
+)
+.await?;
+# let _ = db;
+# Ok(())
+# }
+```
+
+Be aware that `with_options_auth` does not check for a rustls crypto provider, see
+[Crypto provider](#crypto-provider).
+
+Credentials that mint tokens refresh them on the Tokio runtime they are built in, so build them in
+the runtime that runs the client.
+
+Both channels share one set of credentials, so a token is minted and refreshed once for both.
 
 The token never reaches the library's logs or spans. The one `info!` line at client creation
-logs the project, the two endpoints and the scope names.
+logs the project and the two endpoints.
 
 ## Endpoints
 
@@ -233,7 +305,7 @@ shared channels: `job_client()`, `dataset_client()`, `table_client()`, `model_cl
 use bigquery::*;
 
 # async fn example(db: BigQueryDb) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-use gcloud_sdk::google::cloud::bigquery::v2::GetServiceAccountRequest;
+use bigquery::gcloud_sdk::google::cloud::bigquery::v2::GetServiceAccountRequest;
 
 let response = db
     .project_client()
@@ -246,8 +318,8 @@ println!("{}", response.into_inner().email);
 # }
 ```
 
-Their types come from gcloud-sdk, which the library does not re-export, so they can change in a
-patch release.
+Their types come from gcloud-sdk, re-exported as `bigquery::gcloud_sdk`, so they change with its
+version.
 
 ## Running the examples
 

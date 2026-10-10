@@ -23,6 +23,9 @@ pub(crate) use support::*;
 
 pub(crate) mod fake;
 
+#[cfg(test)]
+mod key_file_tests;
+
 use crate::errors::BigQueryError;
 use crate::BigQueryResult;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::big_query_read_client::BigQueryReadClient;
@@ -35,7 +38,8 @@ use gcloud_sdk::google::cloud::bigquery::v2::routine_service_client::RoutineServ
 use gcloud_sdk::google::cloud::bigquery::v2::row_access_policy_service_client::RowAccessPolicyServiceClient;
 use gcloud_sdk::google::cloud::bigquery::v2::table_service_client::TableServiceClient;
 use gcloud_sdk::{
-    GoogleApi, GoogleApiClient, GoogleAuthMiddleware, TokenSourceType, GCP_DEFAULT_SCOPES,
+    GoogleApi, GoogleApiClient, GoogleAuthHeaders, GoogleAuthMiddleware, GoogleAuthMiddlewareLayer,
+    GCP_DEFAULT_SCOPES,
 };
 use std::fmt::Formatter;
 use std::sync::Arc;
@@ -89,14 +93,21 @@ impl BigQueryDb {
         .await
     }
 
-    /// Creates a client with the given options and the application default credentials.
+    /// Creates a client with the given options and the application default credentials, for the
+    /// `cloud-platform` scope.
+    ///
+    /// # Errors
+    /// - [`BigQueryError::InvalidParametersError`] for an option [`with_options_auth`] refuses,
+    ///   before the credentials are read;
+    /// - [`BigQueryError::SystemError`] with the code `CryptoProviderMissing` when the
+    ///   application default credentials are a service account key, the `auth-default-crypto`
+    ///   feature is off and the application has installed no rustls crypto provider.
+    ///
+    /// [`with_options_auth`]: Self::with_options_auth
     pub async fn with_options(options: BigQueryDbOptions) -> BigQueryResult<Self> {
-        Self::with_options_token_source(
-            options,
-            GCP_DEFAULT_SCOPES.clone(),
-            TokenSourceType::Default,
-        )
-        .await
+        options.check()?;
+        let auth = GoogleAuthHeaders::from_adc_with_scopes(GCP_DEFAULT_SCOPES.clone()).await?;
+        Self::with_options_auth(options, auth).await
     }
 
     /// Creates a client for the project detected from the environment, see
@@ -110,81 +121,90 @@ impl BigQueryDb {
             None => Err(BigQueryError::invalid_parameters(
                 "google_project_id",
                 "Unable to detect google_project_id from GCP_PROJECT, PROJECT_ID, GCP_PROJECT_ID, \
-                 the local credentials or the metadata server",
+                 GOOGLE_CLOUD_PROJECT, the application default credentials or the metadata server",
             )),
         }
     }
 
-    /// Creates a client with the given options, authenticating with the service account key
-    /// file at `service_account_key_path`.
+    /// Creates a client that authenticates with the service account key file at
+    /// `service_account_key_path`, for the `cloud-platform` scope.
+    ///
+    /// The file is the JSON key the IAM console or `gcloud iam service-accounts keys create`
+    /// writes. For other scopes or other kinds of credentials, see
+    /// [`with_options_auth`](Self::with_options_auth).
+    ///
+    /// # Errors
+    /// - [`BigQueryError::InvalidParametersError`] for the field `service_account_key_path` if
+    ///   the file cannot be read or is not JSON, and for an option `with_options_auth` refuses;
+    /// - [`BigQueryError::SystemError`] with the code `CredentialsBuild` if the JSON lacks the
+    ///   fields of a service account key, and with the code `CryptoProviderMissing` if the
+    ///   `auth-default-crypto` feature is off and the application has installed no rustls
+    ///   crypto provider.
     pub async fn with_options_service_account_key_file(
         options: BigQueryDbOptions,
         service_account_key_path: std::path::PathBuf,
     ) -> BigQueryResult<Self> {
-        Self::with_options_token_source(
-            options,
-            GCP_DEFAULT_SCOPES.clone(),
-            TokenSourceType::File(service_account_key_path),
-        )
-        .await
+        let unreadable_key = |reason: String| {
+            BigQueryError::invalid_parameters(
+                "service_account_key_path",
+                format!("{}: {reason}", service_account_key_path.display()),
+            )
+        };
+        let key = std::fs::read(&service_account_key_path)
+            .map_err(|error| unreadable_key(error.to_string()))?;
+        let key =
+            serde_json::from_slice(&key).map_err(|error| unreadable_key(error.to_string()))?;
+        let auth =
+            GoogleAuthHeaders::from_service_account_key(key, GCP_DEFAULT_SCOPES.clone()).await?;
+        Self::with_options_auth(options, auth).await
     }
 
-    /// Creates a client with full control over the OAuth2 `token_scopes` and where the token
-    /// comes from.
+    /// Creates a client that authenticates every call with the headers `auth` serves.
     ///
-    /// Both channels share one token, so the token source is asked for a new one only when it
-    /// expires, never once per channel.
+    /// `auth` is anything [`GoogleAuthHeaders`] converts from: `Credentials` built with
+    /// `google-cloud-auth`, such as a service account key that is not the application default
+    /// credentials, `IDTokenCredentials`, or a `GoogleAuthHeaders` itself, such as
+    /// [`GoogleAuthHeaders::from_adc_with_scopes`] builds for other scopes.
+    ///
+    /// Both channels share `auth`, so a token is minted and refreshed once for both. Credentials
+    /// that mint tokens refresh them on the Tokio runtime they were built in, so build them in
+    /// the runtime that runs the client's calls.
     ///
     /// # Errors
     /// [`BigQueryError::InvalidParametersError`] for the field `google_project_id` if it is
-    /// empty or contains `/` or a control character, before any credentials are read.
-    pub async fn with_options_token_source(
+    /// empty or contains `/` or a control character, and for `bigquery_api_url` or
+    /// `bigquery_storage_api_url` if its scheme is not `http` or `https` or it has no host.
+    pub async fn with_options_auth(
         options: BigQueryDbOptions,
-        token_scopes: Vec<String>,
-        token_source_type: TokenSourceType,
+        auth: impl Into<GoogleAuthHeaders>,
     ) -> BigQueryResult<Self> {
-        Self::connect(
-            options,
-            token_scopes,
-            token_source_type,
-            RetryBackoff::FullJitter,
-        )
-        .await
+        Self::connect(options, auth.into(), RetryBackoff::FullJitter).await
     }
 
-    /// [`with_options_token_source`](Self::with_options_token_source), with retries waiting as
-    /// `backoff` says.
+    /// [`with_options_auth`](Self::with_options_auth), with retries waiting as `backoff` says.
     pub(crate) async fn connect(
         options: BigQueryDbOptions,
-        token_scopes: Vec<String>,
-        token_source_type: TokenSourceType,
+        auth: GoogleAuthHeaders,
         backoff: RetryBackoff,
     ) -> BigQueryResult<Self> {
-        table_ref::check_project_id("google_project_id", &options.google_project_id)?;
-        let (api, storage) = (
-            options.effective_bigquery_api_url(),
-            options.effective_bigquery_storage_api_url(),
-        );
-        let api_url = grpc_endpoint("bigquery_api_url", &api)?;
-        let storage_api_url = grpc_endpoint("bigquery_storage_api_url", &storage)?;
+        options.check()?;
+        let api_url = options.effective_bigquery_api_url();
+        let storage_api_url = options.effective_bigquery_storage_api_url();
 
         info!(
             google_project_id = options.google_project_id,
-            api_url,
-            storage_api_url,
-            token_scopes = token_scopes.join(", "),
+            api_url = api_url.as_str(),
+            storage_api_url = storage_api_url.as_str(),
             "Creating a new BigQuery client.",
         );
 
-        let v2 = GoogleApiClient::from_function_with_token_source(
+        let v2 = GoogleApiClient::from_function_with_middleware(
             |channel| {
                 JobServiceClient::new(channel)
                     .max_decoding_message_size(V2_MAX_DECODING_MESSAGE_SIZE)
             },
-            api_url,
-            None,
-            token_scopes,
-            token_source_type,
+            api_url.as_str(),
+            GoogleAuthMiddlewareLayer::new(auth, None)?,
         )
         .await?;
 
@@ -194,7 +214,7 @@ impl BigQueryDb {
                     BigQueryReadClient::new(channel)
                         .max_decoding_message_size(STORAGE_READ_MAX_DECODING_MESSAGE_SIZE)
                 },
-                storage_api_url,
+                storage_api_url.as_str(),
                 None,
             )
             .await?;
@@ -217,7 +237,7 @@ impl BigQueryDb {
     /// The raw gRPC client of the v2 `JobService`, on the shared v2 channel.
     ///
     /// The raw clients are for calls this crate has no API for. Their types come from
-    /// `gcloud-sdk`, which this crate does not re-export, so they can change in a patch release.
+    /// [`gcloud_sdk`](crate::gcloud_sdk), so they change with its version.
     pub fn job_client(&self) -> JobServiceClient<GoogleAuthMiddleware> {
         self.inner.v2.get()
     }
@@ -287,27 +307,6 @@ impl std::fmt::Debug for BigQueryDb {
             .field("options", &self.inner.options)
             .finish()
     }
-}
-
-/// `url` as the gRPC channel takes it, with `field` naming the option in the error.
-///
-/// # Errors
-/// [`BigQueryError::InvalidParametersError`] if the scheme is not `http` or `https`, or the URL
-/// has no host.
-fn grpc_endpoint<'u>(field: &'static str, url: &'u url::Url) -> BigQueryResult<&'u str> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(BigQueryError::invalid_parameters(
-            field,
-            format!("must start with http:// or https://, was \"{url}\""),
-        ));
-    }
-    if url.host_str().is_none_or(str::is_empty) {
-        return Err(BigQueryError::invalid_parameters(
-            field,
-            format!("must name a host, was \"{url}\""),
-        ));
-    }
-    Ok(url.as_str())
 }
 
 #[cfg(test)]

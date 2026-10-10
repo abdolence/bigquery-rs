@@ -47,7 +47,7 @@ Cargo.toml:
 
 ```toml
 [dependencies]
-bigquery = "0.8"
+bigquery = "0.9"
 ```
 
 ```rust,no_run
@@ -160,6 +160,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 If you see `no process-level CryptoProvider available`, see
 [Crypto provider error](https://bigquery-rust.abdolence.dev/getting-started.html#crypto-provider-error).
 
+## Migrating from 0.8
+
+0.9 moves to gcloud-sdk 0.33, which authenticates with
+[google-cloud-auth](https://crates.io/crates/google-cloud-auth). The token sources of gcloud-sdk
+are gone, and `with_options_token_source` is replaced by `with_options_auth`, which takes anything
+that converts into `bigquery::gcloud_sdk::GoogleAuthHeaders`:
+
+| 0.8 | 0.9 |
+|---|---|
+| `with_options_token_source(options, scopes, TokenSourceType::Default)` | `with_options_auth(options, GoogleAuthHeaders::from_adc_with_scopes(scopes).await?)` |
+| `with_options_token_source(options, scopes, TokenSourceType::File(path))` | `with_options_service_account_key_file(options, path)` for the default scopes; `with_options_auth(options, GoogleAuthHeaders::from_service_account_key(key, scopes).await?)` for other scopes |
+| `TokenSourceType::Json(json)` | `with_options_auth(options, GoogleAuthHeaders::from_service_account_key(key, scopes).await?)` for a service account key; the `user_account`, `impersonated` and `external_account` builders for other credentials |
+| `TokenSourceType::MetadataServer` | `with_options_auth(options, mds::Builder::default().build()?)` |
+| `TokenSourceType::ExternalSource(source)` | implement `CredentialsProvider` and pass `Credentials::from(provider)` |
+
+The library re-exports gcloud-sdk as `bigquery::gcloud_sdk`, so there is no need to add it to your
+dependencies. The builders, `CredentialsProvider` and `Credentials` are in
+`bigquery::gcloud_sdk::google_cloud_auth::credentials`. `BigQueryDb::new`, `with_options`,
+`for_default_project_id` and `with_options_service_account_key_file` keep their signatures.
+
+Also changed:
+
+- MSRV is 1.91, the MSRV of google-cloud-auth;
+- the new default feature `auth-default-crypto` gives google-cloud-auth the aws-lc-rs rustls
+  provider it signs service account keys with. With `default-features = false`, enable it or
+  install a rustls provider yourself, see
+  [Crypto provider](https://bigquery-rust.abdolence.dev/getting-started.html#crypto-provider);
+- service account keys sign a JWT that is sent as the token itself, without the exchange at
+  `token_uri`;
+- `for_default_project_id` also reads `GOOGLE_CLOUD_PROJECT`, and the `project_id` of the
+  application default credentials file before its quota project.
+
 ## Examples
 
 All examples available in the [examples](examples) directory.
@@ -236,6 +268,17 @@ Looks for credentials in the following places, preferring the first location fou
 
 For local development don't confuse `gcloud auth login` with `gcloud auth application-default login`,
 since the first authorize only `gcloud` tool to access the Cloud Platform.
+
+A service account key file goes to `BigQueryDb::with_options_service_account_key_file`. Other
+credentials go to `BigQueryDb::with_options_auth`, see
+[Google authentication](https://bigquery-rust.abdolence.dev/getting-started.html#google-authentication).
+
+Service account keys sign a JWT, which needs a rustls crypto provider:
+
+- `auth-default-crypto`: default feature, the aws-lc-rs provider of google-cloud-auth, built from C sources;
+- with `default-features = false` and without `auth-default-crypto`, install a rustls provider
+  before creating a client, see
+  [Crypto provider](https://bigquery-rust.abdolence.dev/getting-started.html#crypto-provider).
 
 ## How this library is tested
 
