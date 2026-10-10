@@ -1,4 +1,4 @@
-//! The `smallquery` binary's inspection commands over a root a client wrote through the TCP
+//! The `smq` binary's inspection commands over a root a client wrote through the TCP
 //! route.
 
 use super::support::{client, serve, PROJECT};
@@ -10,10 +10,10 @@ const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
 const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
 const EU: BigQueryLocation = BigQueryLocation::from_static("EU");
 
-/// Runs `smallquery <args> --root <root>` and returns its standard output, failing the test on a
+/// Runs `smq <args> --root <root>` and returns its standard output, failing the test on a
 /// non-zero exit.
-fn smallquery(root: &Path, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_smallquery"))
+fn smq(root: &Path, args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_smq"))
         .args(args)
         .arg("--root")
         .arg(root)
@@ -21,7 +21,7 @@ fn smallquery(root: &Path, args: &[&str]) -> String {
         .expect("the binary runs");
     assert!(
         output.status.success(),
-        "smallquery {args:?} failed: {}",
+        "smq {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("the output is UTF-8")
@@ -72,9 +72,9 @@ async fn the_cli_lists_and_shows_what_a_client_created() -> BigQueryResult<()> {
     let root = served.root().to_path_buf();
     let (datasets, tables, shown) = tokio::task::spawn_blocking(move || {
         (
-            smallquery(&root, &["datasets"]),
-            smallquery(&root, &["tables", &format!("{PROJECT}.{SHOP}")]),
-            smallquery(&root, &["show", &format!("{PROJECT}.{SHOP}.{ORDERS}")]),
+            smq(&root, &["datasets"]),
+            smq(&root, &["tables", &format!("{PROJECT}.{SHOP}")]),
+            smq(&root, &["show", &format!("{PROJECT}.{SHOP}.{ORDERS}")]),
         )
     })
     .await

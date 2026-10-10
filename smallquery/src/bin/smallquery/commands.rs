@@ -37,7 +37,7 @@ async fn open_existing_engine(root: &EngineRoot) -> anyhow::Result<Engine> {
         let marker = dir.join("_smallquery").join("engine.json");
         if !marker.is_file() {
             anyhow::bail!(
-                "{} is not a smallquery root: {} is missing. `smallquery serve --root` creates one",
+                "{} is not a smallquery root: {} is missing. `smq serve --root` creates one",
                 dir.display(),
                 marker.display()
             );

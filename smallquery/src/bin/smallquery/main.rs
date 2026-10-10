@@ -1,4 +1,4 @@
-//! `smallquery`: serves an engine's root on a loopback port, and lists and shows what it holds.
+//! `smq`: serves an engine's root on a loopback port, and lists and shows what it holds.
 
 use crate::args::{CliArgs, CliCommand};
 use crate::commands::*;

@@ -12,15 +12,15 @@ A lightweight BigQuery engine over Apache Iceberg tables.
 other commands open the same root in process and print what its catalog holds; they run beside a \
 serving engine.
 
-  smallquery serve --root ./data --listen 127.0.0.1:9050
-  smallquery datasets --root ./data
-  smallquery tables --root ./data my-project.shop
-  smallquery show --root ./data my-project.shop.orders
+  smq serve --root ./data --listen 127.0.0.1:9050
+  smq datasets --root ./data
+  smq tables --root ./data my-project.shop
+  smq show --root ./data my-project.shop.orders
 
 Logs go to standard error at the level RUST_LOG sets, `info` by default.";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = LONG_ABOUT)]
+#[command(name = "smq", author, version, about, long_about = LONG_ABOUT)]
 pub struct CliArgs {
     #[command(subcommand)]
     pub command: CliCommand,

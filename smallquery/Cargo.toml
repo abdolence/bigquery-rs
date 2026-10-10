@@ -18,7 +18,7 @@ name = "smallquery"
 path = "src/lib.rs"
 
 [[bin]]
-name = "smallquery"
+name = "smq"
 path = "src/bin/smallquery/main.rs"
 required-features = ["cli"]
 
@@ -28,7 +28,7 @@ default = ["tls-webpki-roots"]
 # compile, so a build without the default feature enables the other.
 tls-roots = ["gcloud-sdk/tls-roots"]
 tls-webpki-roots = ["gcloud-sdk/tls-webpki-roots"]
-# The `smallquery` binary; off by default so that the library pulls in no CLI dependencies.
+# The `smq` binary; off by default so that the library pulls in no CLI dependencies.
 cli = ["dep:anyhow", "dep:clap", "dep:console", "dep:indicatif", "dep:tracing-subscriber", "tokio/signal"]
 
 [dependencies]
