@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-94b72fc4.js";
+            window.path_to_searchindex_js = "searchindex-4d8f5bb8.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-0dc013e9.js"></script>
@@ -276,25 +276,44 @@ and provides a fake BigQuery server instead, see <a href="#testing-with-the-fake
 <h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
 <p>Cargo.toml:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = "0.8"
+bigquery = "0.9"
 </code></pre>
 <p>The default feature <code>tls-roots</code> uses the native TLS roots of your system. Use
-<code>tls-webpki-roots</code> instead if you want the bundled Mozilla roots:</p>
+<code>tls-webpki-roots</code> instead if you want the bundled Mozilla roots. It needs
+<code>default-features = false</code>, which also turns off the default feature <code>auth-default-crypto</code>, so
+enable it again, see <a href="#crypto-provider">Crypto provider</a>:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = { version = "0.8", default-features = false, features = ["tls-webpki-roots"] }
+bigquery = { version = "0.9", default-features = false, features = ["tls-webpki-roots", "auth-default-crypto"] }
 </code></pre>
-<h2 id="crypto-provider-error"><a class="header" href="#crypto-provider-error">Crypto provider error</a></h2>
+<h2 id="crypto-provider"><a class="header" href="#crypto-provider">Crypto provider</a></h2>
+<p>Service account keys sign a JWT, and <code>google-cloud-auth</code> signs it with a rustls crypto provider.
+The default feature <code>auth-default-crypto</code> gives it the aws-lc-rs provider, which is built from C
+sources.</p>
+<p><code>tls-webpki-roots</code> builds aws-lc-rs for rustls already, so <code>auth-default-crypto</code> adds no C build
+with it. <code>tls-roots</code> without <code>auth-default-crypto</code> builds no aws-lc-rs.</p>
+<p>Without <code>auth-default-crypto</code>, install a rustls provider before creating a client, with the same
+<code>rustls</code> version as <code>google-cloud-auth</code> (0.23):</p>
+<pre><code class="language-toml">[dependencies]
+bigquery = { version = "0.9", default-features = false, features = ["tls-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+</code></pre>
+<pre><code class="language-rust ignore">rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");</code></pre>
+<p>Without a provider:</p>
+<ul>
+<li><code>BigQueryDb::new</code>, <code>with_options</code> and <code>for_default_project_id</code> fail with a <code>SystemError</code> whose
+code is <code>CryptoProviderMissing</code>, when the application default credentials are a service account
+key, used directly or as the source of an impersonation;</li>
+<li><code>with_options_service_account_key_file</code> fails with the same error;</li>
+<li>credentials passed to <code>with_options_auth</code> are not checked, and the first call that signs with a
+key panics.</li>
+</ul>
+<h3 id="crypto-provider-error"><a class="header" href="#crypto-provider-error">Crypto provider error</a></h3>
 <p>Depends on your other dependencies you may see the error like:</p>
 <pre><code class="language-text">no process-level CryptoProvider available -- call CryptoProvider::install_default() before this point
 </code></pre>
-<p>The TLS crypto providers are not installed by default, so you can choose one. The easiest way to
-fix it is to include one, for example:</p>
-<pre><code class="language-toml">[dependencies]
-rustls = "0.23"
-</code></pre>
-<p>If you have several, you may need to call <code>CryptoProvider::install_default()</code> before creating the
-client:</p>
-<pre><code class="language-rust ignore">rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");</code></pre>
+<p>It appears when rustls cannot pick a provider by itself, because none or more than one is compiled
+into your application. Install one with <code>CryptoProvider::install_default()</code> before creating the
+client, as above.</p>
 <h2 id="creating-a-client"><a class="header" href="#creating-a-client">Creating a client</a></h2>
 <p><code>BigQueryDb</code> is the client. It opens two authenticated gRPC channels, one to the BigQuery v2 API
 for queries, jobs, datasets and tables, and one to the Storage API for reads and writes. Clones
@@ -337,16 +356,20 @@ must not contain <code>/</code> or a control character. Everything else is up to
 <p>Each has a <code>with_...</code> builder method, as in the example above. <code>db.options()</code> returns the options
 a client was created with.</p>
 <h2 id="google-authentication"><a class="header" href="#google-authentication">Google authentication</a></h2>
-<p>Looks for credentials in the following places, preferring the first location found:</p>
+<p><code>BigQueryDb::new</code>, <code>with_options</code> and <code>for_default_project_id</code> use the application default
+credentials for the <code>cloud-platform</code> scope. They look for credentials in the following places,
+preferring the first location found:</p>
 <ul>
 <li>A JSON file whose path is specified by the <code>GOOGLE_APPLICATION_CREDENTIALS</code> environment variable;</li>
 <li>A JSON file in a location known to the gcloud command-line tool using
 <code>gcloud auth application-default login</code>;</li>
-<li>On Google Compute Engine, it fetches credentials from the metadata server.</li>
+<li>On Google Compute Engine, Cloud Run, GKE, etc., the metadata server.</li>
 </ul>
+<p>The JSON file can be a service account key, user credentials, impersonated service account
+credentials or a workload identity federation configuration.</p>
 <p>For local development don’t confuse <code>gcloud auth login</code> with <code>gcloud auth application-default login</code>,
 since the first one authorizes only the <code>gcloud</code> tool to access the Cloud Platform.</p>
-<p>To use a service account key file directly:</p>
+<h3 id="service-account-key-file"><a class="header" href="#service-account-key-file">Service account key file</a></h3>
 <pre><code class="language-rust no_run">use bigquery::*;
 
 <span class="boring">async fn example() -&gt; BigQueryResult&lt;()&gt; {
@@ -358,25 +381,61 @@ since the first one authorizes only the <code>gcloud</code> tool to access the C
 <span class="boring">let _ = db;
 </span><span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>For full control over the OAuth2 scopes and the token source there is
-<code>with_options_token_source</code>. Its <code>TokenSourceType</code> comes from
-<a href="https://github.com/abdolence/gcloud-sdk-rs">gcloud-sdk</a>, which the library does not re-export, so
-add <code>gcloud-sdk</code> to your dependencies to use it:</p>
-<pre><code class="language-rust no_run">use bigquery::*;
+<p>The key is used for the <code>cloud-platform</code> scope.</p>
+<h3 id="other-credentials"><a class="header" href="#other-credentials">Other credentials</a></h3>
+<p><code>with_options_auth</code> takes anything that converts into <code>GoogleAuthHeaders</code> of
+<a href="https://github.com/abdolence/gcloud-sdk-rs">gcloud-sdk</a>:</p>
+<ul>
+<li><code>Credentials</code> built with <a href="https://crates.io/crates/google-cloud-auth">google-cloud-auth</a>:
+impersonation, the metadata server, workload identity federation, a service account key with
+settings of your own, or a <code>CredentialsProvider</code> of your own;</li>
+<li><code>IDTokenCredentials</code>, for a server that takes Google ID tokens;</li>
+<li>a <code>GoogleAuthHeaders</code>, for example the application default credentials or a service account key
+for other scopes.</li>
+</ul>
+<p>The library re-exports the gcloud-sdk version it is built against as <code>bigquery::gcloud_sdk</code>, and
+google-cloud-auth as <code>bigquery::gcloud_sdk::google_cloud_auth</code>.</p>
+<p>The application default credentials for other OAuth2 scopes:</p>
+<pre><code class="language-rust no_run">use bigquery::gcloud_sdk::GoogleAuthHeaders;
+use bigquery::*;
 
-<span class="boring">async fn example(service_account_json: String) -&gt; BigQueryResult&lt;()&gt; {
-</span>let db = BigQueryDb::with_options_token_source(
+<span class="boring">async fn example() -&gt; Result&lt;(), Box&lt;dyn std::error::Error + Send + Sync&gt;&gt; {
+</span>let auth = GoogleAuthHeaders::from_adc_with_scopes(vec![
+    "https://www.googleapis.com/auth/bigquery".to_string(),
+])
+.await?;
+let db = BigQueryDb::with_options_auth(
     BigQueryDbOptions::new("my-gcp-project-id".to_string()),
-    gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
-    gcloud_sdk::TokenSourceType::Json(service_account_json),
+    auth,
 )
 .await?;
 <span class="boring">let _ = db;
 </span><span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>Both channels share one token, so the token source is asked for a new one only when it expires.</p>
+<p>A service account key built with google-cloud-auth, here to bill another project for quota:</p>
+<pre><code class="language-rust no_run">use bigquery::gcloud_sdk::google_cloud_auth::credentials::service_account;
+use bigquery::*;
+
+<span class="boring">async fn example() -&gt; Result&lt;(), Box&lt;dyn std::error::Error + Send + Sync&gt;&gt; {
+</span>let key = std::fs::read("/path/to/service-account.json")?;
+let credentials = service_account::Builder::new(serde_json::from_slice(&amp;key)?)
+    .with_quota_project_id("my-quota-project-id")
+    .build()?;
+let db = BigQueryDb::with_options_auth(
+    BigQueryDbOptions::new("my-gcp-project-id".to_string()),
+    credentials,
+)
+.await?;
+<span class="boring">let _ = db;
+</span><span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Be aware that <code>with_options_auth</code> does not check for a rustls crypto provider, see
+<a href="#crypto-provider">Crypto provider</a>.</p>
+<p>Credentials that mint tokens refresh them on the Tokio runtime they are built in, so build them in
+the runtime that runs the client.</p>
+<p>Both channels share one set of credentials, so a token is minted and refreshed once for both.</p>
 <p>The token never reaches the library’s logs or spans. The one <code>info!</code> line at client creation
-logs the project, the two endpoints and the scope names.</p>
+logs the project and the two endpoints.</p>
 <h2 id="endpoints"><a class="header" href="#endpoints">Endpoints</a></h2>
 <p>The library uses Google’s two global endpoints by default. You can change them, for example for a
 Private Service Connect endpoint or a proxy:</p>
@@ -447,7 +506,7 @@ shared channels: <code>job_client()</code>, <code>dataset_client()</code>, <code
 <pre><code class="language-rust no_run">use bigquery::*;
 
 <span class="boring">async fn example(db: BigQueryDb) -&gt; Result&lt;(), Box&lt;dyn std::error::Error + Send + Sync&gt;&gt; {
-</span>use gcloud_sdk::google::cloud::bigquery::v2::GetServiceAccountRequest;
+</span>use bigquery::gcloud_sdk::google::cloud::bigquery::v2::GetServiceAccountRequest;
 
 let response = db
     .project_client()
@@ -458,8 +517,8 @@ let response = db
 println!("{}", response.into_inner().email);
 <span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
-<p>Their types come from gcloud-sdk, which the library does not re-export, so they can change in a
-patch release.</p>
+<p>Their types come from gcloud-sdk, re-exported as <code>bigquery::gcloud_sdk</code>, so they change with its
+version.</p>
 <h2 id="running-the-examples"><a class="header" href="#running-the-examples">Running the examples</a></h2>
 <p>All examples available in the <a href="https://github.com/abdolence/bigquery-rs/tree/master/examples">examples</a> directory.
 Each one creates its own scratch dataset and deletes it at the end.</p>
