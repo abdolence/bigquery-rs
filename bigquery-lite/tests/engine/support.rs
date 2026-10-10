@@ -2,6 +2,7 @@
 //! through the `bigquery` client's public URL constructors, as `bigquery::testing` reaches its
 //! fake. [`client`] is the one place that names the constructor.
 
+use bigquery::gcloud_sdk::google_cloud_auth::credentials::anonymous;
 use bigquery::{BigQueryDb, BigQueryDbOptions};
 use bigquery_lite::{Engine, EngineConfig, TcpEndpoint};
 use std::net::SocketAddr;
@@ -48,32 +49,14 @@ pub(crate) async fn serve() -> Served {
     }
 }
 
-/// A client whose v2 and Storage endpoints both point at `addr`, with a token the engine never
-/// checks.
+/// A client whose v2 and Storage endpoints both point at `addr`, with anonymous credentials,
+/// which send no `authorization` header, start no refresh task and need no crypto provider.
 pub(crate) async fn client(addr: SocketAddr) -> BigQueryDb {
     let endpoint = url::Url::parse(&format!("http://{addr}")).expect("a loopback URL");
     let options = BigQueryDbOptions::new(PROJECT.to_string())
         .with_bigquery_api_url(endpoint.clone())
         .with_bigquery_storage_api_url(endpoint);
-    BigQueryDb::with_options_token_source(
-        options,
-        Vec::new(),
-        gcloud_sdk::TokenSourceType::ExternalSource(Box::new(UncheckedToken)),
-    )
-    .await
-    .expect("the client connects")
-}
-
-/// A token for an engine that checks none.
-struct UncheckedToken;
-
-#[async_trait::async_trait]
-impl gcloud_sdk::Source for UncheckedToken {
-    async fn token(&self) -> gcloud_sdk::error::Result<gcloud_sdk::Token> {
-        Ok(gcloud_sdk::Token::new(
-            "Bearer".to_string(),
-            "unchecked".to_string().into(),
-            bigquery::jiff::Timestamp::MAX,
-        ))
-    }
+    BigQueryDb::with_options_auth(options, anonymous::Builder::new().build())
+        .await
+        .expect("the client connects")
 }
