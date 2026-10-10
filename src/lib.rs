@@ -108,6 +108,12 @@ mod struct_path_macro;
 /// `StructPath` derive.
 pub extern crate struct_path;
 
+/// The gcloud-sdk version this crate is built against, for [`GoogleAuthHeaders`] and the
+/// raw gRPC clients.
+///
+/// [`GoogleAuthHeaders`]: gcloud_sdk::GoogleAuthHeaders
+pub use gcloud_sdk;
+
 pub use arrow_array;
 pub use arrow_schema;
 pub use jiff;

@@ -44,6 +44,7 @@ Without a provider:
 - `BigQueryDb::new`, `with_options` and `for_default_project_id` fail with a `SystemError` whose
   code is `CryptoProviderMissing`, when the application default credentials are a service account
   key, used directly or as the source of an impersonation;
+- `with_options_service_account_key_file` fails with the same error;
 - credentials passed to `with_options_auth` are not checked, and the first call that signs with a
   key panics.
 
@@ -126,37 +127,15 @@ credentials or a workload identity federation configuration.
 For local development don't confuse `gcloud auth login` with `gcloud auth application-default login`,
 since the first one authorizes only the `gcloud` tool to access the Cloud Platform.
 
-### Other credentials
-
-`with_options_auth` takes anything that converts into `GoogleAuthHeaders` of
-[gcloud-sdk](https://github.com/abdolence/gcloud-sdk-rs):
-
-- `Credentials` built with [google-cloud-auth](https://crates.io/crates/google-cloud-auth): a
-  service account key that is not the application default credentials, impersonation, the
-  metadata server, workload identity federation, or a `CredentialsProvider` of your own;
-- `IDTokenCredentials`, for a server that takes Google ID tokens;
-- a `GoogleAuthHeaders`, for example the application default credentials for other scopes.
-
-The library does not re-export gcloud-sdk, so add it to your dependencies, with the same version
-the library uses:
-
-```toml
-[dependencies]
-gcloud-sdk = { version = "0.33", default-features = false }
-```
-
-A service account key file:
+### Service account key file
 
 ```rust,no_run
 use bigquery::*;
-use gcloud_sdk::google_cloud_auth::credentials::service_account;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-let key = std::fs::read_to_string("/path/to/service-account.json")?;
-let credentials = service_account::Builder::new(serde_json::from_str(&key)?).build()?;
-let db = BigQueryDb::with_options_auth(
+# async fn example() -> BigQueryResult<()> {
+let db = BigQueryDb::with_options_service_account_key_file(
     BigQueryDbOptions::new("my-gcp-project-id".to_string()),
-    credentials,
+    "/path/to/service-account.json".into(),
 )
 .await?;
 # let _ = db;
@@ -164,11 +143,28 @@ let db = BigQueryDb::with_options_auth(
 # }
 ```
 
+The key is used for the `cloud-platform` scope.
+
+### Other credentials
+
+`with_options_auth` takes anything that converts into `GoogleAuthHeaders` of
+[gcloud-sdk](https://github.com/abdolence/gcloud-sdk-rs):
+
+- `Credentials` built with [google-cloud-auth](https://crates.io/crates/google-cloud-auth):
+  impersonation, the metadata server, workload identity federation, a service account key with
+  settings of your own, or a `CredentialsProvider` of your own;
+- `IDTokenCredentials`, for a server that takes Google ID tokens;
+- a `GoogleAuthHeaders`, for example the application default credentials or a service account key
+  for other scopes.
+
+The library re-exports the gcloud-sdk version it is built against as `bigquery::gcloud_sdk`, and
+google-cloud-auth as `bigquery::gcloud_sdk::google_cloud_auth`.
+
 The application default credentials for other OAuth2 scopes:
 
 ```rust,no_run
+use bigquery::gcloud_sdk::GoogleAuthHeaders;
 use bigquery::*;
-use gcloud_sdk::GoogleAuthHeaders;
 
 # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 let auth = GoogleAuthHeaders::from_adc_with_scopes(vec![
@@ -184,6 +180,30 @@ let db = BigQueryDb::with_options_auth(
 # Ok(())
 # }
 ```
+
+A service account key built with google-cloud-auth, here to bill another project for quota:
+
+```rust,no_run
+use bigquery::gcloud_sdk::google_cloud_auth::credentials::service_account;
+use bigquery::*;
+
+# async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let key = std::fs::read("/path/to/service-account.json")?;
+let credentials = service_account::Builder::new(serde_json::from_slice(&key)?)
+    .with_quota_project_id("my-quota-project-id")
+    .build()?;
+let db = BigQueryDb::with_options_auth(
+    BigQueryDbOptions::new("my-gcp-project-id".to_string()),
+    credentials,
+)
+.await?;
+# let _ = db;
+# Ok(())
+# }
+```
+
+Be aware that `with_options_auth` does not check for a rustls crypto provider, see
+[Crypto provider](#crypto-provider).
 
 Credentials that mint tokens refresh them on the Tokio runtime they are built in, so build them in
 the runtime that runs the client.
@@ -285,7 +305,7 @@ shared channels: `job_client()`, `dataset_client()`, `table_client()`, `model_cl
 use bigquery::*;
 
 # async fn example(db: BigQueryDb) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-use gcloud_sdk::google::cloud::bigquery::v2::GetServiceAccountRequest;
+use bigquery::gcloud_sdk::google::cloud::bigquery::v2::GetServiceAccountRequest;
 
 let response = db
     .project_client()
@@ -298,8 +318,8 @@ println!("{}", response.into_inner().email);
 # }
 ```
 
-Their types come from gcloud-sdk, which the library does not re-export, so they can change in a
-patch release.
+Their types come from gcloud-sdk, re-exported as `bigquery::gcloud_sdk`, so they change with its
+version.
 
 ## Running the examples
 

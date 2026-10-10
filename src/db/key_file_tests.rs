@@ -1,4 +1,4 @@
-//! A service account key passed to the client as `google-cloud-auth` credentials.
+//! A service account key file passed to the client.
 //!
 //! Signing with the key needs a rustls crypto provider, which the default features carry. A
 //! build without `auth-default-crypto` leaves installing one to the application, and fails here.
@@ -6,8 +6,8 @@
 use super::*;
 use crate::db::fake::{FakeBigQuery, FakeCall};
 use gcloud_sdk::google::cloud::bigquery::v2::{GetTableRequest, Table};
-use gcloud_sdk::google_cloud_auth::credentials::service_account;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// A 2048-bit RSA key generated for this test; it signs nothing outside it.
@@ -61,8 +61,32 @@ struct SignerClaims {
     sub: String,
 }
 
+/// A key file in the system temp directory, removed when dropped.
+struct KeyFile(PathBuf);
+
+impl KeyFile {
+    fn write(name: &str, contents: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "bigquery-key-file-tests-{}-{name}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).expect("a writable temp directory");
+        Self(path)
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.clone()
+    }
+}
+
+impl Drop for KeyFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[tokio::test]
-async fn a_service_account_key_signs_the_bearer_token_the_client_sends() {
+async fn a_service_account_key_file_signs_the_bearer_token_the_client_sends() {
     let fake = FakeBigQuery::start(|mut call: FakeCall| async move {
         let _: GetTableRequest = call.next_request().await.expect("a GetTable request");
         call.log(call.header("authorization").unwrap_or_default());
@@ -76,12 +100,13 @@ async fn a_service_account_key_signs_the_bearer_token_the_client_sends() {
         "private_key": TEST_RSA_PRIVATE_KEY,
         "client_email": SERVICE_ACCOUNT,
     });
-    let credentials = service_account::Builder::new(key)
-        .build()
-        .expect("credentials from the service account key");
-    let db = BigQueryDb::with_options_auth(fake.db.options().clone(), credentials)
-        .await
-        .expect("a client with service account key credentials");
+    let key_file = KeyFile::write("signs_the_bearer_token", &key.to_string());
+    let db = BigQueryDb::with_options_service_account_key_file(
+        fake.db.options().clone(),
+        key_file.path(),
+    )
+    .await
+    .expect("a client with the service account key file");
 
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -114,4 +139,22 @@ async fn a_service_account_key_signs_the_bearer_token_the_client_sends() {
             sub: SERVICE_ACCOUNT.to_string(),
         }
     );
+}
+
+#[tokio::test]
+async fn a_key_file_that_is_not_json_is_an_invalid_parameter() {
+    let key_file = KeyFile::write("not_json", "not a key");
+
+    let result = BigQueryDb::with_options_service_account_key_file(
+        BigQueryDbOptions::new("fake-project".to_string()),
+        key_file.path(),
+    )
+    .await;
+
+    match result {
+        Err(BigQueryError::InvalidParametersError(error)) => {
+            assert_eq!(error.public.field, "service_account_key_path")
+        }
+        other => panic!("expected an invalid parameter, got {:?}", other.err()),
+    }
 }

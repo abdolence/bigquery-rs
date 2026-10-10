@@ -164,19 +164,21 @@ If you see `no process-level CryptoProvider available`, see
 
 0.9 moves to gcloud-sdk 0.33, which authenticates with
 [google-cloud-auth](https://crates.io/crates/google-cloud-auth). The token sources of gcloud-sdk
-are gone, and the client constructors that took one now take anything that converts into
-`gcloud_sdk::GoogleAuthHeaders`:
+are gone, and `with_options_token_source` is replaced by `with_options_auth`, which takes anything
+that converts into `bigquery::gcloud_sdk::GoogleAuthHeaders`:
 
 | 0.8 | 0.9 |
 |---|---|
 | `with_options_token_source(options, scopes, TokenSourceType::Default)` | `with_options_auth(options, GoogleAuthHeaders::from_adc_with_scopes(scopes).await?)` |
-| `with_options_service_account_key_file(options, path)`, `TokenSourceType::File(path)`, `TokenSourceType::Json(json)` | `with_options_auth(options, service_account::Builder::new(key).build()?)` for a service account key, with `.with_access_specifier(AccessSpecifier::from_scopes(scopes))` for other scopes; the `user_account`, `impersonated` and `external_account` builders for other files |
+| `with_options_token_source(options, scopes, TokenSourceType::File(path))` | `with_options_service_account_key_file(options, path)` for the default scopes; `with_options_auth(options, GoogleAuthHeaders::from_service_account_key(key, scopes).await?)` for other scopes |
+| `TokenSourceType::Json(json)` | `with_options_auth(options, GoogleAuthHeaders::from_service_account_key(key, scopes).await?)` for a service account key; the `user_account`, `impersonated` and `external_account` builders for other credentials |
 | `TokenSourceType::MetadataServer` | `with_options_auth(options, mds::Builder::default().build()?)` |
 | `TokenSourceType::ExternalSource(source)` | implement `CredentialsProvider` and pass `Credentials::from(provider)` |
 
-The builders, `CredentialsProvider` and `Credentials` are in
-`gcloud_sdk::google_cloud_auth::credentials`, and `AccessSpecifier` in its `service_account`
-module. `BigQueryDb::new`, `with_options` and `for_default_project_id` keep their signatures.
+The library re-exports gcloud-sdk as `bigquery::gcloud_sdk`, so there is no need to add it to your
+dependencies. The builders, `CredentialsProvider` and `Credentials` are in
+`bigquery::gcloud_sdk::google_cloud_auth::credentials`. `BigQueryDb::new`, `with_options`,
+`for_default_project_id` and `with_options_service_account_key_file` keep their signatures.
 
 Also changed:
 
@@ -267,8 +269,8 @@ Looks for credentials in the following places, preferring the first location fou
 For local development don't confuse `gcloud auth login` with `gcloud auth application-default login`,
 since the first authorize only `gcloud` tool to access the Cloud Platform.
 
-Other credentials, such as a service account key that is not the application default credentials,
-go to `BigQueryDb::with_options_auth`, see
+A service account key file goes to `BigQueryDb::with_options_service_account_key_file`. Other
+credentials go to `BigQueryDb::with_options_auth`, see
 [Google authentication](https://bigquery-rust.abdolence.dev/getting-started.html#google-authentication).
 
 Service account keys sign a JWT, which needs a rustls crypto provider:

@@ -126,6 +126,39 @@ impl BigQueryDb {
         }
     }
 
+    /// Creates a client that authenticates with the service account key file at
+    /// `service_account_key_path`, for the `cloud-platform` scope.
+    ///
+    /// The file is the JSON key the IAM console or `gcloud iam service-accounts keys create`
+    /// writes. For other scopes or other kinds of credentials, see
+    /// [`with_options_auth`](Self::with_options_auth).
+    ///
+    /// # Errors
+    /// - [`BigQueryError::InvalidParametersError`] for the field `service_account_key_path` if
+    ///   the file cannot be read or is not JSON, and for an option `with_options_auth` refuses;
+    /// - [`BigQueryError::SystemError`] with the code `CredentialsBuild` if the JSON lacks the
+    ///   fields of a service account key, and with the code `CryptoProviderMissing` if the
+    ///   `auth-default-crypto` feature is off and the application has installed no rustls
+    ///   crypto provider.
+    pub async fn with_options_service_account_key_file(
+        options: BigQueryDbOptions,
+        service_account_key_path: std::path::PathBuf,
+    ) -> BigQueryResult<Self> {
+        let unreadable_key = |reason: String| {
+            BigQueryError::invalid_parameters(
+                "service_account_key_path",
+                format!("{}: {reason}", service_account_key_path.display()),
+            )
+        };
+        let key = std::fs::read(&service_account_key_path)
+            .map_err(|error| unreadable_key(error.to_string()))?;
+        let key =
+            serde_json::from_slice(&key).map_err(|error| unreadable_key(error.to_string()))?;
+        let auth =
+            GoogleAuthHeaders::from_service_account_key(key, GCP_DEFAULT_SCOPES.clone()).await?;
+        Self::with_options_auth(options, auth).await
+    }
+
     /// Creates a client that authenticates every call with the headers `auth` serves.
     ///
     /// `auth` is anything [`GoogleAuthHeaders`] converts from: `Credentials` built with
@@ -204,7 +237,7 @@ impl BigQueryDb {
     /// The raw gRPC client of the v2 `JobService`, on the shared v2 channel.
     ///
     /// The raw clients are for calls this crate has no API for. Their types come from
-    /// `gcloud-sdk`, which this crate does not re-export, so they can change in a patch release.
+    /// [`gcloud_sdk`](crate::gcloud_sdk), so they change with its version.
     pub fn job_client(&self) -> JobServiceClient<GoogleAuthMiddleware> {
         self.inner.v2.get()
     }
