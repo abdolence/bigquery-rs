@@ -3,8 +3,8 @@
 //! The metadata file is the single source of truth, so every change is a commit. What Iceberg
 //! has no field for is a table property: `bigquery.description`, `bigquery.label.<key>`,
 //! `bigquery.expiration_ms`, `bigquery.creation_time_ms`, `bigquery.partitioning` (the declared
-//! partitioning, returned as it was declared), `bigquery.clustering` and
-//! `bigquery.primary_key` (JSON lists of field IDs, which survive a rename),
+//! partitioning, returned as it was declared, its column by field ID), `bigquery.clustering`
+//! and `bigquery.primary_key` (JSON lists of field IDs; field IDs survive a rename),
 //! `bigquery.max_staleness`, and the column properties of [`crate::types`]. Time partitioning is
 //! also the table's partition spec, and clustering its sort order.
 
@@ -75,8 +75,7 @@ impl TimeUnit {
 }
 
 /// A table's partitioning as BigQuery declares it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Partitioning {
     Time {
         unit: TimeUnit,
@@ -91,7 +90,69 @@ pub(crate) enum Partitioning {
     },
 }
 
+/// `bigquery.partitioning` as the table property stores it: the column by its field ID, which
+/// survives a rename.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum StoredPartitioning {
+    Time {
+        unit: TimeUnit,
+        field_id: i32,
+    },
+    Range {
+        field_id: i32,
+        start: i64,
+        end: i64,
+        interval: i64,
+    },
+}
+
+impl StoredPartitioning {
+    /// The partitioning, with its column named as `schema` names the field now.
+    fn resolve(self, schema: &Schema) -> Result<Partitioning, EngineError> {
+        Ok(match self {
+            StoredPartitioning::Time { unit, field_id } => Partitioning::Time {
+                unit,
+                column: column_named_by(schema, PARTITIONING, field_id)?,
+            },
+            StoredPartitioning::Range {
+                field_id,
+                start,
+                end,
+                interval,
+            } => Partitioning::Range {
+                column: column_named_by(schema, PARTITIONING, field_id)?,
+                start,
+                end,
+                interval,
+            },
+        })
+    }
+}
+
 impl Partitioning {
+    /// The stored form, with the column's field ID in `schema`.
+    fn stored(&self, schema: &Schema) -> Result<StoredPartitioning, EngineError> {
+        let field_id = Columns::field_id(schema, self.column())?;
+        Ok(match self {
+            Partitioning::Time { unit, .. } => StoredPartitioning::Time {
+                unit: *unit,
+                field_id,
+            },
+            Partitioning::Range {
+                start,
+                end,
+                interval,
+                ..
+            } => StoredPartitioning::Range {
+                field_id,
+                start: *start,
+                end: *end,
+                interval: *interval,
+            },
+        })
+    }
+
     fn column(&self) -> &ColumnName {
         match self {
             Partitioning::Time { column, .. } | Partitioning::Range { column, .. } => column,
@@ -600,7 +661,10 @@ impl TableDefinition {
             properties.insert(EXPIRATION_MS.to_string(), ms.to_string());
         }
         if let Some(partitioning) = &self.partitioning {
-            properties.insert(PARTITIONING.to_string(), to_json(partitioning)?);
+            properties.insert(
+                PARTITIONING.to_string(),
+                to_json(&partitioning.stored(schema)?)?,
+            );
         }
         for (key, columns) in [
             (CLUSTERING, &self.clustering),
@@ -676,6 +740,17 @@ fn from_json<T: for<'de> Deserialize<'de>>(
         .transpose()
 }
 
+/// The column whose field ID the table property `key` stores, by its name in `schema`.
+fn column_named_by(schema: &Schema, key: &str, id: i32) -> Result<ColumnName, EngineError> {
+    let field = schema.field_by_id(id).ok_or_else(|| {
+        EngineError::invalid(
+            format!("table property {key}"),
+            format!("the table has no field {id}"),
+        )
+    })?;
+    ColumnName::try_from(field.name.clone())
+}
+
 /// The definition a table's metadata stores.
 impl TryFrom<&TableMetadata> for TableDefinition {
     type Error = EngineError;
@@ -686,15 +761,7 @@ impl TryFrom<&TableMetadata> for TableDefinition {
         let names = |key: &str| -> Result<Vec<ColumnName>, EngineError> {
             let ids: Vec<i32> = from_json(properties, key)?.unwrap_or_default();
             ids.into_iter()
-                .map(|id| {
-                    let field = schema.field_by_id(id).ok_or_else(|| {
-                        EngineError::invalid(
-                            format!("table property {key}"),
-                            format!("the table has no field {id}"),
-                        )
-                    })?;
-                    ColumnName::try_from(field.name.clone())
-                })
+                .map(|id| column_named_by(schema, key, id))
                 .collect()
         };
         Ok(Self {
@@ -707,7 +774,9 @@ impl TryFrom<&TableMetadata> for TableDefinition {
                         .map(|label| (label.to_string(), value.clone()))
                 })
                 .collect(),
-            partitioning: from_json(properties, PARTITIONING)?,
+            partitioning: from_json::<StoredPartitioning>(properties, PARTITIONING)?
+                .map(|stored| stored.resolve(schema))
+                .transpose()?,
             clustering: names(CLUSTERING)?,
             primary_key: names(PRIMARY_KEY)?,
             expiration_ms: parse_property(properties, EXPIRATION_MS)?,
@@ -818,6 +887,7 @@ impl From<&TableRef> for v2::TableReference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn field(name: &str, field_type: &str, mode: &str) -> v2::TableFieldSchema {
         v2::TableFieldSchema {
@@ -837,6 +907,67 @@ mod tests {
             ..Default::default()
         })
         .expect("a valid definition")
+    }
+
+    #[test]
+    fn partitioning_follows_its_column_through_a_rename() {
+        let declared = TableDefinition::try_from(&v2::Table {
+            schema: Some(v2::TableSchema {
+                fields: vec![
+                    field("id", "INT64", "REQUIRED"),
+                    field("placed_at", "TIMESTAMP", "NULLABLE"),
+                ],
+                ..Default::default()
+            }),
+            time_partitioning: Some(v2::TimePartitioning {
+                r#type: "DAY".to_string(),
+                field: Some("placed_at".to_string()),
+                expiration_ms: None,
+            }),
+            ..Default::default()
+        })
+        .expect("a valid definition");
+        let orders = TableRef {
+            project: "lite-project".parse().expect("a valid project"),
+            dataset: "shop".parse().expect("a valid dataset"),
+            table: "orders".parse().expect("a valid table"),
+        };
+        let metadata = declared
+            .metadata(&orders, "file:///lite/orders".to_string(), 0)
+            .expect("the metadata builds");
+        let renamed_fields = metadata
+            .current_schema()
+            .as_struct()
+            .fields()
+            .iter()
+            .map(|field| {
+                let mut field = field.as_ref().clone();
+                if field.name == "placed_at" {
+                    field.name = "ordered_at".to_string();
+                }
+                Arc::new(field)
+            })
+            .collect::<Vec<_>>();
+        let renamed_schema = Schema::builder()
+            .with_schema_id(1)
+            .with_fields(renamed_fields)
+            .build()
+            .expect("the renamed schema is valid");
+        let renamed = metadata
+            .into_builder(None)
+            .add_current_schema(renamed_schema)
+            .and_then(TableMetadataBuilder::build)
+            .expect("the rename applies")
+            .metadata;
+
+        let stored = TableDefinition::try_from(&renamed).expect("the definition reads back");
+        assert_eq!(
+            stored.partitioning,
+            Some(Partitioning::Time {
+                unit: TimeUnit::Day,
+                column: ColumnName::try_from("ordered_at".to_string()).expect("a valid name"),
+            })
+        );
     }
 
     #[test]
