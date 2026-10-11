@@ -181,6 +181,7 @@ pub(crate) struct EngineCatalog {
     settings: CatalogSettings,
     locks: Locks,
     cache: Mutex<HashMap<TableRef, Cached>>,
+    contention: Mutex<HashMap<TableRef, commit::Contention>>,
     hooks: CommitHooks,
 }
 
@@ -200,6 +201,7 @@ impl EngineCatalog {
             settings,
             locks: Locks::default(),
             cache: Mutex::default(),
+            contention: Mutex::default(),
             hooks: CommitHooks::default(),
         }
     }

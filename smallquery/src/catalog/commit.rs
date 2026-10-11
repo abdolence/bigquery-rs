@@ -168,6 +168,24 @@ enum ReadBack {
     Gone,
 }
 
+/// What this process saw of other writers of one table.
+///
+/// A process that commits on top of its own commits builds each one from its cache, while
+/// another process must first load the pointer it created and parse the metadata that pointer
+/// names. The first starts building on each new pointer before the second can, so it wins every
+/// race against the second for as long as it has commits to make, whatever the second's retry
+/// delays. So while another writer of the table was seen within the last
+/// `commit_retry_deadline`, the longest that writer's commit keeps retrying, each commit of this
+/// process first waits a delay drawn between zero and its last attempt's duration, which leaves
+/// the other a window to land in. Nothing here decides a commit's outcome.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Contention {
+    /// When another writer was last seen.
+    seen: Instant,
+    /// How long this process's last attempt on the table took.
+    attempt: Duration,
+}
+
 /// The floor of a commit's measured duration, so that a fast commit never retries in a tight
 /// loop.
 const MIN_BASE: Duration = Duration::from_millis(10);
@@ -256,25 +274,37 @@ impl EngineCatalog {
         mut change: impl FnMut(&LoadedTable) -> Result<Change, EngineError>,
     ) -> Result<LoadedTable, EngineError> {
         let _lock = self.locks.table(table).await;
+        let contended = self.make_way(table).await;
+        let cached = self.cached(table).map(|(loaded, _)| loaded.version());
         let mut retry = Retry::new(table, self.settings.commit_retry_deadline);
         let mut identity = None;
         loop {
             let attempt = retry.start();
+            let started = Instant::now();
             let loaded = self.load_for_attempt(table, attempt, &mut identity).await?;
+            let moved = attempt == 1 && cached.is_some_and(|version| version != loaded.version());
+            // A retry is likely to find its pointer version taken again, and so is any attempt
+            // while another writer is about.
+            let recheck = contended || attempt > 1;
             let attempted = match change(&loaded)? {
                 Change::Engine(commit) => match self.propose(&loaded, commit)? {
                     Proposed::Metadata(proposal) => {
-                        self.attempt_metadata(table, Base::Live(&loaded.head), *proposal)
+                        self.attempt_metadata(table, Base::Live(&loaded.head), *proposal, recheck)
                             .await?
                     }
                     Proposed::Unchanged => Attempted::Landed(loaded),
                     Proposed::Unmet(detail) => Attempted::Lost(Lost::Unmet(detail)),
                 },
                 Change::Transaction(transaction) => {
-                    self.attempt_transaction(table, &loaded, transaction)
+                    self.attempt_transaction(table, &loaded, transaction, recheck)
                         .await?
                 }
             };
+            self.attempted(
+                table,
+                started.elapsed(),
+                moved || matches!(attempted, Attempted::Lost(Lost::Race)),
+            );
             match attempted {
                 Attempted::Landed(loaded) => return Ok(loaded),
                 // A retry reloads from storage, and a requirement the stored table does not
@@ -287,6 +317,52 @@ impl EngineCatalog {
                 }
                 Attempted::Lost(_) => retry.lost().await?,
             }
+        }
+    }
+
+    /// Waits as [`Contention`] says while another writer of the table was seen recently, and
+    /// returns whether it was.
+    async fn make_way(&self, table: &TableRef) -> bool {
+        let attempt = {
+            let mut contention = self
+                .contention
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match contention.get(table) {
+                Some(known) if known.seen.elapsed() < self.settings.commit_retry_deadline => {
+                    Some(known.attempt)
+                }
+                Some(_) => {
+                    contention.remove(table);
+                    None
+                }
+                None => None,
+            }
+        };
+        let Some(attempt) = attempt else {
+            return false;
+        };
+        tokio::time::sleep(uniform_up_to(attempt)).await;
+        true
+    }
+
+    /// Notes how long an attempt on the table took, and whether it saw another writer: a
+    /// commit it did not make under the pointer it had cached, or a race it lost.
+    fn attempted(&self, table: &TableRef, attempt: Duration, saw_another_writer: bool) {
+        let mut contention = self
+            .contention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if saw_another_writer {
+            contention.insert(
+                table.clone(),
+                Contention {
+                    seen: Instant::now(),
+                    attempt,
+                },
+            );
+        } else if let Some(known) = contention.get_mut(table) {
+            known.attempt = attempt;
         }
     }
 
@@ -329,7 +405,7 @@ impl EngineCatalog {
                     expired: Vec::new(),
                 },
             };
-            match self.attempt_metadata(table, base, proposal).await? {
+            match self.attempt_metadata(table, base, proposal, false).await? {
                 Attempted::Landed(loaded) => return Ok(loaded),
                 Attempted::Lost(_) => retry.lost().await?,
             }
@@ -366,7 +442,7 @@ impl EngineCatalog {
         };
         let attempted = match self.propose(&loaded, pair)? {
             Proposed::Metadata(proposal) => {
-                self.attempt_metadata(&table, Base::Live(&loaded.head), *proposal)
+                self.attempt_metadata(&table, Base::Live(&loaded.head), *proposal, false)
                     .await?
             }
             Proposed::Unchanged => Attempted::Landed(loaded),
@@ -439,17 +515,19 @@ impl EngineCatalog {
     }
 
     /// Runs `transaction`'s actions on the loaded table and commits what they produce as one
-    /// attempt.
+    /// attempt, rechecking its pointer version as [`EngineCatalog::attempt_metadata`] does.
     async fn attempt_transaction(
         &self,
         table: &TableRef,
         loaded: &LoadedTable,
         transaction: Transaction,
+        recheck: bool,
     ) -> Result<Attempted<LoadedTable>, EngineError> {
         let scope = AttemptCatalog {
             catalog: self,
             table,
             loaded,
+            recheck,
             outcome: Mutex::new(None),
         };
         let committed = transaction.commit(&scope).await;
@@ -466,13 +544,22 @@ impl EngineCatalog {
         }
     }
 
-    /// Makes `proposal` the table's metadata on top of `base`.
+    /// Makes `proposal` the table's metadata on top of `base`. With `recheck`, an attempt whose
+    /// pointer version another commit created meanwhile is lost before it writes the metadata
+    /// file, which it would otherwise write only to delete it again.
     async fn attempt_metadata(
         &self,
         table: &TableRef,
         base: Base<'_>,
         proposal: TableProposal,
+        recheck: bool,
     ) -> Result<Attempted<LoadedTable>, EngineError> {
+        if let (true, Base::Live(head)) = (recheck, base) {
+            let successor = Self::pointer_dir(table).join(head.version.next().object_name());
+            if self.backend.exists(&successor).await? {
+                return Ok(Attempted::Lost(Lost::Race));
+            }
+        }
         if let Some(location) = &proposal.write {
             proposal.metadata.write_to(&self.file_io, location).await?;
         }
@@ -788,7 +875,11 @@ fn jitter(base: Duration, attempt: u32) -> Duration {
         .checked_pow(attempt)
         .and_then(|factor| base.checked_mul(factor))
         .unwrap_or(ceiling);
-    let cap = grown.min(ceiling);
+    uniform_up_to(grown.min(ceiling))
+}
+
+/// A delay drawn uniformly between zero and `cap`.
+fn uniform_up_to(cap: Duration) -> Duration {
     let micros = u64::try_from(cap.as_micros()).unwrap_or(u64::MAX);
     Duration::from_micros(rand::random_range(0..=micros))
 }
@@ -824,6 +915,7 @@ struct AttemptCatalog<'a> {
     catalog: &'a EngineCatalog,
     table: &'a TableRef,
     loaded: &'a LoadedTable,
+    recheck: bool,
     outcome: Mutex<Option<Result<Attempted<LoadedTable>, EngineError>>>,
 }
 
@@ -923,7 +1015,12 @@ impl Catalog for AttemptCatalog<'_> {
         let outcome = match self.catalog.propose(self.loaded, pair) {
             Ok(Proposed::Metadata(proposal)) => {
                 self.catalog
-                    .attempt_metadata(self.table, Base::Live(&self.loaded.head), *proposal)
+                    .attempt_metadata(
+                        self.table,
+                        Base::Live(&self.loaded.head),
+                        *proposal,
+                        self.recheck,
+                    )
                     .await
             }
             Ok(Proposed::Unchanged) => Ok(Attempted::Landed(self.loaded.clone())),
