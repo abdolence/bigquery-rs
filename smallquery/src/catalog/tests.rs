@@ -660,7 +660,12 @@ async fn serve_counting_patches(
             request
         },
     );
-    let routes = Services::new(Arc::clone(catalog), Route::Tcp).routes();
+    let state = crate::engine::EngineState::new(
+        &crate::EngineConfig::new(url::Url::parse("file:///unused").expect("a file URL")),
+        Arc::clone(catalog),
+    )
+    .expect("the engine state builds");
+    let routes = Services::new(Arc::new(state), Route::Tcp).routes();
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .layer(count)
@@ -798,4 +803,48 @@ async fn a_requirement_unmet_by_the_stored_table_fails_the_commit() {
             "{outcome:?}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_table_lock_map_holds_only_the_tables_being_committed() {
+    let root = TempDir::new().expect("a temporary root");
+    let catalog = catalog(root.path(), settings(Duration::from_secs(15 * 60)));
+    create_dataset(&catalog).await;
+    catalog
+        .create_table(&orders(), new_orders(&catalog))
+        .await
+        .expect("the table is created");
+    let mut writers = tokio::task::JoinSet::new();
+    for n in 0..20 {
+        let catalog = Arc::clone(&catalog);
+        writers.spawn(async move { set_by_engine(&catalog, &format!("concurrent.{n}")).await });
+    }
+    while let Some(written) = writers.join_next().await {
+        written
+            .expect("the writer runs")
+            .expect("the update commits");
+    }
+    for n in 0..50 {
+        let table = orders()
+            .dataset_ref()
+            .table(format!("result_{n}").parse().expect("a valid table ID"));
+        let mut metadata = new_orders(&catalog)
+            .into_builder(None)
+            .set_location(catalog.table_location(&table))
+            .build()
+            .expect("the metadata builds")
+            .metadata;
+        metadata = metadata
+            .into_builder(None)
+            .assign_uuid(uuid::Uuid::new_v4())
+            .build()
+            .expect("the metadata builds")
+            .metadata;
+        catalog
+            .create_table(&table, metadata)
+            .await
+            .expect("the table is created");
+        catalog.purge(&table).await.expect("the table is purged");
+    }
+    assert_eq!(catalog.locks.tables_held(), 0);
 }

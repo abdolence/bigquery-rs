@@ -18,7 +18,8 @@ mod pointer;
 
 pub(crate) use commit::{Change, EngineCommit};
 pub(crate) use datasets::{DatasetEntry, NewDataset};
-use hooks::{CommitHooks, CommitPoint};
+use hooks::CommitHooks;
+pub(crate) use hooks::CommitPoint;
 pub(crate) use pointer::PointerVersion;
 use pointer::{LivePointer, PointerBody, PointerHead, Tombstone};
 
@@ -101,21 +102,73 @@ struct Cached {
 /// The in-process locks: a table's commits run one at a time, and a dataset's tables are
 /// created under its read lock and deleted under its write lock. A dataset lock is always taken
 /// before a table lock.
+///
+/// A table's entry lives while someone holds or waits for its lock, and leaves the map with the
+/// last of them, so the map holds the tables being committed, not every table the process ever
+/// touched, anonymous result tables included.
 #[derive(Debug, Default)]
 struct Locks {
     tables: Mutex<HashMap<TableRef, Arc<tokio::sync::Mutex<()>>>>,
     datasets: Mutex<HashMap<DatasetRef, Arc<tokio::sync::RwLock<()>>>>,
 }
 
+/// A table's lock, held until dropped; a guard dropped while still waiting gives up its place.
+struct TableLock<'l> {
+    locks: &'l Locks,
+    table: TableRef,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    mutex: Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
 impl Locks {
-    fn table(&self, table: &TableRef) -> Arc<tokio::sync::Mutex<()>> {
-        let mut tables = self.tables.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(tables.entry(table.clone()).or_default())
+    /// Waits for `table`'s lock.
+    async fn table(&self, table: &TableRef) -> TableLock<'_> {
+        let mutex = {
+            let mut tables = self.tables.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(tables.entry(table.clone()).or_default())
+        };
+        let mut lock = TableLock {
+            locks: self,
+            table: table.clone(),
+            guard: None,
+            mutex: Some(Arc::clone(&mutex)),
+        };
+        lock.guard = Some(mutex.lock_owned().await);
+        lock
     }
 
     fn dataset(&self, dataset: &DatasetRef) -> Arc<tokio::sync::RwLock<()>> {
         let mut datasets = self.datasets.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(datasets.entry(dataset.clone()).or_default())
+    }
+
+    #[cfg(test)]
+    fn tables_held(&self) -> usize {
+        self.tables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+impl Drop for TableLock<'_> {
+    /// Releases the lock, and removes the table's entry when nobody else holds or waits for it:
+    /// every holder and waiter has a reference, taken under the map's lock, so a count of one
+    /// is the map's own.
+    fn drop(&mut self) {
+        self.guard.take();
+        self.mutex.take();
+        let mut tables = self
+            .locks
+            .tables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if tables
+            .get(&self.table)
+            .is_some_and(|mutex| Arc::strong_count(mutex) == 1)
+        {
+            tables.remove(&self.table);
+        }
     }
 }
 
@@ -153,6 +206,17 @@ impl EngineCatalog {
 
     pub(crate) fn settings(&self) -> &CatalogSettings {
         &self.settings
+    }
+
+    /// The points where a test holds this catalog's commits and loads.
+    #[cfg(test)]
+    pub(crate) fn hooks(&self) -> &CommitHooks {
+        &self.hooks
+    }
+
+    /// The runtime Iceberg's scans and writers spawn their work on.
+    pub(crate) fn iceberg_runtime(&self) -> iceberg::Runtime {
+        self.runtime.handle()
     }
 
     fn catalog_dir() -> ObjectPath {

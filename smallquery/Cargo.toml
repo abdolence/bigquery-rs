@@ -33,15 +33,21 @@ cli = ["dep:anyhow", "dep:clap", "dep:console", "dep:indicatif", "dep:tracing-su
 
 [dependencies]
 anyhow = { workspace = true, optional = true }
+arrow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 clap = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
+datafusion.workspace = true
 futures.workspace = true
 gcloud-sdk.workspace = true
 hyper-util.workspace = true
 iceberg.workspace = true
+iceberg-datafusion.workspace = true
 indicatif = { workspace = true, optional = true }
+parquet.workspace = true
+prost-reflect.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

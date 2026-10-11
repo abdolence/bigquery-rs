@@ -29,7 +29,7 @@ impl Tables {
         loaded: &LoadedTable,
         view: TableView,
     ) -> Result<v2::Table, EngineError> {
-        let dataset = self.0.catalog.dataset(&table.dataset_ref()).await?;
+        let dataset = self.0.catalog().dataset(&table.dataset_ref()).await?;
         loaded.bigquery_table(table, &dataset.location, view)
     }
 
@@ -39,7 +39,7 @@ impl Tables {
             Ok(v2::get_table_request::TableMetadataView::Basic) => TableView::Basic,
             _ => TableView::Full,
         };
-        let loaded = self.0.catalog.load(&table).await?;
+        let loaded = self.0.catalog().load(&table).await?;
         self.report(&table, &loaded, view).await
     }
 
@@ -65,9 +65,9 @@ impl Tables {
             &reference.table_id,
         )?;
         let definition = TableDefinition::try_from(&body)?;
-        let location = self.0.catalog.table_location(&table);
+        let location = self.0.catalog().table_location(&table);
         let metadata = definition.metadata(&table, location, crate::catalog::now_ms())?;
-        let loaded = self.0.catalog.create_table(&table, metadata).await?;
+        let loaded = self.0.catalog().create_table(&table, metadata).await?;
         self.report(&table, &loaded, TableView::Full).await
     }
 
@@ -91,7 +91,7 @@ impl Tables {
             .ok_or_else(|| EngineError::invalid("table", "the request carries no table"))?;
         let loaded = self
             .0
-            .catalog
+            .catalog()
             .commit(&table, |loaded| {
                 let current = loaded.version().to_string();
                 if let Some(etag) = etag.as_ref().filter(|etag| **etag != current) {
@@ -118,10 +118,10 @@ impl Tables {
 
     async fn list(&self, request: v2::ListTablesRequest) -> Result<v2::TableList, EngineError> {
         let dataset = DatasetRef::parse(&request.project_id, &request.dataset_id)?;
-        self.0.catalog.dataset(&dataset).await?;
+        self.0.catalog().dataset(&dataset).await?;
         let tables = self
             .0
-            .catalog
+            .catalog()
             .tables(&dataset)
             .await?
             .into_iter()
@@ -205,7 +205,7 @@ impl TableService for Tables {
         let result = async {
             let table =
                 TableRef::parse(&request.project_id, &request.dataset_id, &request.table_id)?;
-            self.0.catalog.purge(&table).await
+            self.0.catalog().purge(&table).await
         };
         respond(DELETE, result.instrument(span).await)
     }

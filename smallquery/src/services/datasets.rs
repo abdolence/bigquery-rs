@@ -123,12 +123,12 @@ impl Datasets {
         }
         let dataset = DatasetRef::parse(project_id, &reference.dataset_id)?;
         let location = match body.location.as_str() {
-            "" => self.0.catalog.settings().default_location.clone(),
+            "" => self.0.catalog().settings().default_location.clone(),
             location => location.parse::<Location>()?,
         };
         let entry = self
             .0
-            .catalog
+            .catalog()
             .create_dataset(
                 &dataset,
                 NewDataset {
@@ -160,7 +160,7 @@ impl Datasets {
             .transpose()?;
         let entry = self
             .0
-            .catalog
+            .catalog()
             .update_dataset(&dataset, etag.as_deref(), |entry| {
                 if let Some(location) = location.filter(|location| *location != entry.location) {
                     return Err(EngineError::invalid(
@@ -194,7 +194,7 @@ impl Datasets {
         let project = request.project_id.parse::<ProjectId>()?;
         let datasets: Vec<v2::ListFormatDataset> = self
             .0
-            .catalog
+            .catalog()
             .datasets(&project)
             .await?
             .into_iter()
@@ -234,7 +234,12 @@ impl DatasetService for Datasets {
         let span = self.0.span(GET, &request.project_id);
         let result = async {
             let dataset = DatasetRef::parse(&request.project_id, &request.dataset_id)?;
-            Ok(self.0.catalog.dataset(&dataset).await?.v2_dataset(&dataset))
+            Ok(self
+                .0
+                .catalog()
+                .dataset(&dataset)
+                .await?
+                .v2_dataset(&dataset))
         };
         respond(GET, result.instrument(span).await)
     }
@@ -274,7 +279,7 @@ impl DatasetService for Datasets {
         let result = async {
             let dataset = DatasetRef::parse(&request.project_id, &request.dataset_id)?;
             self.0
-                .catalog
+                .catalog()
                 .delete_dataset(&dataset, request.delete_contents)
                 .await
         };

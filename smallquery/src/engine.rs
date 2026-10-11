@@ -1,9 +1,13 @@
 use crate::catalog::{CatalogSettings, EngineCatalog};
 use crate::config::{EngineConfig, TcpEndpoint};
 use crate::error::EngineError;
+use crate::query::Queries;
+use crate::read::ReadSessions;
 use crate::runtime::IcebergRuntime;
 use crate::services::{Route, Services};
+use crate::sql::SqlEngine;
 use crate::storage::{Backend, Created, ObjectPath};
+use crate::write::Writes;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -38,8 +42,36 @@ pub struct Engine {
     inner: Arc<EngineInner>,
 }
 
+/// What every request of one engine shares, whichever route it came by.
+#[derive(Debug)]
+pub(crate) struct EngineState {
+    pub(crate) catalog: Arc<EngineCatalog>,
+    pub(crate) writes: Arc<Writes>,
+    pub(crate) reads: ReadSessions,
+    pub(crate) queries: Queries,
+}
+
+impl EngineState {
+    pub(crate) fn new(
+        config: &EngineConfig,
+        catalog: Arc<EngineCatalog>,
+    ) -> Result<Self, EngineError> {
+        let sql = Arc::new(SqlEngine::new(
+            config.memory_budget,
+            config.spill_dir.as_deref(),
+        )?);
+        let writes = Arc::new(Writes::new(catalog.clone(), config.commit_window));
+        Ok(Self {
+            reads: ReadSessions::new(catalog.clone(), sql.clone(), config.session_ttl),
+            queries: Queries::new(config, catalog.clone(), sql, writes.clone()),
+            writes,
+            catalog,
+        })
+    }
+}
+
 struct EngineInner {
-    catalog: Arc<EngineCatalog>,
+    state: Arc<EngineState>,
     channel: Channel,
     shutdown: watch::Sender<bool>,
     in_process: Mutex<Option<JoinHandle<()>>>,
@@ -67,9 +99,10 @@ impl Engine {
             runtime,
             CatalogSettings::from(&config),
         ));
+        let state = Arc::new(EngineState::new(&config, catalog)?);
         let (shutdown, _) = watch::channel(false);
         let in_process = InProcess::start(
-            &Services::new(Arc::clone(&catalog), Route::InProcess),
+            &Services::new(Arc::clone(&state), Route::InProcess),
             &shutdown,
         );
         info!(
@@ -80,7 +113,7 @@ impl Engine {
         );
         Ok(Self {
             inner: Arc::new(EngineInner {
-                catalog,
+                state,
                 channel: in_process.channel,
                 shutdown,
                 in_process: Mutex::new(Some(in_process.server)),
@@ -93,6 +126,12 @@ impl Engine {
     /// authenticated: the `authorization` header is ignored.
     pub fn channel(&self) -> Channel {
         self.inner.channel.clone()
+    }
+
+    /// What every request of this engine shares.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &EngineState {
+        &self.inner.state
     }
 
     /// Binds a TCP listener for this engine, so that the caller learns its address before
@@ -117,7 +156,7 @@ impl Engine {
         Ok(TcpServer {
             local_addr: listener.local_addr()?,
             listener,
-            services: Services::new(Arc::clone(&self.inner.catalog), Route::Tcp),
+            services: Services::new(Arc::clone(&self.inner.state), Route::Tcp),
             shutdown: self.inner.shutdown.subscribe(),
         })
     }

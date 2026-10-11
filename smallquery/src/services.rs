@@ -10,6 +10,7 @@ mod storage_write;
 mod tables;
 
 use crate::catalog::EngineCatalog;
+use crate::engine::EngineState;
 use crate::error::EngineError;
 use crate::proto::bigquery_v2::dataset_service_server::DatasetServiceServer;
 use crate::proto::bigquery_v2::job_service_server::JobServiceServer;
@@ -46,19 +47,24 @@ impl Display for Route {
 /// What every service of one listener shares.
 #[derive(Debug, Clone)]
 pub(crate) struct Services {
-    catalog: Arc<EngineCatalog>,
+    state: Arc<EngineState>,
     route: Route,
 }
 
 impl Services {
-    pub(crate) fn new(catalog: Arc<EngineCatalog>, route: Route) -> Self {
-        Self { catalog, route }
+    pub(crate) fn new(state: Arc<EngineState>, route: Route) -> Self {
+        Self { state, route }
+    }
+
+    fn catalog(&self) -> &Arc<EngineCatalog> {
+        &self.state.catalog
     }
 
     /// Every registered service, ready for a tonic server.
     pub(crate) fn routes(&self) -> Routes {
         Routes::new(
-            JobServiceServer::new(jobs::Jobs).max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            JobServiceServer::new(jobs::Jobs(self.clone()))
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
         )
         .add_service(
             TableServiceServer::new(tables::Tables(self.clone()))
@@ -73,11 +79,11 @@ impl Services {
                 .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
         )
         .add_service(
-            BigQueryReadServer::new(storage_read::StorageRead)
+            BigQueryReadServer::new(storage_read::StorageRead(self.clone()))
                 .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
         )
         .add_service(
-            BigQueryWriteServer::new(storage_write::StorageWrite)
+            BigQueryWriteServer::new(storage_write::StorageWrite(self.clone()))
                 .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
         )
     }
@@ -139,9 +145,21 @@ fn if_match<T>(request: &Request<T>) -> Option<String> {
         .map(|etag| etag.trim_matches('"').to_string())
 }
 
+/// A protobuf timestamp of `time`, which is never before the Unix epoch on a sane clock and is
+/// reported as the epoch if it is.
+pub(crate) fn timestamp(time: std::time::SystemTime) -> gcloud_sdk::prost_types::Timestamp {
+    let since = time
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    gcloud_sdk::prost_types::Timestamp {
+        seconds: i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+        nanos: i32::try_from(since.subsec_nanos()).unwrap_or(0),
+    }
+}
+
 /// One page of `items` from the offset `page_token` names, and the token of the next page,
 /// empty after the last one.
-fn page<T>(
+pub(crate) fn page<T>(
     items: Vec<T>,
     max_results: Option<u32>,
     page_token: &str,

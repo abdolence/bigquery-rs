@@ -49,14 +49,6 @@ pub(crate) struct EngineCommit {
 /// again on every attempt, from the table that attempt loaded.
 pub(crate) enum Change {
     /// An Iceberg transaction built on the loaded table; its actions run inside the attempt.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Iceberg's own actions, `fast_append` above all, commit through it; no RPC \
-                      the engine serves builds one before the write path exists"
-        )
-    )]
     Transaction(Transaction),
     /// A change the engine computed from the loaded table.
     Engine(EngineCommit),
@@ -263,8 +255,7 @@ impl EngineCatalog {
         table: &TableRef,
         mut change: impl FnMut(&LoadedTable) -> Result<Change, EngineError>,
     ) -> Result<LoadedTable, EngineError> {
-        let lock = self.locks.table(table);
-        let _guard = lock.lock().await;
+        let _lock = self.locks.table(table).await;
         let mut retry = Retry::new(table, self.settings.commit_retry_deadline);
         let mut identity = None;
         loop {
@@ -305,8 +296,7 @@ impl EngineCatalog {
         table: &TableRef,
         new: NewPointer,
     ) -> Result<LoadedTable, EngineError> {
-        let lock = self.locks.table(table);
-        let _guard = lock.lock().await;
+        let _lock = self.locks.table(table).await;
         let mut retry = Retry::new(table, self.settings.commit_retry_deadline);
         loop {
             retry.start();
@@ -348,8 +338,7 @@ impl EngineCatalog {
 
     /// Drops the table with a tombstone pointer, and returns the table as it was dropped.
     pub(crate) async fn drop_table(&self, table: &TableRef) -> Result<LoadedTable, EngineError> {
-        let lock = self.locks.table(table);
-        let _guard = lock.lock().await;
+        let _lock = self.locks.table(table).await;
         let mut retry = Retry::new(table, self.settings.commit_retry_deadline);
         let mut identity = None;
         loop {
@@ -369,8 +358,7 @@ impl EngineCatalog {
         mut commit: TableCommit,
     ) -> Result<LoadedTable, EngineError> {
         let table = TableRef::try_from(commit.identifier())?;
-        let lock = self.locks.table(&table);
-        let _guard = lock.lock().await;
+        let _lock = self.locks.table(&table).await;
         let loaded = self.reload(&table).await?;
         let pair = EngineCommit {
             requirements: commit.take_requirements(),

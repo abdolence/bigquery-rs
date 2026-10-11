@@ -28,7 +28,15 @@
 //! BIGNUMERIC has no Iceberg type, since Iceberg decimals stop at precision 38, and INTERVAL
 //! none either: both are refused as column types.
 
+mod wire;
+
+pub(crate) use wire::{
+    IpcCompression, IpcEncoder, WireSchema, EXTENSION_NAME, GEOGRAPHY_EXTENSION, JSON_EXTENSION,
+    RANGE_SQL_TYPE, SQL_TYPE,
+};
+
 use crate::error::EngineError;
+use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use gcloud_sdk::google::cloud::bigquery::v2;
 use iceberg::spec::{
     ListType, NestedField, NestedFieldRef, PrimitiveType, Schema, StructType, Type,
@@ -114,7 +122,7 @@ pub(crate) struct DecimalParams {
 }
 
 /// NUMERIC without a declared precision and scale.
-const NUMERIC_DEFAULT: DecimalParams = DecimalParams {
+pub(crate) const NUMERIC_DEFAULT: DecimalParams = DecimalParams {
     precision: 38,
     scale: 9,
 };
@@ -783,6 +791,78 @@ impl From<&Columns> for v2::TableSchema {
         v2::TableSchema {
             fields: columns.iter().map(v2::TableFieldSchema::from).collect(),
             foreign_type_info: None,
+        }
+    }
+}
+
+/// The column as `GetWriteStream` reports it, in the Storage API's form.
+impl From<&Column> for storage::TableFieldSchema {
+    fn from(column: &Column) -> Self {
+        use storage::table_field_schema::{Mode as StorageMode, Type as StorageType};
+        let storage_type = |column_type: &ColumnType| match column_type {
+            ColumnType::Int64 => StorageType::Int64,
+            ColumnType::Float64 => StorageType::Double,
+            ColumnType::Numeric(_) => StorageType::Numeric,
+            ColumnType::Bool => StorageType::Bool,
+            ColumnType::String { .. } => StorageType::String,
+            ColumnType::Bytes { .. } => StorageType::Bytes,
+            ColumnType::Date => StorageType::Date,
+            ColumnType::Time => StorageType::Time,
+            ColumnType::DateTime => StorageType::Datetime,
+            ColumnType::Timestamp => StorageType::Timestamp,
+            ColumnType::Geography => StorageType::Geography,
+            ColumnType::Json => StorageType::Json,
+            ColumnType::Range(_) => StorageType::Range,
+            ColumnType::Struct(_) => StorageType::Struct,
+        };
+        let mut field = storage::TableFieldSchema {
+            name: column.name.to_string(),
+            r#type: storage_type(&column.column_type).into(),
+            mode: match column.mode {
+                Mode::Nullable => StorageMode::Nullable,
+                Mode::Required => StorageMode::Required,
+                Mode::Repeated => StorageMode::Repeated,
+            }
+            .into(),
+            description: column.description.clone().unwrap_or_default(),
+            default_value_expression: column.default_value.clone().unwrap_or_default(),
+            ..Default::default()
+        };
+        match &column.column_type {
+            ColumnType::String { max_length } | ColumnType::Bytes { max_length } => {
+                field.max_length = max_length.map_or(0, |n| i64::try_from(n).unwrap_or(i64::MAX));
+            }
+            ColumnType::Numeric(Some(params)) => {
+                field.precision = i64::from(params.precision);
+                field.scale = i64::from(params.scale);
+            }
+            ColumnType::Range(element) => {
+                let element_type = match element {
+                    RangeElement::Date => StorageType::Date,
+                    RangeElement::DateTime => StorageType::Datetime,
+                    RangeElement::Timestamp => StorageType::Timestamp,
+                };
+                field.range_element_type = Some(storage::table_field_schema::FieldElementType {
+                    r#type: element_type.into(),
+                });
+            }
+            ColumnType::Struct(fields) => {
+                field.fields = fields.iter().map(storage::TableFieldSchema::from).collect();
+            }
+            _ => {}
+        }
+        field
+    }
+}
+
+/// The columns as `GetWriteStream` reports them.
+impl From<&Columns> for storage::TableSchema {
+    fn from(columns: &Columns) -> Self {
+        storage::TableSchema {
+            fields: columns
+                .iter()
+                .map(storage::TableFieldSchema::from)
+                .collect(),
         }
     }
 }

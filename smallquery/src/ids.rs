@@ -198,6 +198,11 @@ impl JobId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A fresh ID for a job whose request names none.
+    pub(crate) fn random() -> Self {
+        Self(format!("job_{}", uuid::Uuid::new_v4().simple()))
+    }
 }
 
 impl TryFrom<String> for JobId {
@@ -365,6 +370,28 @@ impl TableRef {
         table_id: &str,
     ) -> Result<Self, EngineError> {
         Ok(DatasetRef::parse(project_id, dataset_id)?.table(table_id.parse()?))
+    }
+
+    /// The table a Storage API path names: `projects/{project}/datasets/{dataset}/tables/{table}`.
+    pub(crate) fn from_storage_path(path: &str) -> Result<Self, EngineError> {
+        let invalid = || {
+            EngineError::invalid(
+                format!("table {path:?}"),
+                "a table is named projects/{project}/datasets/{dataset}/tables/{table}",
+            )
+        };
+        let rest = path.strip_prefix("projects/").ok_or_else(invalid)?;
+        let (project, rest) = rest.split_once("/datasets/").ok_or_else(invalid)?;
+        let (dataset, table) = rest.split_once("/tables/").ok_or_else(invalid)?;
+        Self::parse(project, dataset, table)
+    }
+
+    /// The Storage API path of the table.
+    pub(crate) fn storage_path(&self) -> String {
+        format!(
+            "projects/{}/datasets/{}/tables/{}",
+            self.project, self.dataset, self.table
+        )
     }
 
     /// The dataset that holds the table.

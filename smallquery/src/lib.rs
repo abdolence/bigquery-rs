@@ -12,11 +12,17 @@ mod engine;
 mod error;
 mod ids;
 mod proto;
+mod query;
+mod read;
 mod runtime;
 mod services;
+mod sql;
 mod storage;
 mod table;
+#[cfg(test)]
+mod testkit;
 mod types;
+mod write;
 
 pub use config::{ByteSize, EngineConfig, Maintenance, StorageOptions, TcpEndpoint};
 pub use engine::{Engine, TcpServer};

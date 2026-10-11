@@ -1,4 +1,4 @@
-use crate::ids::{DatasetRef, ProjectId, TableRef};
+use crate::ids::{DatasetRef, JobId, Location, ProjectId, TableRef};
 use std::fmt::{Display, Formatter};
 use tonic::{Code, Status};
 
@@ -109,6 +109,62 @@ pub enum EngineError {
     /// A local I/O failure outside the storage backend, such as binding a listener.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A statement that does not parse or plan, or fails while it runs: invalid SQL, an unknown
+    /// column, a type mismatch, an arithmetic error.
+    #[error("invalid query: {detail}")]
+    InvalidQuery {
+        /// What is wrong, as the planner or the executor reported it.
+        detail: String,
+    },
+    /// A statement names a dataset that is not in the location its job runs in, which BigQuery
+    /// answers as a dataset that does not exist.
+    #[error("Not found: Dataset {dataset} was not found in location {location}")]
+    NotFoundInLocation {
+        /// The dataset the statement names.
+        dataset: DatasetRef,
+        /// The location of the job.
+        location: Location,
+    },
+    /// A statement needed more memory than the engine's budget.
+    #[error("resources exceeded: {detail}")]
+    ResourcesExceeded {
+        /// What ran out, as the executor reported it.
+        detail: String,
+    },
+    /// A query's estimated scan is above the `maximum_bytes_billed` its request set.
+    #[error(
+        "the query scans an estimated {estimated} bytes, above the maximum_bytes_billed of {limit}"
+    )]
+    BytesBilledLimitExceeded {
+        /// The bytes the scan is estimated to read.
+        estimated: u64,
+        /// The limit the request set.
+        limit: u64,
+    },
+    /// A job that failed, with the reason its `error_result` reports.
+    #[error("{what} failed: {message}")]
+    JobFailed {
+        /// The job.
+        what: Resource,
+        /// BigQuery's reason, as `invalidQuery` or `stopped`.
+        reason: &'static str,
+        /// What went wrong.
+        message: String,
+    },
+    /// An offset past the end of a stream.
+    #[error("{what}: {detail}")]
+    OutOfRange {
+        /// The stream.
+        what: Resource,
+        /// The offset and where the stream ends.
+        detail: String,
+    },
+    /// A failure inside the engine that no request can cause or avoid.
+    #[error("internal error: {detail}")]
+    Internal {
+        /// What failed.
+        detail: String,
+    },
 }
 
 /// The storage backend a root lives on, chosen by the root URI's scheme.
@@ -138,6 +194,19 @@ pub enum Resource {
     Dataset(DatasetRef),
     /// A table.
     Table(TableRef),
+    /// A job, with the location it runs in when that is known.
+    Job {
+        /// The project that owns the job.
+        project: ProjectId,
+        /// The job.
+        job: JobId,
+        /// The location the job runs in, or the request named.
+        location: Option<Location>,
+    },
+    /// A write stream, by its full name.
+    WriteStream(String),
+    /// A read session or one of its streams, by its full name.
+    ReadStream(String),
 }
 
 impl Display for Resource {
@@ -146,6 +215,19 @@ impl Display for Resource {
             Resource::Project(project) => write!(f, "Project {project}"),
             Resource::Dataset(dataset) => write!(f, "Dataset {dataset}"),
             Resource::Table(table) => write!(f, "Table {table}"),
+            // `project:location.job_id`, the form the client parses out of `AlreadyExists`.
+            Resource::Job {
+                project,
+                job,
+                location: Some(location),
+            } => write!(f, "Job {project}:{location}.{job}"),
+            Resource::Job {
+                project,
+                job,
+                location: None,
+            } => write!(f, "Job {project}:{job}"),
+            Resource::WriteStream(name) => write!(f, "Write stream {name}"),
+            Resource::ReadStream(name) => write!(f, "Read stream {name}"),
         }
     }
 }
@@ -221,8 +303,75 @@ impl From<&EngineError> for Status {
             EngineError::AlreadyExists { .. } => Code::AlreadyExists,
             EngineError::Precondition { .. } => Code::FailedPrecondition,
             EngineError::Aborted { .. } => Code::Aborted,
+            EngineError::InvalidQuery { .. } | EngineError::BytesBilledLimitExceeded { .. } => {
+                Code::InvalidArgument
+            }
+            EngineError::NotFoundInLocation { .. } => Code::NotFound,
+            EngineError::ResourcesExceeded { .. } => Code::ResourceExhausted,
+            EngineError::Internal { .. } => Code::Internal,
+            EngineError::OutOfRange { .. } => Code::OutOfRange,
+            EngineError::JobFailed { reason, .. } => match *reason {
+                "invalidQuery" | "bytesBilledLimitExceeded" => Code::InvalidArgument,
+                "notImplemented" => Code::Unimplemented,
+                "notFound" => Code::NotFound,
+                "duplicate" => Code::AlreadyExists,
+                "resourcesExceeded" => Code::ResourceExhausted,
+                // A stopped job is not sent again.
+                "stopped" | "timeout" => Code::Cancelled,
+                _ => Code::Internal,
+            },
         };
         Status::new(code, error.to_string())
+    }
+}
+
+/// The engine's reading of a DataFusion failure: an engine error the engine's own code raised
+/// inside a plan comes back as itself, a memory limit is `ResourcesExceeded`, a construct
+/// DataFusion does not implement is `Unsupported`, and everything a statement can cause, from
+/// a parse error to an overflow, is `InvalidQuery`.
+impl From<datafusion::error::DataFusionError> for EngineError {
+    fn from(error: datafusion::error::DataFusionError) -> Self {
+        use datafusion::error::DataFusionError;
+        match error {
+            DataFusionError::External(inner) => match inner.downcast::<EngineError>() {
+                Ok(engine) => *engine,
+                Err(inner) => match inner.downcast::<iceberg::Error>() {
+                    Ok(iceberg) => EngineError::Iceberg(*iceberg),
+                    Err(inner) => EngineError::InvalidQuery {
+                        detail: inner.to_string(),
+                    },
+                },
+            },
+            DataFusionError::Context(_, inner) | DataFusionError::Diagnostic(_, inner) => {
+                EngineError::from(*inner)
+            }
+            DataFusionError::Shared(inner) => match std::sync::Arc::try_unwrap(inner) {
+                Ok(inner) => EngineError::from(inner),
+                Err(shared) => EngineError::InvalidQuery {
+                    detail: shared.strip_backtrace(),
+                },
+            },
+            DataFusionError::ResourcesExhausted(detail) => {
+                EngineError::ResourcesExceeded { detail }
+            }
+            DataFusionError::NotImplemented(detail) => EngineError::unsupported("SQL", detail),
+            DataFusionError::IoError(err) => EngineError::Io(err),
+            DataFusionError::Internal(detail) => EngineError::Internal { detail },
+            DataFusionError::ExecutionJoin(err) => EngineError::Internal {
+                detail: err.to_string(),
+            },
+            other => EngineError::InvalidQuery {
+                detail: other.strip_backtrace(),
+            },
+        }
+    }
+}
+
+/// The DataFusion error an engine failure inside a plan raises, which
+/// `From<DataFusionError> for EngineError` turns back into this error.
+impl From<EngineError> for datafusion::error::DataFusionError {
+    fn from(error: EngineError) -> Self {
+        datafusion::error::DataFusionError::External(Box::new(error))
     }
 }
 
@@ -242,19 +391,28 @@ impl From<EngineError> for iceberg::Error {
             EngineError::NotFound {
                 what: Resource::Table(_),
             } => ErrorKind::TableNotFound,
-            EngineError::NotFound { .. } => ErrorKind::NamespaceNotFound,
+            EngineError::NotFound { .. } | EngineError::NotFoundInLocation { .. } => {
+                ErrorKind::NamespaceNotFound
+            }
             EngineError::AlreadyExists {
                 what: Resource::Table(_),
             } => ErrorKind::TableAlreadyExists,
             EngineError::AlreadyExists { .. } => ErrorKind::NamespaceAlreadyExists,
             EngineError::Precondition { .. } => ErrorKind::PreconditionFailed,
             EngineError::Unsupported { .. } => ErrorKind::FeatureUnsupported,
-            EngineError::Invalid { .. } | EngineError::Config { .. } => ErrorKind::DataInvalid,
+            EngineError::Invalid { .. }
+            | EngineError::Config { .. }
+            | EngineError::InvalidQuery { .. }
+            | EngineError::BytesBilledLimitExceeded { .. } => ErrorKind::DataInvalid,
             EngineError::Aborted { .. } => ErrorKind::CatalogCommitConflicts,
             EngineError::Storage { .. }
             | EngineError::Io(_)
             | EngineError::CommitOutcomeUnknown { .. }
-            | EngineError::MissingMetadata { .. } => ErrorKind::Unexpected,
+            | EngineError::MissingMetadata { .. }
+            | EngineError::ResourcesExceeded { .. }
+            | EngineError::OutOfRange { .. }
+            | EngineError::JobFailed { .. }
+            | EngineError::Internal { .. } => ErrorKind::Unexpected,
         };
         match error {
             EngineError::Iceberg(inner) => inner,

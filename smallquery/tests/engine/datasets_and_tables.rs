@@ -243,18 +243,17 @@ async fn columns_that_differ_only_by_case_are_refused() -> BigQueryResult<()> {
 async fn an_unserved_method_is_unimplemented_by_name() {
     let served = serve().await;
     let db = client(served.addr).await;
-    let query = db
-        .job_client()
-        .query(v2::PostQueryRequest {
-            project_id: PROJECT.to_string(),
-            ..Default::default()
-        })
+    let split = db
+        .read_client()
+        .split_read_stream(
+            gcloud_sdk::google::cloud::bigquery::storage::v1::SplitReadStreamRequest::default(),
+        )
         .await
-        .expect_err("queries are not served");
-    assert_eq!(query.code(), Code::Unimplemented);
-    assert!(query
+        .expect_err("read streams are not split");
+    assert_eq!(split.code(), Code::Unimplemented);
+    assert!(split
         .message()
-        .contains("google.cloud.bigquery.v2.JobService/Query"));
+        .contains("google.cloud.bigquery.storage.v1.BigQueryRead/SplitReadStream"));
     let patch = db
         .dataset_client()
         .patch_dataset(v2::UpdateOrPatchDatasetRequest::default())
