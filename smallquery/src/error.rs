@@ -1,6 +1,6 @@
 use crate::config::ByteSize;
 use crate::ids::{
-    DatasetRef, JobId, Location, ProjectId, ReadStreamName, TableRef, WriteStreamName,
+    DatasetRef, JobId, Location, ProjectId, ReadStreamName, RowOffset, TableRef, WriteStreamName,
 };
 use std::fmt::{Display, Formatter};
 use tonic::{Code, Status};
@@ -156,6 +156,14 @@ pub enum EngineError {
         /// What went wrong.
         message: String,
     },
+    /// A write stream that cannot take the request in the state it is in.
+    #[error("{what}: {problem}")]
+    WriteStream {
+        /// The stream.
+        what: Resource,
+        /// What about its state refuses the request.
+        problem: StreamProblem,
+    },
     /// An offset past the end of a stream.
     #[error("{what}: {detail}")]
     OutOfRange {
@@ -170,6 +178,74 @@ pub enum EngineError {
         /// What failed.
         detail: String,
     },
+}
+
+/// Why a write stream refuses a request. Each is one of the Storage API's `StorageError`
+/// codes, which the client branches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StreamProblem {
+    /// `OFFSET_ALREADY_EXISTS`: the rows at the offset were appended already.
+    OffsetAlreadyExists {
+        /// The offset of the request.
+        offset: RowOffset,
+        /// The offset the stream takes next.
+        next: RowOffset,
+    },
+    /// `OFFSET_OUT_OF_RANGE`: the offset is past the one the stream takes next.
+    OffsetOutOfRange {
+        /// The offset of the request.
+        offset: RowOffset,
+        /// The offset the stream takes next.
+        next: RowOffset,
+    },
+    /// `STREAM_FINALIZED`: the stream takes no more rows.
+    Finalized,
+    /// `STREAM_ALREADY_COMMITTED`: the stream's rows are committed.
+    AlreadyCommitted,
+    /// `INVALID_STREAM_STATE`: a batch commit names a stream that is not finalized.
+    NotFinalized,
+    /// `INVALID_STREAM_STATE`: a commit of the stream's rows ended with an unknown outcome, so
+    /// nothing more goes through the stream, which could land a row twice.
+    OutcomeUnknown,
+    /// `INVALID_STREAM_STATE`: what the table says the stream committed is not what this
+    /// process knows of it, so another process changed the stream, or its staged requests
+    /// overlap.
+    ChangedElsewhere,
+    /// `INVALID_STREAM_TYPE`: the request applies to other streams only.
+    WrongType {
+        /// The request.
+        request: &'static str,
+        /// The streams it applies to.
+        applies_to: &'static str,
+    },
+}
+
+impl Display for StreamProblem {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StreamProblem::OffsetAlreadyExists { offset, next } => write!(
+                f,
+                "the rows at offset {offset} were appended already; the next offset is {next}"
+            ),
+            StreamProblem::OffsetOutOfRange { offset, next } => {
+                write!(f, "offset {offset} is past the next offset, {next}")
+            }
+            StreamProblem::Finalized => f.write_str("the stream is finalized"),
+            StreamProblem::AlreadyCommitted => f.write_str("the stream's rows are committed"),
+            StreamProblem::NotFinalized => f.write_str("the stream is not finalized"),
+            StreamProblem::OutcomeUnknown => {
+                f.write_str("a commit of the stream's rows ended with an unknown outcome")
+            }
+            StreamProblem::ChangedElsewhere => {
+                f.write_str("the stream's committed state changed outside this process")
+            }
+            StreamProblem::WrongType {
+                request,
+                applies_to,
+            } => write!(f, "{request} applies to {applies_to} only"),
+        }
+    }
 }
 
 /// Why a job failed: one of BigQuery's error reasons, which a job's `error_result` reports as
@@ -345,6 +421,31 @@ impl EngineError {
             reason: reason.into(),
         }
     }
+
+    /// An [`EngineError::WriteStream`]: `name` refuses the request for `problem`.
+    pub(crate) fn stream(name: &WriteStreamName, problem: StreamProblem) -> Self {
+        EngineError::WriteStream {
+            what: Resource::WriteStream(Box::new(name.clone())),
+            problem,
+        }
+    }
+
+    /// An [`EngineError::NotFound`] for the write stream `name`.
+    pub(crate) fn stream_not_found(name: &WriteStreamName) -> Self {
+        EngineError::NotFound {
+            what: Resource::WriteStream(Box::new(name.clone())),
+        }
+    }
+
+    /// Whether a commit that failed with this error may have landed all the same: an unknown
+    /// outcome, or a commit task that ended without one. The commit loop's other errors come
+    /// before any pointer create could reach storage.
+    pub(crate) fn commit_may_have_landed(&self) -> bool {
+        matches!(
+            self,
+            EngineError::CommitOutcomeUnknown { .. } | EngineError::Internal { .. }
+        )
+    }
 }
 
 /// The status a request that failed with this error answers: the iceberg kinds map as their
@@ -383,6 +484,16 @@ impl From<&EngineError> for Status {
             EngineError::ResourcesExceeded { .. } => Code::ResourceExhausted,
             EngineError::Internal { .. } => Code::Internal,
             EngineError::OutOfRange { .. } => Code::OutOfRange,
+            EngineError::WriteStream { problem, .. } => match problem {
+                StreamProblem::OffsetAlreadyExists { .. } => Code::AlreadyExists,
+                StreamProblem::OffsetOutOfRange { .. } => Code::OutOfRange,
+                StreamProblem::WrongType { .. } => Code::InvalidArgument,
+                StreamProblem::Finalized
+                | StreamProblem::AlreadyCommitted
+                | StreamProblem::NotFinalized
+                | StreamProblem::OutcomeUnknown
+                | StreamProblem::ChangedElsewhere => Code::FailedPrecondition,
+            },
             EngineError::JobFailed { reason, .. } => match reason {
                 JobFailureReason::InvalidQuery | JobFailureReason::BytesBilledLimitExceeded => {
                     Code::InvalidArgument
@@ -474,7 +585,9 @@ impl From<EngineError> for iceberg::Error {
                 what: Resource::Table(_),
             } => ErrorKind::TableAlreadyExists,
             EngineError::AlreadyExists { .. } => ErrorKind::NamespaceAlreadyExists,
-            EngineError::Precondition { .. } => ErrorKind::PreconditionFailed,
+            EngineError::Precondition { .. } | EngineError::WriteStream { .. } => {
+                ErrorKind::PreconditionFailed
+            }
             EngineError::Unsupported { .. } => ErrorKind::FeatureUnsupported,
             EngineError::Invalid { .. }
             | EngineError::Config { .. }

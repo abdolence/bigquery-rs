@@ -352,7 +352,7 @@ impl Display for DatasetRef {
 }
 
 /// A table of a dataset.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TableRef {
     /// The project.
     pub project: ProjectId,
@@ -417,12 +417,44 @@ pub struct WriteStreamName {
     pub(crate) stream: StreamId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamId {
     /// `_default`, which every table has without creating it.
     Default,
     /// A stream `CreateWriteStream` created.
-    Created(String),
+    Created(WriteStreamId),
+}
+
+/// The ID of a stream `CreateWriteStream` created: a UUID, which also names the stream's record
+/// and segments on storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct WriteStreamId(uuid::Uuid);
+
+impl WriteStreamId {
+    pub(crate) fn random() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+/// # Errors
+/// [`EngineError::Invalid`] for an ID that is not a UUID, which the engine never issues.
+impl FromStr for WriteStreamId {
+    type Err = EngineError;
+
+    fn from_str(id: &str) -> Result<Self, Self::Err> {
+        id.parse().map(Self).map_err(|_| {
+            EngineError::invalid(
+                format!("write stream ID {id:?}"),
+                "the engine names the streams it creates by UUID",
+            )
+        })
+    }
+}
+
+impl Display for WriteStreamId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
 }
 
 impl FromStr for WriteStreamName {
@@ -439,7 +471,7 @@ impl FromStr for WriteStreamName {
             table: TableRef::from_storage_path(table)?,
             stream: match stream {
                 "_default" => StreamId::Default,
-                id => StreamId::Created(id.to_string()),
+                id => StreamId::Created(id.parse()?),
             },
         })
     }
@@ -447,11 +479,71 @@ impl FromStr for WriteStreamName {
 
 impl Display for WriteStreamName {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let stream = match &self.stream {
-            StreamId::Default => "_default",
-            StreamId::Created(id) => id,
-        };
-        write!(f, "{}/streams/{stream}", self.table.storage_path())
+        let table = self.table.storage_path();
+        match &self.stream {
+            StreamId::Default => write!(f, "{table}/streams/_default"),
+            StreamId::Created(id) => write!(f, "{table}/streams/{id}"),
+        }
+    }
+}
+
+/// The position of a row in a write stream, counted from 0 in the order the rows were
+/// appended. The offset of the next row a stream takes is the number of rows it holds.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+pub struct RowOffset(u64);
+
+impl RowOffset {
+    /// The offset `rows` rows after this one.
+    pub(crate) fn after(self, rows: u64) -> Self {
+        Self(self.0.saturating_add(rows))
+    }
+
+    /// The rows from this offset up to `end`, none when `end` is not after it.
+    pub(crate) fn rows_to(self, end: RowOffset) -> u64 {
+        end.0.saturating_sub(self.0)
+    }
+}
+
+/// # Errors
+/// [`EngineError::Invalid`] for a negative offset.
+impl TryFrom<i64> for RowOffset {
+    type Error = EngineError;
+
+    fn try_from(offset: i64) -> Result<Self, Self::Error> {
+        u64::try_from(offset)
+            .map(Self)
+            .map_err(|_| EngineError::invalid("offset", format!("{offset} is negative")))
+    }
+}
+
+/// The decimal form [`Display`] writes, as segment names and table properties hold it.
+///
+/// # Errors
+/// [`EngineError::Invalid`] for anything else.
+impl FromStr for RowOffset {
+    type Err = EngineError;
+
+    fn from_str(offset: &str) -> Result<Self, Self::Err> {
+        offset
+            .parse()
+            .map(Self)
+            .map_err(|_| EngineError::invalid("offset", format!("{offset:?} is no row offset")))
+    }
+}
+
+/// The offset as the Storage API carries it; an offset past `i64::MAX` saturates, which no
+/// stream of the API's `i64` offsets reaches.
+impl From<RowOffset> for i64 {
+    fn from(offset: RowOffset) -> Self {
+        i64::try_from(offset.0).unwrap_or(i64::MAX)
+    }
+}
+
+impl Display for RowOffset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
     }
 }
 

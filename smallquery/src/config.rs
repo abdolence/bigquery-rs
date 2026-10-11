@@ -51,7 +51,8 @@ pub struct EngineConfig {
     pub spill_dir: Option<PathBuf>,
     /// How long a finished job is kept. Default 24 hours.
     pub job_ttl: Duration,
-    /// How long a write stream lives without a commit. Default 24 hours.
+    /// How long a created write stream lives, from when the backend created its record. Default
+    /// 24 hours.
     pub stream_ttl: Duration,
     /// How long a read session lives. Default 6 hours.
     pub session_ttl: Duration,
@@ -140,6 +141,12 @@ impl EngineConfig {
             return Err(EngineError::config(
                 "commit_retry_deadline",
                 "zero leaves no time for a single commit",
+            ));
+        }
+        if self.stream_ttl.is_zero() {
+            return Err(EngineError::config(
+                "stream_ttl",
+                "zero drops every write stream as soon as it is created",
             ));
         }
         for (field, value) in [

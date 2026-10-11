@@ -5,6 +5,7 @@
 //! files and catalog pointers share one implementation per root.
 
 mod local;
+mod staging;
 
 use crate::config::StorageOptions;
 use crate::error::{BackendKind, EngineError};
@@ -18,6 +19,10 @@ use iceberg::io::{
 };
 pub(crate) use local::LocalBackend;
 use serde::{Deserialize, Serialize};
+pub(crate) use staging::{
+    select_segments, ListedSegment, OffsetRanges, PendingState, SegmentFiles, StagedFile, Staging,
+    StreamChange, StreamMode, StreamProperty, StreamRecord,
+};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::SystemTime;
