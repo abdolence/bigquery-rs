@@ -419,7 +419,7 @@ impl AstPass<'_> {
                     "a table name is made of identifiers",
                 ));
             };
-            parts.extend(ident.value.split('.').map(str::to_string));
+            parts.push(ident.value.clone());
         }
         if let [single] = parts.as_slice() {
             if self.ctes.contains(single) {
