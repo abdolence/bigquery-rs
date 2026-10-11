@@ -208,6 +208,10 @@ impl EngineCatalog {
         &self.settings
     }
 
+    pub(crate) fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
     /// The points where a test holds this catalog's commits and loads.
     #[cfg(test)]
     pub(crate) fn hooks(&self) -> &CommitHooks {

@@ -88,6 +88,15 @@ pub(crate) enum WriterSchema {
     Arrow(ArrowRows),
 }
 
+impl WriterSchema {
+    /// Whether the writer's proto descriptor declares `_CHANGE_TYPE`, which makes its requests
+    /// change batches. Arrow rows that carry it are refused by their conversion on every
+    /// stream.
+    pub(crate) fn declares_change_type(&self) -> bool {
+        matches!(self, WriterSchema::Proto(message) if message.get_field_by_name(CHANGE_TYPE).is_some())
+    }
+}
+
 /// The proto rows' message, from the bare `DescriptorProto` the writer sends: a proto2 file
 /// holding it, its nested types flattened beside it and named relative to it.
 impl TryFrom<&ProtoSchema> for WriterSchema {

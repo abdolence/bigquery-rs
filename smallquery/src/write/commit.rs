@@ -11,10 +11,16 @@
 //! A request's files are in exactly one group, so a request lands whole or not at all, and a
 //! failed group fails every member with its error: `Aborted` past the retry deadline, which the
 //! client retries, or an unknown outcome, which nobody retries.
+//!
+//! A flush or a batch commit of a write stream is a member too, carrying the change of the
+//! stream's committed state that its files make: the change is checked on the table the commit
+//! loaded, after the changes of the members before it, and lands in the same commit as the
+//! files, or the member is refused and its files left out.
 
 use crate::catalog::{Change, EngineCatalog, EngineCommit};
-use crate::error::{EngineError, Resource};
-use crate::ids::TableRef;
+use crate::error::{EngineError, Resource, StreamProblem};
+use crate::ids::{StreamId, TableRef, WriteStreamId, WriteStreamName};
+use crate::storage::StreamChange;
 use crate::write::{WriteDisposition, WrittenFiles};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use std::collections::HashMap;
@@ -27,6 +33,7 @@ use tracing::debug;
 struct Member {
     files: WrittenFiles,
     disposition: WriteDisposition,
+    streams: Vec<StreamChange>,
     answer: oneshot::Sender<Result<(), EngineError>>,
 }
 
@@ -42,6 +49,11 @@ enum Verdict {
     /// The member writes only into an empty table, and the table or an earlier member of the
     /// group holds rows.
     NotEmpty,
+    /// A write stream of the member is not in the committed state its change starts from.
+    Refused {
+        stream: WriteStreamId,
+        problem: StreamProblem,
+    },
 }
 
 /// The commit queues of every table with a commit running. A table has an entry exactly while
@@ -122,12 +134,39 @@ impl CommitGroups {
         files: WrittenFiles,
         disposition: WriteDisposition,
     ) -> Result<(), EngineError> {
+        self.join(table, files, disposition, Vec::new()).await
+    }
+
+    /// Lands `files` in `table` together with the changes `streams` make of their write
+    /// streams' committed state, all of it or none.
+    ///
+    /// # Errors
+    /// [`EngineError::WriteStream`] for a stream whose committed state in the table is not the
+    /// one its change starts from, and the errors of [`CommitGroups::append`].
+    pub(crate) async fn commit_streams(
+        self: &Arc<Self>,
+        table: &TableRef,
+        files: WrittenFiles,
+        streams: Vec<StreamChange>,
+    ) -> Result<(), EngineError> {
+        self.join(table, files, WriteDisposition::Append, streams)
+            .await
+    }
+
+    async fn join(
+        self: &Arc<Self>,
+        table: &TableRef,
+        files: WrittenFiles,
+        disposition: WriteDisposition,
+        streams: Vec<StreamChange>,
+    ) -> Result<(), EngineError> {
         let (answer, answered) = oneshot::channel();
         let starts_commit = {
             let mut queues = self.queues.lock().unwrap_or_else(PoisonError::into_inner);
             let member = Member {
                 files,
                 disposition,
+                streams,
                 answer,
             };
             match queues.get_mut(table) {
@@ -186,8 +225,8 @@ impl CommitGroups {
     }
 
     /// Lands, in one `fast_append`, the files of every member written for the table identity
-    /// under the name whose disposition the table allows, and returns each member's outcome,
-    /// in order.
+    /// under the name whose disposition the table allows and whose stream changes hold, with
+    /// those changes, and returns each member's outcome, in order.
     async fn commit(&self, table: &TableRef, group: &[Member]) -> Vec<Result<(), EngineError>> {
         let mut verdicts = vec![Verdict::Undecided; group.len()];
         let landed = self
@@ -200,14 +239,22 @@ impl CommitGroups {
                     .iter()
                     .any(|member| member.disposition == WriteDisposition::Empty)
                     && loaded.total_rows()? != Some(0);
+                let mut properties = HashMap::new();
                 for (member, verdict) in group.iter().zip(verdicts.iter_mut()) {
                     *verdict = if member.files.table_uuid != identity {
                         Verdict::Replaced
                     } else if member.disposition == WriteDisposition::Empty && holds_rows {
                         Verdict::NotEmpty
                     } else {
-                        holds_rows |= member.files.rows > 0;
-                        Verdict::Included
+                        match member.stream_properties(loaded.metadata().properties(), &properties)
+                        {
+                            Ok(set) => {
+                                properties.extend(set);
+                                holds_rows |= member.files.rows > 0;
+                                Verdict::Included
+                            }
+                            Err(refused) => refused,
+                        }
                     };
                 }
                 if !verdicts.contains(&Verdict::Included) {
@@ -222,15 +269,27 @@ impl CommitGroups {
                     .filter(|(_, verdict)| **verdict == Verdict::Included)
                     .flat_map(|(member, _)| member.files.files.iter().cloned())
                     .peekable();
-                if files.peek().is_none() {
+                if files.peek().is_none() && properties.is_empty() {
                     return Ok(Change::Engine(EngineCommit::default()));
                 }
-                let transaction = Transaction::new(&loaded.table);
-                let append = transaction
-                    .fast_append()
-                    .with_check_duplicate(false)
-                    .add_data_files(files);
-                Ok(Change::Transaction(append.apply(transaction)?))
+                let mut transaction = Transaction::new(&loaded.table);
+                if !properties.is_empty() {
+                    transaction = properties
+                        .into_iter()
+                        .fold(
+                            transaction.update_table_properties(),
+                            |action, (key, value)| action.set(key, value),
+                        )
+                        .apply(transaction)?;
+                }
+                if files.peek().is_some() {
+                    transaction = transaction
+                        .fast_append()
+                        .with_check_duplicate(false)
+                        .add_data_files(files)
+                        .apply(transaction)?;
+                }
+                Ok(Change::Transaction(transaction))
             })
             .await;
         verdicts
@@ -244,6 +303,13 @@ impl CommitGroups {
                 (Verdict::NotEmpty, _) => Err(EngineError::AlreadyExists {
                     what: Resource::Table(table.clone()),
                 }),
+                (Verdict::Refused { stream, problem }, _) => Err(EngineError::stream(
+                    &WriteStreamName {
+                        table: table.clone(),
+                        stream: StreamId::Created(stream),
+                    },
+                    problem,
+                )),
                 (Verdict::Undecided, Ok(_)) => Err(EngineError::Internal {
                     detail: format!("the commit of {table} landed without deciding a request"),
                 }),
@@ -267,11 +333,48 @@ impl CommitGroups {
     }
 }
 
+impl Member {
+    /// The table properties the member's stream changes set, given the table's `stored`
+    /// properties and those `set` by earlier members of its group.
+    fn stream_properties(
+        &self,
+        stored: &HashMap<String, String>,
+        set: &HashMap<String, String>,
+    ) -> Result<Vec<(String, String)>, Verdict> {
+        self.streams
+            .iter()
+            .map(|change| {
+                let key = change.key();
+                let current = set.get(&key).or_else(|| stored.get(&key));
+                change
+                    .value(current.map(String::as_str))
+                    .map(|value| (key, value))
+                    .map_err(|problem| Verdict::Refused {
+                        stream: change.stream(),
+                        problem,
+                    })
+            })
+            .collect()
+    }
+}
+
 impl EngineError {
     /// This error of a group's commit as one member's answer: the variants a member branches on
     /// are kept, and an error that only one value can carry is described again.
     fn for_member(&self, table: &TableRef) -> EngineError {
         match self {
+            EngineError::Iceberg(error) => {
+                EngineError::Iceberg(iceberg::Error::new(error.kind(), error.message()))
+            }
+            EngineError::Storage {
+                backend,
+                operation,
+                detail,
+            } => EngineError::Storage {
+                backend: *backend,
+                operation,
+                detail: detail.clone(),
+            },
             EngineError::NotFound { what } => EngineError::NotFound { what: what.clone() },
             EngineError::Aborted { what, attempts } => EngineError::Aborted {
                 what: what.clone(),

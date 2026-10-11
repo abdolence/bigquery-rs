@@ -60,7 +60,11 @@ impl EngineState {
             config.memory_budget,
             config.spill_dir.as_deref(),
         )?);
-        let writes = Arc::new(Writes::new(catalog.clone(), config.commit_window));
+        let writes = Arc::new(Writes::new(
+            catalog.clone(),
+            config.commit_window,
+            config.stream_ttl,
+        ));
         Ok(Self {
             reads: ReadSessions::new(catalog.clone(), sql.clone(), config.session_ttl),
             queries: Queries::new(config, catalog.clone(), sql, writes.clone()),
@@ -102,6 +106,9 @@ impl Engine {
         let state = Arc::new(EngineState::new(&config, catalog)?);
         if let Err(err) = state.queries.drop_expired_results().await {
             warn!(%err, "The anonymous result tables of earlier runs could not all be deleted.");
+        }
+        if let Err(err) = state.writes.sweep_streams().await {
+            warn!(%err, "The expired write streams could not all be dropped.");
         }
         let (shutdown, _) = watch::channel(false);
         let in_process = InProcess::start(
