@@ -47,7 +47,9 @@ impl Tables {
         let body = request
             .table
             .ok_or_else(|| EngineError::invalid("table", "the request carries no table"))?;
-        let reference = body.table_reference.clone().unwrap_or_default();
+        let reference = body.table_reference.clone().ok_or_else(|| {
+            EngineError::invalid("table.table_reference", "the table carries none")
+        })?;
         for (field, id, requested) in [
             ("project_id", &reference.project_id, &request.project_id),
             ("dataset_id", &reference.dataset_id, &request.dataset_id),

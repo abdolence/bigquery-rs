@@ -71,10 +71,7 @@ impl ColumnType {
             ColumnType::Time => DataType::Time64(TimeUnit::Microsecond),
             ColumnType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
             ColumnType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, Some(UTC.into())),
-            ColumnType::Range(element) => {
-                let bound = |name| Field::new(name, element.wire_type(), true);
-                DataType::Struct(Fields::from(vec![bound("start"), bound("end")]))
-            }
+            ColumnType::Range(element) => DataType::Struct(element.wire_fields()),
             ColumnType::Struct(fields) => DataType::Struct(fields.wire_fields()),
         }
     }
@@ -93,6 +90,12 @@ impl ColumnType {
 }
 
 impl RangeElement {
+    /// The fields of a RANGE value on the wire: its two bounds, NULL when unbounded.
+    pub(crate) fn wire_fields(self) -> Fields {
+        let bound = |name| Field::new(name, self.wire_type(), true);
+        Fields::from(vec![bound("start"), bound("end")])
+    }
+
     fn wire_type(self) -> DataType {
         match self {
             RangeElement::Date => DataType::Date32,

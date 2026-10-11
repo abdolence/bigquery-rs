@@ -37,6 +37,8 @@ impl BigQueryWrite for StorageWrite {
         let mut connection = self.0.state.writes.connection();
         let services = self.0.clone();
         tokio::spawn(async move {
+            // Only a connection's first request has to name its stream.
+            let mut project = String::new();
             loop {
                 let request = match requests.message().await {
                     Ok(Some(request)) => request,
@@ -46,7 +48,10 @@ impl BigQueryWrite for StorageWrite {
                         return;
                     }
                 };
-                let span = services.span(APPEND_ROWS, project_of(&request.write_stream));
+                if !request.write_stream.is_empty() {
+                    project = project_of(&request.write_stream).to_string();
+                }
+                let span = services.span(APPEND_ROWS, &project);
                 let response = connection.append(request).instrument(span).await;
                 if responses.send(Ok(response)).await.is_err() {
                     return;

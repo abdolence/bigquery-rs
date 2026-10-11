@@ -107,7 +107,9 @@ impl Datasets {
             .dataset
             .ok_or_else(|| EngineError::invalid("dataset", "the request carries no dataset"))?;
         EngineError::refuse_unsupported("dataset", &unsupported_fields(&body))?;
-        let reference = body.dataset_reference.clone().unwrap_or_default();
+        let reference = body.dataset_reference.clone().ok_or_else(|| {
+            EngineError::invalid("dataset.dataset_reference", "the dataset carries none")
+        })?;
         let project_id = match reference.project_id.as_str() {
             "" => request.project_id.as_str(),
             project_id => project_id,

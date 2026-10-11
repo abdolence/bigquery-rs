@@ -152,18 +152,6 @@ fn project_of(name: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// A protobuf timestamp of `time`, which is never before the Unix epoch on a sane clock and is
-/// reported as the epoch if it is.
-pub(crate) fn timestamp(time: std::time::SystemTime) -> gcloud_sdk::prost_types::Timestamp {
-    let since = time
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    gcloud_sdk::prost_types::Timestamp {
-        seconds: i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
-        nanos: i32::try_from(since.subsec_nanos()).unwrap_or(0),
-    }
-}
-
 /// One page of `items` from the offset `page_token` names, and the token of the next page,
 /// empty after the last one.
 pub(crate) fn page<T>(

@@ -46,6 +46,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 iceberg = "0.10.1"
 iceberg-datafusion = "0.10.1"
 indicatif = "0.18"
+jiff = "0.2"
 parquet = { version = "58.4", default-features = false }
 prost-reflect = "0.16"
 rand = "0.10"

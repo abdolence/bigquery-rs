@@ -374,13 +374,9 @@ impl WriteTarget {
 }
 
 impl Columns {
-    /// The top-level column a writer's field names: by its exact name, else without case, which
-    /// BigQuery's uniqueness rule keeps unambiguous.
+    /// The top-level column a writer's field names.
     fn find(&self, name: &str) -> Option<&Column> {
-        self.get(name).or_else(|| {
-            self.iter()
-                .find(|column| column.name.as_str().eq_ignore_ascii_case(name))
-        })
+        by_name(self.iter(), name, |column| column.name.as_str())
     }
 }
 
@@ -658,12 +654,12 @@ impl Conversion<'_> {
                 continue;
             };
             let path = format!("{}.{}", self.path, column.name);
-            let child_sent = sent.column_by_name(column.name.as_str()).or_else(|| {
-                sent.fields()
-                    .iter()
-                    .position(|f| f.name().eq_ignore_ascii_case(column.name.as_str()))
-                    .map(|index| sent.column(index))
-            });
+            let child_sent = by_name(
+                sent.fields().iter().zip(sent.columns()),
+                column.name.as_str(),
+                |(field, _)| field.name(),
+            )
+            .map(|(_, child)| child);
             let conversion = Conversion {
                 path: &path,
                 rows: &child_rows,
@@ -815,6 +811,26 @@ impl RangeElement {
     }
 }
 
+/// The item of `items` that `name` names: the one of exactly that name, else the one of that
+/// name without case, which BigQuery's uniqueness rule keeps unambiguous.
+fn by_name<T>(
+    items: impl IntoIterator<Item = T>,
+    name: &str,
+    name_of: impl Fn(&T) -> &str,
+) -> Option<T> {
+    let mut folded = None;
+    for item in items {
+        let item_name = name_of(&item);
+        if item_name == name {
+            return Some(item);
+        }
+        if folded.is_none() && item_name.eq_ignore_ascii_case(name) {
+            folded = Some(item);
+        }
+    }
+    folded
+}
+
 /// Whether a wire array of type `from` relabels into the engine type `to` without changing a
 /// value: BYTES from `Binary` to `LargeBinary`, a TIMESTAMP's zone label from `UTC` to
 /// `+00:00`, and a list's element field.
@@ -912,15 +928,8 @@ impl WireBuilder {
             ColumnType::Bytes { .. } => WireBuilder::Binary(BinaryBuilder::new()),
             ColumnType::Range(element) => {
                 let bound = |name: &str| (name.to_string(), Self::of_type(&element.column_type()));
-                let DataType::Struct(fields) = column_type.wire_type() else {
-                    return WireBuilder::Struct {
-                        fields: Fields::empty(),
-                        children: Vec::new(),
-                        valid: Vec::new(),
-                    };
-                };
                 WireBuilder::Struct {
-                    fields,
+                    fields: element.wire_fields(),
                     children: vec![bound("start"), bound("end")],
                     valid: Vec::new(),
                 }
@@ -936,15 +945,9 @@ impl WireBuilder {
         }
     }
 
-    /// Appends `message`'s value of the field `name`, matched exactly, else without case; NULL
-    /// when the message does not set it.
+    /// Appends `message`'s value of the field `name`; NULL when the message does not set it.
     fn append_field(&mut self, message: &DynamicMessage, name: &str) -> Result<(), String> {
-        let descriptor = message.descriptor();
-        let field = descriptor.get_field_by_name(name).or_else(|| {
-            descriptor
-                .fields()
-                .find(|field| field.name().eq_ignore_ascii_case(name))
-        });
+        let field = by_name(message.descriptor().fields(), name, |field| field.name());
         match field {
             Some(field) if field.is_list() || message.has_field(&field) => {
                 self.append(&message.get_field(&field))
@@ -1170,7 +1173,6 @@ const WIRE_UTC: &str = "UTC";
 const PROTO_NUMERIC_SCALE: i8 = 9;
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
-const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
 
 /// The time of day, in microseconds, of a TIME packed as
 /// `((hour << 12 | minute << 6 | second) << 20) | micros`.
@@ -1188,38 +1190,27 @@ fn unpack_time(packed: i64) -> Result<i64, String> {
 /// `((year << 26 | month << 22 | day << 17 | hour << 12 | minute << 6 | second) << 20) | micros`.
 fn unpack_datetime(packed: i64) -> Result<i64, String> {
     let invalid = || format!("{packed} is not a packed DATETIME");
-    let time = unpack_time(packed & ((1 << 37) - 1)).map_err(|_| invalid())?;
-    let date = packed >> 37;
-    let (year, month, day) = (date >> 9, (date >> 5) & 0xF, date & 0x1F);
-    if !(1..=9999).contains(&year) || !(1..=12).contains(&month) || day < 1 {
-        return Err(invalid());
-    }
-    let days = days_from_civil(year, month, day).ok_or_else(invalid)?;
-    Ok(days * MICROS_PER_DAY + time)
-}
-
-/// The days from 1970-01-01 to the proleptic Gregorian date `year-month-day`, or `None` when
-/// the day is not in the month.
-fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let days_in_month = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return None,
-    };
-    if day > days_in_month {
-        return None;
-    }
-    // Howard Hinnant's days_from_civil, with March as the first month of the year.
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month_from_march = (month + 9) % 12;
-    let day_of_year = (153 * month_from_march + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    Some(era * 146_097 + day_of_era - 719_468)
+    let fields = packed >> 20;
+    let field = |shift: u32, bits: u32| i8::try_from((fields >> shift) & ((1 << bits) - 1));
+    let year = i16::try_from(fields >> 26)
+        .ok()
+        .filter(|year| (1..=9999).contains(year))
+        .ok_or_else(invalid)?;
+    let nanos = i32::try_from((packed & 0xF_FFFF) * 1000).map_err(|_| invalid())?;
+    let datetime = jiff::civil::DateTime::new(
+        year,
+        field(22, 4).map_err(|_| invalid())?,
+        field(17, 5).map_err(|_| invalid())?,
+        field(12, 5).map_err(|_| invalid())?,
+        field(6, 6).map_err(|_| invalid())?,
+        field(0, 6).map_err(|_| invalid())?,
+        nanos,
+    )
+    .map_err(|_| invalid())?;
+    let instant = datetime
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .map_err(|_| invalid())?;
+    Ok(instant.timestamp().as_microsecond())
 }
 
 /// A NUMERIC's unscaled value from its minimal little-endian two's complement bytes.
@@ -1252,14 +1243,10 @@ mod tests {
             Ok(((13 * 60 + 45) * 60 + 30) * MICROS_PER_SECOND + 123_456)
         );
         let datetime = (((2026i64 << 26) | (2 << 22) | (28 << 17) | (23 << 12)) << 20) | 7;
-        let days = days_from_civil(2026, 2, 28).expect("a valid date");
-        assert_eq!(
-            unpack_datetime(datetime),
-            Ok(days * MICROS_PER_DAY + 23 * 3600 * MICROS_PER_SECOND + 7)
-        );
-        assert_eq!(days_from_civil(1970, 1, 1), Some(0));
-        assert_eq!(days_from_civil(2000, 3, 1), Some(11_017));
-        assert_eq!(days_from_civil(2026, 2, 29), None);
+        // 2026-02-28T23:00:00.000007Z.
+        assert_eq!(unpack_datetime(datetime), Ok(1_772_319_600_000_007));
+        let february_29 = ((2026i64 << 26) | (2 << 22) | (29 << 17)) << 20;
+        assert!(unpack_datetime(february_29).is_err());
     }
 
     #[test]

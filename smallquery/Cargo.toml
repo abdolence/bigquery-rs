@@ -46,6 +46,7 @@ hyper-util.workspace = true
 iceberg.workspace = true
 iceberg-datafusion.workspace = true
 indicatif = { workspace = true, optional = true }
+jiff.workspace = true
 parquet.workspace = true
 prost-reflect.workspace = true
 rand.workspace = true
