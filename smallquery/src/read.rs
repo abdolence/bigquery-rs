@@ -566,20 +566,4 @@ impl IpcCompression {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_stream_name_holds_its_session_and_index() {
-        let session = Uuid::new_v4();
-        let name: StreamName =
-            format!("projects/lite-project/locations/eu/sessions/{session}/streams/3")
-                .parse()
-                .expect("a stream name");
-        assert_eq!((name.session, name.index), (session, 3));
-        assert!(matches!(
-            "projects/p/sessions/x".parse::<StreamName>(),
-            Err(EngineError::NotFound { .. })
-        ));
-    }
-}
+mod tests;

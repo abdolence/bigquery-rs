@@ -1002,3 +1002,6 @@ impl IpcCompression {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
