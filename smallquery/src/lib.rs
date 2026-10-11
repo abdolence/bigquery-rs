@@ -26,5 +26,5 @@ mod write;
 
 pub use config::{ByteSize, EngineConfig, Maintenance, StorageOptions, TcpEndpoint};
 pub use engine::{Engine, TcpServer};
-pub use error::{BackendKind, EngineError, Resource};
+pub use error::{BackendKind, EngineError, JobFailureReason, Resource};
 pub use ids::{DatasetId, DatasetRef, JobId, Location, ProjectId, TableId, TableRef};

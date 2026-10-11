@@ -10,15 +10,15 @@ mod commit;
 mod files;
 mod rows;
 
-pub(crate) use commit::{Appended, CommitGroups};
-pub(crate) use files::{TableWriter, WrittenFiles};
+pub(crate) use commit::CommitGroups;
+pub(crate) use files::{FileSink, TableWriter, WrittenFiles};
 pub(crate) use rows::{ArrowRows, MissingValues, Rejected, RequestRows, WriteTarget, WriterSchema};
 
 use crate::catalog::{EngineCatalog, LoadedTable};
 use crate::error::{EngineError, Resource};
 use crate::ids::TableRef;
 use crate::services::timestamp;
-use crate::types::Columns;
+use crate::types::{ColumnName, Columns};
 use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use gcloud_sdk::google::rpc;
 use gcloud_sdk::prost::Message;
@@ -35,6 +35,15 @@ use tracing::debug;
 pub(crate) struct Writes {
     catalog: Arc<EngineCatalog>,
     groups: Arc<CommitGroups>,
+}
+
+/// What an append requires of the table it lands in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteDisposition {
+    /// `WRITE_APPEND`: any table.
+    Append,
+    /// `WRITE_EMPTY`: a table that holds no rows.
+    Empty,
 }
 
 /// A write stream's name: `projects/{project}/datasets/{dataset}/tables/{table}/streams/{id}`.
@@ -137,18 +146,21 @@ impl Writes {
         table: &TableRef,
         loaded: &LoadedTable,
         batch: arrow::array::RecordBatch,
-    ) -> Result<Appended, EngineError> {
+    ) -> Result<(), EngineError> {
         let files = TableWriter::new(loaded)?.write([batch]).await?;
-        self.append_files(table, files).await
+        self.append_files(table, files, WriteDisposition::Append)
+            .await
     }
 
-    /// Lands data files written for `table` with the table's commit group.
+    /// Lands data files written for `table` with the table's commit group, under
+    /// `disposition`.
     pub(crate) async fn append_files(
         &self,
         table: &TableRef,
         files: WrittenFiles,
-    ) -> Result<Appended, EngineError> {
-        self.groups.append(table, files).await
+        disposition: WriteDisposition,
+    ) -> Result<(), EngineError> {
+        self.groups.append(table, files, disposition).await
     }
 
     #[cfg(test)]
@@ -296,40 +308,52 @@ impl AppendConnection {
             }
             _ => None,
         };
-        let batch = target.batch(writer, rows, &MissingValues::from(&request))?;
+        let batch = target.batch(writer, rows, &MissingValues::try_from(&request)?)?;
         let rows = batch.num_rows();
         if rows > 0 {
-            let appended = self.writes.append(&stream.table, &loaded, batch).await?;
-            debug!(
-                table = %stream.table,
-                rows,
-                snapshot_id = appended.snapshot_id,
-                pointer_version = appended.pointer_version.number(),
-                "Appended a request's rows.",
-            );
+            self.writes.append(&stream.table, &loaded, batch).await?;
+            debug!(table = %stream.table, rows, "Appended a request's rows.");
         }
         Ok(updated_schema)
     }
 }
 
-impl From<&storage::AppendRowsRequest> for MissingValues {
-    fn from(request: &storage::AppendRowsRequest) -> Self {
-        MissingValues {
-            default: MissingValueInterpretation::try_from(
+/// A request's missing value interpretations.
+///
+/// # Errors
+/// [`EngineError::Invalid`] for an interpretation this API version does not define and for a
+/// key that is no column name: neither can be applied as the writer meant it.
+impl TryFrom<&storage::AppendRowsRequest> for MissingValues {
+    type Error = EngineError;
+
+    fn try_from(request: &storage::AppendRowsRequest) -> Result<Self, Self::Error> {
+        let interpretation = |field: String, value: i32| {
+            MissingValueInterpretation::try_from(value).map_err(|_| {
+                EngineError::invalid(
+                    field,
+                    format!("{value} is not a missing value interpretation"),
+                )
+            })
+        };
+        Ok(MissingValues {
+            default: interpretation(
+                "default_missing_value_interpretation".to_string(),
                 request.default_missing_value_interpretation,
-            )
-            .unwrap_or_default(),
+            )?,
             per_column: request
                 .missing_value_interpretations
                 .iter()
-                .map(|(column, interpretation)| {
-                    (
-                        column.clone(),
-                        MissingValueInterpretation::try_from(*interpretation).unwrap_or_default(),
-                    )
+                .map(|(column, value)| {
+                    Ok((
+                        ColumnName::try_from(column.clone())?,
+                        interpretation(
+                            format!("missing_value_interpretations[{column:?}]"),
+                            *value,
+                        )?,
+                    ))
                 })
-                .collect(),
-        }
+                .collect::<Result<_, EngineError>>()?,
+        })
     }
 }
 

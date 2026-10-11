@@ -82,41 +82,89 @@ impl TableWriter {
         &self,
         batches: impl IntoIterator<Item = RecordBatch>,
     ) -> Result<WrittenFiles, EngineError> {
-        let mut rows = 0u64;
-        let files = if self.spec.is_unpartitioned() {
-            let mut writer = DataFileWriterBuilder::new(self.builder.clone())
-                .build(None)
-                .await?;
-            for batch in batches {
-                rows += u64::try_from(batch.num_rows()).unwrap_or(u64::MAX);
-                if batch.num_rows() > 0 {
-                    writer.write(batch).await?;
-                }
-            }
-            writer.close().await?
+        let mut sink = self.open().await?;
+        for batch in batches {
+            sink.write(batch).await?;
+        }
+        sink.close().await
+    }
+
+    /// A sink that takes batches one at a time, so that a result is written as it is produced.
+    pub(crate) async fn open(&self) -> Result<FileSink, EngineError> {
+        let data_files = DataFileWriterBuilder::new(self.builder.clone());
+        let writer = if self.spec.is_unpartitioned() {
+            SinkWriter::Unpartitioned(Box::new(data_files.build(None).await?))
         } else {
-            // A request's rows arrive in any order, so every partition's writer stays open
-            // until the end rather than closing when the next partition starts.
-            let splitter = RecordBatchPartitionSplitter::try_new_with_computed_values(
-                self.schema.clone(),
-                self.spec.clone(),
-            )?;
-            let mut writer = FanoutWriter::new(DataFileWriterBuilder::new(self.builder.clone()));
-            for batch in batches {
-                rows += u64::try_from(batch.num_rows()).unwrap_or(u64::MAX);
-                if batch.num_rows() == 0 {
-                    continue;
-                }
-                for (partition, part) in splitter.split(&batch)? {
-                    writer.write(partition, part).await?;
+            SinkWriter::Partitioned(Box::new(Fanout {
+                splitter: RecordBatchPartitionSplitter::try_new_with_computed_values(
+                    self.schema.clone(),
+                    self.spec.clone(),
+                )?,
+                // A request's rows arrive in any order, so every partition's writer stays
+                // open until the end rather than closing when the next partition starts.
+                writer: FanoutWriter::new(data_files),
+            }))
+        };
+        Ok(FileSink {
+            writer,
+            table_uuid: self.table_uuid,
+            rows: 0,
+        })
+    }
+}
+
+/// Data files of one table identity being written, batch by batch.
+pub(crate) struct FileSink {
+    writer: SinkWriter,
+    table_uuid: Uuid,
+    rows: u64,
+}
+
+/// The data file writer of a table's files, below any partitioning.
+type DataFiles =
+    DataFileWriterBuilder<ParquetWriterBuilder, DefaultLocationGenerator, DefaultFileNameGenerator>;
+
+enum SinkWriter {
+    Unpartitioned(Box<<DataFiles as IcebergWriterBuilder>::R>),
+    Partitioned(Box<Fanout>),
+}
+
+/// A writer per partition, each fed the rows the splitter assigns it.
+struct Fanout {
+    splitter: RecordBatchPartitionSplitter,
+    writer: FanoutWriter<DataFiles>,
+}
+
+impl FileSink {
+    /// Writes `batch`, whose schema is the table's engine Arrow schema with its field ids.
+    pub(crate) async fn write(&mut self, batch: RecordBatch) -> Result<(), EngineError> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        self.rows = self
+            .rows
+            .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+        match &mut self.writer {
+            SinkWriter::Unpartitioned(writer) => writer.write(batch).await?,
+            SinkWriter::Partitioned(fanout) => {
+                for (partition, part) in fanout.splitter.split(&batch)? {
+                    fanout.writer.write(partition, part).await?;
                 }
             }
-            writer.close().await?
+        }
+        Ok(())
+    }
+
+    /// Closes the files and returns them. Nothing references them until a commit adds them.
+    pub(crate) async fn close(self) -> Result<WrittenFiles, EngineError> {
+        let files = match self.writer {
+            SinkWriter::Unpartitioned(mut writer) => writer.close().await?,
+            SinkWriter::Partitioned(fanout) => fanout.writer.close().await?,
         };
         Ok(WrittenFiles {
             files,
             table_uuid: self.table_uuid,
-            rows,
+            rows: self.rows,
         })
     }
 }

@@ -3,7 +3,9 @@
 //! commit under concurrent requests.
 
 use crate::catalog::CommitPoint;
+use crate::error::EngineError;
 use crate::testkit::{table_ref, TestEngine};
+use crate::write::{WriteDisposition, WrittenFiles};
 use bigquery::*;
 use iceberg::expr::Reference;
 use iceberg::spec::Datum;
@@ -488,4 +490,107 @@ async fn concurrent_requests_without_a_hold_land_in_fewer_commits_than_requests(
     );
     assert!(commits < 64, "{commits} commits");
     engine.assert_no_path_twice(&table).await;
+}
+
+/// `shop.ticks`, empty.
+async fn create_ticks(engine: &TestEngine) {
+    engine.create_dataset("shop", "EU").await;
+    engine
+        .db
+        .fluent()
+        .schema()
+        .table(SHOP.table(TICKS))
+        .columns(|columns| {
+            columns.fields([
+                columns.field("request").int64().required(),
+                columns.field("n").int64().required(),
+            ])
+        })
+        .sync()
+        .await
+        .expect("the table is created");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_whose_table_does_not_load_answers_the_load_s_error() {
+    let engine = TestEngine::start().await;
+    create_ticks(&engine).await;
+    let table = table_ref("shop", "ticks");
+    let loaded = engine
+        .state()
+        .catalog
+        .reload(&table)
+        .await
+        .expect("the table loads");
+    let metadata = url::Url::parse(loaded.metadata_location())
+        .expect("a metadata location is a URL")
+        .to_file_path()
+        .expect("a local root");
+    std::fs::remove_file(metadata).expect("the metadata file is deleted");
+
+    // Another engine on the root has no cached copy of the table to build on.
+    let other = engine.open_on_same_root(|config| config).await;
+    let appended = other
+        .state()
+        .writes
+        .groups()
+        .append(
+            &table,
+            WrittenFiles {
+                files: Vec::new(),
+                table_uuid: loaded.metadata().uuid(),
+                rows: 0,
+            },
+            WriteDisposition::Append,
+        )
+        .await;
+    assert!(
+        matches!(appended, Err(EngineError::MissingMetadata { .. })),
+        "{appended:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_task_that_panics_leaves_its_table_committable() {
+    let engine = TestEngine::start().await;
+    create_ticks(&engine).await;
+    let table = table_ref("shop", "ticks");
+    let loaded = engine
+        .state()
+        .catalog
+        .reload(&table)
+        .await
+        .expect("the table loads");
+    engine.state().catalog.hooks().panic_at(CommitPoint::Loaded);
+    let groups = engine.state().writes.groups().clone();
+    let failed = groups
+        .append(
+            &table,
+            WrittenFiles {
+                files: Vec::new(),
+                table_uuid: loaded.metadata().uuid(),
+                rows: 0,
+            },
+            WriteDisposition::Append,
+        )
+        .await;
+    assert!(
+        matches!(failed, Err(EngineError::Internal { .. })),
+        "{failed:?}"
+    );
+
+    let next = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        engine
+            .db
+            .fluent()
+            .insert()
+            .into(SHOP.table(TICKS))
+            .objects(&[Tick { request: 1, n: 1 }])
+            .execute(),
+    )
+    .await
+    .expect("the next append is answered");
+    assert_eq!(next.expect("the next append lands").rows_written, 1);
+    assert_eq!(groups.running(), 0);
 }

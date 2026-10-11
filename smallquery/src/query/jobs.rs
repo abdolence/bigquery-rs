@@ -5,7 +5,9 @@
 //! Jobs live in the process: they do not survive a restart, and another engine on the same root
 //! does not see them.
 
-use crate::error::{EngineError, Resource};
+use crate::catalog::millis;
+use crate::config::ByteSize;
+use crate::error::{EngineError, JobFailureReason, Resource};
 use crate::ids::{JobId, Location, ProjectId, TableRef};
 use crate::sql::StatementKind;
 use gcloud_sdk::google::cloud::bigquery::v2;
@@ -13,7 +15,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::watch;
-use tokio::task::AbortHandle;
 
 /// The most jobs the registry holds; past it the oldest finished ones go.
 const MAX_JOBS: usize = 10_000;
@@ -31,24 +32,14 @@ pub(crate) struct JobKey {
 /// Why a job failed, as `error_result` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobFailure {
-    /// BigQuery's reason: `invalidQuery`, `notImplemented`, `notFound`, `stopped`, ….
-    pub reason: &'static str,
+    pub reason: JobFailureReason,
     pub message: String,
 }
 
 impl From<&EngineError> for JobFailure {
     fn from(error: &EngineError) -> Self {
-        let reason = match error {
-            EngineError::InvalidQuery { .. } | EngineError::Invalid { .. } => "invalidQuery",
-            EngineError::Unsupported { .. } => "notImplemented",
-            EngineError::NotFound { .. } | EngineError::NotFoundInLocation { .. } => "notFound",
-            EngineError::AlreadyExists { .. } => "duplicate",
-            EngineError::BytesBilledLimitExceeded { .. } => "bytesBilledLimitExceeded",
-            EngineError::ResourcesExceeded { .. } => "resourcesExceeded",
-            _ => "internalError",
-        };
         Self {
-            reason,
+            reason: JobFailureReason::from(error),
             message: error.to_string(),
         }
     }
@@ -58,7 +49,7 @@ impl JobFailure {
     /// A job stopped by `CancelJob`.
     pub(crate) fn stopped() -> Self {
         Self {
-            reason: "stopped",
+            reason: JobFailureReason::Stopped,
             message: "Job execution was cancelled: User requested cancellation".to_string(),
         }
     }
@@ -75,7 +66,7 @@ impl JobFailure {
     /// A job stopped by its `job_timeout_ms`.
     pub(crate) fn timed_out(timeout: Duration) -> Self {
         Self {
-            reason: "timeout",
+            reason: JobFailureReason::Timeout,
             message: format!(
                 "Job execution was cancelled: Job timed out after {} ms",
                 timeout.as_millis()
@@ -118,7 +109,7 @@ pub(crate) struct Completed {
     pub statement: StatementKind,
     pub schema: v2::TableSchema,
     pub total_rows: u64,
-    pub bytes_processed: u64,
+    pub bytes_processed: ByteSize,
     pub rows: ResultRows,
 }
 
@@ -128,6 +119,11 @@ pub(crate) enum JobState {
     /// Waiting for one of the engine's job permits.
     Pending,
     Running {
+        started: SystemTime,
+    },
+    /// Its rows are written and their commit is queued: a cancel or a timeout no longer stops
+    /// it, and it finishes with the commit's outcome, since the rows may land.
+    Committing {
         started: SystemTime,
     },
     Done(Arc<Finished>),
@@ -148,7 +144,6 @@ pub(crate) struct Job {
     pub configuration: v2::JobConfiguration,
     created: SystemTime,
     state: watch::Sender<JobState>,
-    task: Mutex<Option<AbortHandle>>,
     /// Whether a caller has been told of the job, after which its rows go to a table: a query
     /// answered inline has no job to read them from later.
     reported: Mutex<bool>,
@@ -167,7 +162,6 @@ impl Job {
             configuration,
             created: SystemTime::now(),
             state,
-            task: Mutex::default(),
             reported: Mutex::new(false),
         }
     }
@@ -182,11 +176,6 @@ impl Job {
             job: self.key.job.clone(),
             location: Some(self.location.clone()),
         }
-    }
-
-    /// Keeps the handle of the job's task, which `CancelJob` aborts.
-    pub(crate) fn attach(&self, task: AbortHandle) {
-        *self.task.lock().unwrap_or_else(PoisonError::into_inner) = Some(task);
     }
 
     pub(crate) fn start(&self) {
@@ -207,7 +196,7 @@ impl Job {
         self.state.send_if_modified(|state| {
             let started = match state {
                 JobState::Pending => ended,
-                JobState::Running { started } => *started,
+                JobState::Running { started } | JobState::Committing { started } => *started,
                 JobState::Done(_) => return false,
             };
             *state = JobState::Done(Arc::new(Finished {
@@ -249,42 +238,52 @@ impl Job {
         None
     }
 
-    /// Stops a running job; a finished one stays finished.
+    /// Stops a job that has not queued its commit; a committing or finished one goes on to its
+    /// own end.
     pub(crate) fn cancel(&self) {
-        if let Some(task) = self
-            .task
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            task.abort();
-        }
-        self.finish(Err(JobFailure::stopped()));
+        let ended = SystemTime::now();
+        self.state.send_if_modified(|state| {
+            let started = match state {
+                JobState::Pending => ended,
+                JobState::Running { started } => *started,
+                JobState::Committing { .. } | JobState::Done(_) => return false,
+            };
+            *state = JobState::Done(Arc::new(Finished {
+                started,
+                ended,
+                outcome: Err(JobFailure::stopped()),
+            }));
+            true
+        });
+    }
+
+    /// Moves a running job to [`JobState::Committing`]; `false` when it was stopped first, in
+    /// which case its rows must not be committed.
+    pub(crate) fn begin_commit(&self) -> bool {
+        let mut committing = false;
+        self.state.send_if_modified(|state| match state {
+            JobState::Running { started } => {
+                *state = JobState::Committing { started: *started };
+                committing = true;
+                true
+            }
+            _ => false,
+        });
+        committing
+    }
+
+    /// Returns once the job has finished.
+    pub(crate) async fn finished(&self) {
+        let mut state = self.state.subscribe();
+        let _ = state
+            .wait_for(|state| matches!(state, JobState::Done(_)))
+            .await;
     }
 
     /// Waits up to `timeout` for the job to finish, and returns its state then.
     pub(crate) async fn wait(&self, timeout: Duration) -> JobState {
-        let mut state = self.state.subscribe();
-        let _ = tokio::time::timeout(
-            timeout,
-            state.wait_for(|state| matches!(state, JobState::Done(_))),
-        )
-        .await;
+        let _ = tokio::time::timeout(timeout, self.finished()).await;
         self.state()
-    }
-
-    /// The table that holds the job's rows, when it finished with one.
-    pub(crate) fn result_table(&self) -> Option<TableRef> {
-        match self.state() {
-            JobState::Done(finished) => match &finished.outcome {
-                Ok(Completed {
-                    rows: ResultRows::Table(table),
-                    ..
-                }) => Some(table.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
     }
 
     /// The job as `GetJob` reports it.
@@ -300,7 +299,7 @@ impl Job {
         };
         match self.state() {
             JobState::Pending => {}
-            JobState::Running { started } => {
+            JobState::Running { started } | JobState::Committing { started } => {
                 status.state = "RUNNING".to_string();
                 statistics.start_time = millis(started);
             }
@@ -310,7 +309,7 @@ impl Job {
                 statistics.end_time = millis(finished.ended);
                 match &finished.outcome {
                     Ok(completed) => {
-                        let bytes = i64::try_from(completed.bytes_processed).ok();
+                        let bytes = i64::try_from(completed.bytes_processed.bytes()).ok();
                         statistics.total_bytes_processed = bytes;
                         statistics.query = Some(v2::JobStatistics2 {
                             total_bytes_processed: bytes,
@@ -357,14 +356,6 @@ impl Job {
             _ => None,
         }
     }
-}
-
-/// Milliseconds since the Unix epoch.
-fn millis(time: SystemTime) -> i64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 /// Every job of the engine, and the jobs each recent `request_id` created.
@@ -515,5 +506,28 @@ impl JobRegistry {
                 (job.key.project.clone(), request_id.to_string()),
                 (job.key.clone(), Instant::now()),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::{Code, Status};
+
+    #[test]
+    fn a_job_whose_commit_outcome_is_unknown_answers_unknown() {
+        let project: ProjectId = "lite-project".parse().expect("a valid project");
+        let failure = JobFailure::from(&EngineError::CommitOutcomeUnknown {
+            what: Resource::Project(project.clone()),
+            pointer_version: 3,
+            metadata_location: "file:///root/v3.metadata.json".to_string(),
+        });
+        let answered = failure.error(Resource::Job {
+            project,
+            job: "job_1".parse().expect("a valid job ID"),
+            location: None,
+        });
+        assert_eq!(Status::from(&answered).code(), Code::Unknown);
+        assert_eq!(failure.proto().reason, "internalError");
     }
 }

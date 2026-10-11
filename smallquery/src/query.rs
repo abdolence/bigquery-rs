@@ -19,17 +19,19 @@ pub(crate) use jobs::JobRegistry;
 
 use crate::catalog::{now_ms, EngineCatalog, NewDataset};
 use crate::config::{ByteSize, EngineConfig};
-use crate::error::{EngineError, Resource};
+use crate::error::EngineError;
 use crate::ids::{DatasetId, DatasetRef, JobId, Location, ProjectId, TableId, TableRef};
 use crate::services::page;
-use crate::sql::{register_table, NameScope, Parameters, SqlEngine, Statement, StatementKind};
+use crate::sql::{NameScope, Parameters, SqlEngine, Statement, StatementKind};
 use crate::table::TableDefinition;
 use crate::types::{Columns, IpcCompression, IpcEncoder, WireSchema};
-use crate::write::{TableWriter, WriteTarget, Writes};
+use crate::write::{FileSink, TableWriter, WriteDisposition, WriteTarget, Writes, WrittenFiles};
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion::execution::SendableRecordBatchStream;
 use datafusion::logical_expr::LogicalPlan;
-use datafusion::physical_plan::{collect, ExecutionPlan};
+use datafusion::physical_plan::{execute_stream, ExecutionPlan};
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
 use gcloud_sdk::google::cloud::bigquery::v2;
@@ -62,6 +64,10 @@ pub(crate) struct Queries {
     permits: Arc<Semaphore>,
     default_location: Location,
     inline_limit: ByteSize,
+    job_ttl: Duration,
+    /// The most bytes of one result ever held for an inline answer.
+    #[cfg(test)]
+    inline_peak: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// A statement and how to run it, from `Query` or `InsertJob`.
@@ -72,10 +78,10 @@ struct QuerySpec {
     default_dataset: Option<DatasetRef>,
     location: Option<Location>,
     parameters: Parameters,
-    maximum_bytes_billed: Option<u64>,
+    maximum_bytes_billed: Option<ByteSize>,
     job_timeout: Option<Duration>,
     output: Output,
-    compression: IpcCompression,
+    compression: Option<IpcCompression>,
 }
 
 /// Where a statement's rows go.
@@ -94,16 +100,52 @@ enum Output {
 #[derive(Debug, Clone)]
 struct Destination {
     table: TableRef,
-    create_if_needed: bool,
+    create: CreateDisposition,
     write: WriteDisposition,
 }
 
+/// A query's `create_disposition`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WriteDisposition {
-    /// `WRITE_APPEND`.
-    Append,
-    /// `WRITE_EMPTY`: the table must hold no rows.
-    Empty,
+enum CreateDisposition {
+    /// `CREATE_IF_NEEDED`, the default.
+    IfNeeded,
+    /// `CREATE_NEVER`: the table must exist.
+    Never,
+}
+
+impl FromStr for CreateDisposition {
+    type Err = EngineError;
+
+    fn from_str(disposition: &str) -> Result<Self, Self::Err> {
+        match disposition {
+            "" | "CREATE_IF_NEEDED" => Ok(CreateDisposition::IfNeeded),
+            "CREATE_NEVER" => Ok(CreateDisposition::Never),
+            other => Err(EngineError::invalid(
+                "create_disposition",
+                format!("{other:?} is not a create disposition"),
+            )),
+        }
+    }
+}
+
+/// A query's `write_disposition`; `WRITE_TRUNCATE` is refused.
+impl FromStr for WriteDisposition {
+    type Err = EngineError;
+
+    fn from_str(disposition: &str) -> Result<Self, Self::Err> {
+        match disposition {
+            "" | "WRITE_EMPTY" => Ok(WriteDisposition::Empty),
+            "WRITE_APPEND" => Ok(WriteDisposition::Append),
+            "WRITE_TRUNCATE" => Err(EngineError::unsupported(
+                "WRITE_TRUNCATE",
+                "this release appends to a destination table",
+            )),
+            other => Err(EngineError::invalid(
+                "write_disposition",
+                format!("{other:?} is not a write disposition"),
+            )),
+        }
+    }
 }
 
 /// A statement planned over one snapshot of each table it names.
@@ -114,27 +156,97 @@ struct Planned {
     location: Location,
 }
 
-/// A statement's result: its wire schema, its normalized batches and the bytes its scans read.
-struct StatementResult {
+/// A running statement: its wire schema, the bytes its scans read, and its batches as the plan
+/// produces them.
+struct Execution {
     wire: WireSchema,
-    batches: Vec<RecordBatch>,
-    bytes_processed: u64,
+    bytes_processed: ByteSize,
+    session: SessionContext,
+    stream: SendableRecordBatchStream,
 }
 
-impl StatementResult {
-    fn rows(&self) -> u64 {
-        self.batches
-            .iter()
-            .map(|batch| u64::try_from(batch.num_rows()).unwrap_or(u64::MAX))
-            .sum()
+impl Execution {
+    /// The next batch of the result, in the wire types.
+    async fn next(&mut self) -> Result<Option<RecordBatch>, EngineError> {
+        match self.stream.try_next().await? {
+            Some(batch) => Ok(Some(self.wire.normalize(&batch)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// The batches of a result held for an inline answer: no more rows than the request's limit and
+/// no more bytes than the engine's inline limit, reserved from the engine's memory budget.
+struct InlineBuffer {
+    batches: Vec<RecordBatch>,
+    rows: u64,
+    max_rows: Option<u64>,
+    limit: ByteSize,
+    reservation: MemoryReservation,
+    #[cfg(test)]
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl InlineBuffer {
+    /// Holds `batch` when the result still fits inline with it, else hands it back: the result
+    /// then goes to a table, and this buffer holds no more.
+    fn push(&mut self, batch: RecordBatch) -> Result<(), RecordBatch> {
+        let rows = self
+            .rows
+            .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+        let bytes = batch.get_array_memory_size();
+        let fits = self.max_rows.is_none_or(|max| rows <= max)
+            && u64::try_from(self.reservation.size().saturating_add(bytes))
+                .is_ok_and(|held| held <= self.limit.bytes())
+            && self.reservation.try_grow(bytes).is_ok();
+        if !fits {
+            return Err(batch);
+        }
+        self.rows = rows;
+        self.batches.push(batch);
+        #[cfg(test)]
+        self.peak
+            .fetch_max(self.reservation.size(), std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A table a result is written into: data files its job's commit lands.
+struct ResultSink {
+    table: TableRef,
+    target: WriteTarget,
+    files: FileSink,
+    disposition: WriteDisposition,
+}
+
+impl ResultSink {
+    /// A sink into `table` as it is now.
+    async fn open(
+        catalog: &EngineCatalog,
+        table: TableRef,
+        disposition: WriteDisposition,
+    ) -> Result<Self, EngineError> {
+        let loaded = catalog.load(&table).await?;
+        Ok(Self {
+            target: WriteTarget::new(&loaded)?,
+            files: TableWriter::new(&loaded)?.open().await?,
+            table,
+            disposition,
+        })
     }
 
-    fn bytes(&self) -> u64 {
-        self.batches
-            .iter()
-            .map(|batch| u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX))
-            .sum()
+    /// Writes one batch of the result, in the wire types.
+    async fn write(&mut self, batch: RecordBatch) -> Result<(), EngineError> {
+        self.files.write(self.target.wire_rows(batch)?).await
     }
+}
+
+/// A result written as files of its table, which the job's commit is still to land.
+struct Written {
+    table: TableRef,
+    files: WrittenFiles,
+    disposition: WriteDisposition,
+    completed: Completed,
 }
 
 impl Queries {
@@ -152,6 +264,9 @@ impl Queries {
             permits: Arc::new(Semaphore::new(config.max_concurrent_jobs)),
             default_location: config.default_location.clone(),
             inline_limit: config.inline_result_limit,
+            job_ttl: config.job_ttl,
+            #[cfg(test)]
+            inline_peak: Arc::default(),
         }
     }
 
@@ -180,16 +295,14 @@ impl Queries {
                     });
                 }
                 job.report();
-                return job_response(&job, &job.wait(wait).await);
+                return job.query_response(&job.wait(wait).await);
             }
         }
         let spec = QuerySpec {
             default_dataset: dataset_of(&project, query.default_dataset.as_ref())?,
             location: location_of(&query.location)?,
             parameters: Parameters::try_from(query.query_parameters.as_slice())?,
-            maximum_bytes_billed: query
-                .maximum_bytes_billed
-                .and_then(|bytes| u64::try_from(bytes).ok()),
+            maximum_bytes_billed: maximum_bytes_billed(query.maximum_bytes_billed),
             job_timeout: timeout_of(query.job_timeout_ms),
             output: if required {
                 Output::Table
@@ -206,12 +319,12 @@ impl Queries {
         if query.dry_run {
             let location = planned.location.clone();
             let kind = planned.kind;
-            let (wire, bytes) = estimate(planned).await?;
+            let (wire, bytes) = planned.estimate().await?;
             return Ok(v2::QueryResponse {
                 kind: "bigquery#queryResponse".to_string(),
                 schema: Some(v2::TableSchema::try_from(&wire)?),
                 location: location.to_string(),
-                total_bytes_processed: i64::try_from(bytes).ok(),
+                total_bytes_processed: i64::try_from(bytes.bytes()).ok(),
                 job_complete: Some(true),
                 cache_hit: Some(false),
                 statement_type: kind.name().to_string(),
@@ -238,9 +351,9 @@ impl Queries {
         let state = job.wait(wait).await;
         if let Some(finished) = job.report() {
             self.jobs.forget(&job.key);
-            return inline_response(&job, &finished);
+            return job.inline_response(&finished);
         }
-        job_response(&job, &state)
+        job.query_response(&state)
     }
 
     /// `InsertJob`: a query job, into the caller's destination table when it names one.
@@ -256,7 +369,9 @@ impl Queries {
         let body = request
             .job
             .ok_or_else(|| EngineError::invalid("job", "the request carries none"))?;
-        let configuration = body.configuration.unwrap_or_default();
+        let configuration = body
+            .configuration
+            .ok_or_else(|| EngineError::invalid("job.configuration", "the job carries none"))?;
         let query = configuration.query.clone().ok_or_else(|| {
             EngineError::unsupported(
                 "load, copy and extract jobs",
@@ -281,32 +396,8 @@ impl Queries {
                     &destination.dataset_id,
                     &destination.table_id,
                 )?,
-                create_if_needed: match query.create_disposition.as_str() {
-                    "" | "CREATE_IF_NEEDED" => true,
-                    "CREATE_NEVER" => false,
-                    other => {
-                        return Err(EngineError::invalid(
-                            "create_disposition",
-                            format!("{other:?} is not a create disposition"),
-                        ))
-                    }
-                },
-                write: match query.write_disposition.as_str() {
-                    "" | "WRITE_EMPTY" => WriteDisposition::Empty,
-                    "WRITE_APPEND" => WriteDisposition::Append,
-                    "WRITE_TRUNCATE" => {
-                        return Err(EngineError::unsupported(
-                            "WRITE_TRUNCATE",
-                            "this release appends to a destination table",
-                        ))
-                    }
-                    other => {
-                        return Err(EngineError::invalid(
-                            "write_disposition",
-                            format!("{other:?} is not a write disposition"),
-                        ))
-                    }
-                },
+                create: query.create_disposition.parse()?,
+                write: query.write_disposition.parse()?,
             }),
             None => Output::Table,
         };
@@ -314,12 +405,10 @@ impl Queries {
             default_dataset: dataset_of(&project, query.default_dataset.as_ref())?,
             location: location_of(reference.location.as_deref().unwrap_or_default())?,
             parameters: Parameters::try_from(query.query_parameters.as_slice())?,
-            maximum_bytes_billed: query
-                .maximum_bytes_billed
-                .and_then(|bytes| u64::try_from(bytes).ok()),
+            maximum_bytes_billed: maximum_bytes_billed(query.maximum_bytes_billed),
             job_timeout: timeout_of(configuration.job_timeout_ms),
             output,
-            compression: IpcCompression::None,
+            compression: None,
             sql: query.query.clone(),
             project: project.clone(),
         };
@@ -334,7 +423,7 @@ impl Queries {
                 configuration,
             );
             let kind = planned.kind;
-            let (wire, bytes) = estimate(planned).await?;
+            let (wire, bytes) = planned.estimate().await?;
             job.finish(Ok(Completed {
                 statement: kind,
                 schema: v2::TableSchema::try_from(&wire)?,
@@ -380,7 +469,8 @@ impl Queries {
                 Ok(completed) => {
                     response.schema = Some(completed.schema.clone());
                     response.total_rows = Some(completed.total_rows);
-                    response.total_bytes_processed = i64::try_from(completed.bytes_processed).ok();
+                    response.total_bytes_processed =
+                        i64::try_from(completed.bytes_processed.bytes()).ok();
                     response.cache_hit = Some(false);
                 }
                 Err(failure) => response.errors = vec![failure.proto()],
@@ -423,7 +513,7 @@ impl Queries {
     pub(crate) fn delete_job(&self, request: &v2::DeleteJobRequest) -> Result<(), EngineError> {
         let job = self.job(&request.project_id, &request.job_id, &request.location)?;
         self.jobs.remove(&job)?;
-        self.drop_results(vec![job]);
+        self.drop_result_table(&job);
         Ok(())
     }
 
@@ -528,8 +618,11 @@ impl Queries {
                     });
                 }
             }
-            let loaded = self.catalog.load(table).await?;
-            register_table(&session, table, &loaded).await?;
+            self.catalog
+                .load(table)
+                .await?
+                .register(&session, table)
+                .await?;
         }
         let kind = prepared.kind();
         let plan = prepared.plan(&session, &spec.parameters).await?;
@@ -557,99 +650,187 @@ impl Queries {
             planned.location.clone(),
             configuration,
         ));
-        let evicted = self.jobs.insert(job.clone())?;
-        self.drop_results(evicted);
+        for evicted in self.jobs.insert(job.clone())? {
+            self.drop_result_table(&evicted);
+        }
         let queries = self.clone();
         let running = job.clone();
-        let task = tokio::spawn(async move { queries.run(running, spec, planned).await });
-        job.attach(task.abort_handle());
+        tokio::spawn(async move { queries.run(running, spec, planned).await });
         Ok(job)
     }
 
-    /// Runs a job to its end: waits for a permit, executes, delivers the rows, and finishes the
-    /// job with what happened, or with its timeout.
+    /// Runs a job to its end. Until its rows are written, `CancelJob` and the job's timeout stop
+    /// it; once their commit is queued, it finishes with the commit's outcome, since the rows
+    /// may land whatever the job reports. A job that ends without rows to keep drops its
+    /// anonymous result table.
     async fn run(self, job: Arc<Job>, spec: QuerySpec, planned: Planned) {
-        let Ok(_permit) = self.permits.clone().acquire_owned().await else {
-            job.finish(Err(JobFailure::from(&EngineError::Internal {
-                detail: "the engine's job permits are closed".to_string(),
-            })));
-            return;
+        let delivered = tokio::select! {
+            biased;
+            delivered = self.deliver_in_time(&job, &spec, planned) => delivered,
+            () = job.finished() => Err(JobFailure::stopped()),
         };
+        let outcome = match delivered {
+            // Answered inline.
+            Ok(None) => return,
+            Ok(Some(written)) if job.begin_commit() => self
+                .writes
+                .append_files(&written.table, written.files, written.disposition)
+                .await
+                .map(|()| written.completed)
+                .map_err(|err| JobFailure::from(&err)),
+            Ok(Some(_)) => Err(JobFailure::stopped()),
+            Err(failure) => Err(failure),
+        };
+        if outcome.is_err() {
+            self.drop_result_table(&job);
+        }
+        job.finish(outcome);
+    }
+
+    /// Waits for a permit, then delivers the job's rows within its timeout.
+    async fn deliver_in_time(
+        &self,
+        job: &Job,
+        spec: &QuerySpec,
+        planned: Planned,
+    ) -> Result<Option<Written>, JobFailure> {
+        let _permit = self.permits.acquire().await.map_err(|_| {
+            JobFailure::from(&EngineError::Internal {
+                detail: "the engine's job permits are closed".to_string(),
+            })
+        })?;
         job.start();
-        let delivered = self.deliver(&job, &spec, planned);
-        let outcome = match spec.job_timeout {
+        let delivered = self.deliver(job, spec, planned);
+        match spec.job_timeout {
             Some(timeout) => tokio::time::timeout(timeout, delivered)
                 .await
                 .unwrap_or_else(|_| Err(JobFailure::timed_out(timeout))),
             None => delivered.await,
-        };
-        if let Err(failure) = outcome {
-            job.finish(Err(failure));
         }
     }
 
-    /// Executes the statement and puts its rows where the job's output says, finishing the job.
+    /// Runs the statement and puts its rows where the job's output says: inline, finishing the
+    /// job and returning `None`, or written batch by batch into files of a table, never held
+    /// whole, for the job's commit to land.
     async fn deliver(
         &self,
         job: &Job,
         spec: &QuerySpec,
         planned: Planned,
-    ) -> Result<(), JobFailure> {
-        let kind = planned.kind;
+    ) -> Result<Option<Written>, JobFailure> {
         let failure = |err: EngineError| JobFailure::from(&err);
-        let result = execute(planned, spec.maximum_bytes_billed)
+        let statement = planned.kind;
+        let mut execution = planned
+            .execute(spec.maximum_bytes_billed)
             .await
             .map_err(failure)?;
-        let completed = |rows| -> Result<Completed, JobFailure> {
-            Ok(Completed {
-                statement: kind,
-                schema: v2::TableSchema::try_from(&result.wire).map_err(failure)?,
-                total_rows: result.rows(),
-                bytes_processed: result.bytes_processed,
-                rows,
-            })
-        };
-        let table = match &spec.output {
+        let schema = v2::TableSchema::try_from(&execution.wire).map_err(failure)?;
+        let bytes_processed = execution.bytes_processed;
+        let (mut sink, held) = match &spec.output {
             Output::InlineOrTable { max_rows } => {
-                let fits = max_rows.is_none_or(|max| result.rows() <= max)
-                    && result.bytes() <= self.inline_limit.bytes();
-                if fits {
-                    let inline = InlineRows::of(&result, spec.compression).map_err(failure)?;
-                    if job
-                        .finish_inline(completed(ResultRows::Inline(inline))?)
-                        .is_ok()
-                    {
-                        return Ok(());
+                let mut buffer = self.inline_buffer(&execution, *max_rows);
+                let overflow = loop {
+                    match execution.next().await.map_err(failure)? {
+                        Some(batch) => {
+                            if let Err(batch) = buffer.push(batch) {
+                                break Some(batch);
+                            }
+                        }
+                        None => break None,
+                    }
+                };
+                if overflow.is_none() {
+                    let inline = Completed {
+                        statement,
+                        schema: schema.clone(),
+                        total_rows: buffer.rows,
+                        bytes_processed,
+                        rows: ResultRows::Inline(
+                            InlineRows::new(&execution.wire, &buffer.batches, spec.compression)
+                                .map_err(failure)?,
+                        ),
+                    };
+                    if job.finish_inline(inline).is_ok() {
+                        return Ok(None);
                     }
                 }
-                self.write_anonymous(job, &result).await.map_err(failure)?
-            }
-            Output::Table => self.write_anonymous(job, &result).await.map_err(failure)?,
-            Output::Destination(destination) => {
-                self.write_destination(destination, &result)
+                let mut held = std::mem::take(&mut buffer.batches);
+                drop(buffer);
+                held.extend(overflow);
+                let sink = self
+                    .anonymous_sink(job, &execution.wire)
                     .await
                     .map_err(failure)?;
-                destination.table.clone()
+                (sink, held)
+            }
+            Output::Table => {
+                let sink = self
+                    .anonymous_sink(job, &execution.wire)
+                    .await
+                    .map_err(failure)?;
+                (sink, Vec::new())
+            }
+            Output::Destination(destination) => {
+                let sink = self
+                    .destination_sink(destination, &execution.wire)
+                    .await
+                    .map_err(failure)?;
+                (sink, Vec::new())
             }
         };
-        job.finish(Ok(completed(ResultRows::Table(table))?));
-        Ok(())
+        for batch in held {
+            sink.write(batch).await.map_err(failure)?;
+        }
+        while let Some(batch) = execution.next().await.map_err(failure)? {
+            sink.write(batch).await.map_err(failure)?;
+        }
+        let files = sink.files.close().await.map_err(failure)?;
+        Ok(Some(Written {
+            completed: Completed {
+                statement,
+                schema,
+                total_rows: files.rows,
+                bytes_processed,
+                rows: ResultRows::Table(sink.table.clone()),
+            },
+            table: sink.table,
+            files,
+            disposition: sink.disposition,
+        }))
     }
 
-    /// Writes the result into the job's anonymous result table, created for it.
-    async fn write_anonymous(
+    /// An empty buffer for the inline answer of `execution`'s result.
+    fn inline_buffer(&self, execution: &Execution, max_rows: Option<u64>) -> InlineBuffer {
+        InlineBuffer {
+            batches: Vec::new(),
+            rows: 0,
+            max_rows,
+            limit: self.inline_limit,
+            reservation: MemoryConsumer::new("inline result")
+                .register(&execution.session.runtime_env().memory_pool),
+            #[cfg(test)]
+            peak: Arc::clone(&self.inline_peak),
+        }
+    }
+
+    /// A sink into the job's anonymous result table, created for it.
+    async fn anonymous_sink(
         &self,
         job: &Job,
-        result: &StatementResult,
-    ) -> Result<TableRef, EngineError> {
-        let dataset = DatasetRef {
-            project: job.key.project.clone(),
-            dataset: DatasetId::from_str(ANONYMOUS_DATASET)?,
-        };
+        wire: &WireSchema,
+    ) -> Result<ResultSink, EngineError> {
+        let table = job
+            .anonymous_table()?
+            .ok_or_else(|| EngineError::Internal {
+                detail: format!(
+                    "job {} has a destination and no anonymous result table",
+                    job.key.job
+                ),
+            })?;
         let created = self
             .catalog
             .create_dataset(
-                &dataset,
+                &table.dataset_ref(),
                 NewDataset {
                     location: self.default_location.clone(),
                     description: None,
@@ -662,34 +843,30 @@ impl Queries {
             Ok(_) | Err(EngineError::AlreadyExists { .. }) => {}
             Err(err) => return Err(err),
         }
-        let table = dataset.table(TableId::from_str(job.key.job.as_str())?);
-        self.create_result_table(&table, &result.wire).await?;
-        self.append_result(&table, result).await?;
-        Ok(table)
+        self.create_result_table(&table, wire).await?;
+        ResultSink::open(&self.catalog, table, WriteDisposition::Append).await
     }
 
-    /// Appends the result to the caller's destination table, created when allowed.
-    async fn write_destination(
+    /// A sink into the caller's destination table, created when allowed. Its write
+    /// disposition is checked by the commit.
+    async fn destination_sink(
         &self,
         destination: &Destination,
-        result: &StatementResult,
-    ) -> Result<(), EngineError> {
+        wire: &WireSchema,
+    ) -> Result<ResultSink, EngineError> {
         match self.catalog.load(&destination.table).await {
-            Ok(loaded) => {
-                // A table whose snapshot does not report its rows is not known to be empty.
-                if destination.write == WriteDisposition::Empty && loaded.total_rows()? != Some(0) {
-                    return Err(EngineError::AlreadyExists {
-                        what: Resource::Table(destination.table.clone()),
-                    });
+            Ok(_) => {}
+            Err(EngineError::NotFound { .. })
+                if destination.create == CreateDisposition::IfNeeded =>
+            {
+                match self.create_result_table(&destination.table, wire).await {
+                    Ok(()) | Err(EngineError::AlreadyExists { .. }) => {}
+                    Err(err) => return Err(err),
                 }
-            }
-            Err(EngineError::NotFound { .. }) if destination.create_if_needed => {
-                self.create_result_table(&destination.table, &result.wire)
-                    .await?;
             }
             Err(err) => return Err(err),
         }
-        self.append_result(&destination.table, result).await
+        ResultSink::open(&self.catalog, destination.table.clone(), destination.write).await
     }
 
     /// Creates `table` with the result's columns.
@@ -713,102 +890,98 @@ impl Queries {
         Ok(())
     }
 
-    /// Writes the result's rows into `table` and lands them in one commit.
-    async fn append_result(
-        &self,
-        table: &TableRef,
-        result: &StatementResult,
-    ) -> Result<(), EngineError> {
-        let loaded = self.catalog.load(table).await?;
-        let target = WriteTarget::new(&loaded)?;
-        let batches = result
-            .batches
-            .iter()
-            .map(|batch| target.wire_rows(batch.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let files = TableWriter::new(&loaded)?.write(batches).await?;
-        if files.rows > 0 {
-            self.writes.append_files(table, files).await?;
+    /// Deletes the anonymous result table of `job`, if it has one, on a task of its own.
+    fn drop_result_table(&self, job: &Job) {
+        let table = match job.anonymous_table() {
+            Ok(Some(table)) => table,
+            Ok(None) => return,
+            Err(err) => {
+                warn!(job = %job.key.job, %err, "A job's result table has no valid name.");
+                return;
+            }
+        };
+        let catalog = self.catalog.clone();
+        tokio::spawn(async move {
+            if let Err(err) = catalog.purge_anonymous(&table).await {
+                warn!(%table, %err, "A job's result table could not be deleted.");
+            }
+        });
+    }
+
+    /// Deletes every anonymous result table under the root last changed more than `job_ttl`
+    /// ago: no job outlives the process that ran it, and any job whose table is younger may
+    /// still be running in another engine on the root.
+    pub(crate) async fn drop_expired_results(&self) -> Result<(), EngineError> {
+        let anonymous = DatasetId::from_str(ANONYMOUS_DATASET)?;
+        let now = now_ms();
+        let ttl = i64::try_from(self.job_ttl.as_millis()).unwrap_or(i64::MAX);
+        for project in self.catalog.projects().await? {
+            let dataset = DatasetRef {
+                project,
+                dataset: anonymous.clone(),
+            };
+            for (table, loaded) in self.catalog.tables(&dataset).await? {
+                if now.saturating_sub(loaded.metadata().last_updated_ms()) >= ttl {
+                    self.catalog.purge_anonymous(&dataset.table(table)).await?;
+                }
+            }
         }
         Ok(())
     }
+}
 
-    /// Deletes the anonymous result tables of jobs that left the registry.
-    fn drop_results(&self, jobs: Vec<Arc<Job>>) {
-        for job in jobs {
-            let Some(table) = job.result_table() else {
-                continue;
-            };
-            if table.dataset.as_str() != ANONYMOUS_DATASET {
-                continue;
+impl Planned {
+    /// The physical plan, analyzed and optimized: the result schema comes from it, never from
+    /// the logical plan before analysis, whose types the analyzer may still change.
+    async fn physical(&self) -> Result<Arc<dyn ExecutionPlan>, EngineError> {
+        Ok(self
+            .session
+            .execute_logical_plan(self.plan.clone())
+            .await?
+            .create_physical_plan()
+            .await?)
+    }
+
+    /// Starts the statement.
+    ///
+    /// # Errors
+    /// [`EngineError::BytesBilledLimitExceeded`] when the scan's estimate passes
+    /// `maximum_bytes_billed`, and the statement's own failures.
+    async fn execute(
+        self,
+        maximum_bytes_billed: Option<ByteSize>,
+    ) -> Result<Execution, EngineError> {
+        let physical = self.physical().await?;
+        let bytes_processed = scanned_bytes(&physical).await?;
+        if let Some(limit) = maximum_bytes_billed {
+            if bytes_processed > limit {
+                return Err(EngineError::BytesBilledLimitExceeded {
+                    estimated: bytes_processed,
+                    limit,
+                });
             }
-            let catalog = self.catalog.clone();
-            tokio::spawn(async move {
-                if let Err(err) = catalog.purge(&table).await {
-                    warn!(%table, %err, "A job's result table could not be deleted.");
-                }
-            });
         }
+        Ok(Execution {
+            wire: WireSchema::of_result(&physical.schema())?,
+            bytes_processed,
+            stream: execute_stream(physical, self.session.task_ctx())?,
+            session: self.session,
+        })
     }
-}
 
-/// Runs the planned statement and normalizes its result to the wire types.
-///
-/// # Errors
-/// [`EngineError::BytesBilledLimitExceeded`] when the scan's estimate passes
-/// `maximum_bytes_billed`, and the statement's own failures.
-async fn execute(
-    planned: Planned,
-    maximum_bytes_billed: Option<u64>,
-) -> Result<StatementResult, EngineError> {
-    let physical = physical_plan(&planned.session, planned.plan).await?;
-    let bytes_processed = scanned_bytes(&physical).await?;
-    if let Some(limit) = maximum_bytes_billed {
-        if bytes_processed > limit {
-            return Err(EngineError::BytesBilledLimitExceeded {
-                estimated: bytes_processed,
-                limit,
-            });
-        }
+    /// The result schema and the bytes the scans would read, without running the statement.
+    async fn estimate(self) -> Result<(WireSchema, ByteSize), EngineError> {
+        let physical = self.physical().await?;
+        Ok((
+            WireSchema::of_result(&physical.schema())?,
+            scanned_bytes(&physical).await?,
+        ))
     }
-    let wire = WireSchema::of_result(&physical.schema())?;
-    let batches = collect(physical, planned.session.task_ctx())
-        .await?
-        .iter()
-        .map(|batch| wire.normalize(batch))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(StatementResult {
-        wire,
-        batches,
-        bytes_processed,
-    })
-}
-
-/// The result schema and the bytes the scans would read, without running the statement.
-async fn estimate(planned: Planned) -> Result<(WireSchema, u64), EngineError> {
-    let physical = physical_plan(&planned.session, planned.plan).await?;
-    Ok((
-        WireSchema::of_result(&physical.schema())?,
-        scanned_bytes(&physical).await?,
-    ))
-}
-
-/// The physical plan of `plan`, analyzed and optimized: the result schema comes from it, never
-/// from the logical plan before analysis, whose types the analyzer may still change.
-async fn physical_plan(
-    session: &SessionContext,
-    plan: LogicalPlan,
-) -> Result<Arc<dyn ExecutionPlan>, EngineError> {
-    Ok(session
-        .execute_logical_plan(plan)
-        .await?
-        .create_physical_plan()
-        .await?)
 }
 
 /// The bytes the plan's Iceberg scans read: the length of every file task they plan, with their
 /// pushed-down predicates.
-async fn scanned_bytes(plan: &Arc<dyn ExecutionPlan>) -> Result<u64, EngineError> {
+async fn scanned_bytes(plan: &Arc<dyn ExecutionPlan>) -> Result<ByteSize, EngineError> {
     let mut total = 0u64;
     let mut pending = vec![Arc::clone(plan)];
     while let Some(node) = pending.pop() {
@@ -833,26 +1006,29 @@ async fn scanned_bytes(plan: &Arc<dyn ExecutionPlan>) -> Result<u64, EngineError
         }
         pending.extend(node.children().into_iter().cloned());
     }
-    Ok(total)
+    Ok(ByteSize::from_bytes(total))
 }
 
 impl InlineRows {
-    /// The whole result as one schema message and one record batch message, the form the
-    /// client decodes an inline result in.
-    fn of(result: &StatementResult, compression: IpcCompression) -> Result<Self, EngineError> {
-        let mut encoder = IpcEncoder::new(result.wire.schema(), compression)?;
+    /// `batches`, a whole result, as one schema message and one record batch message, the form
+    /// the client decodes an inline result in.
+    fn new(
+        wire: &WireSchema,
+        batches: &[RecordBatch],
+        compression: Option<IpcCompression>,
+    ) -> Result<Self, EngineError> {
+        let mut encoder = IpcEncoder::new(wire.schema(), compression)?;
         let schema = encoder.schema_message().to_vec();
-        if result.rows() == 0 {
+        if batches.iter().all(|batch| batch.num_rows() == 0) {
             return Ok(Self {
                 schema,
                 batch: Vec::new(),
             });
         }
-        let whole = concat_batches(result.wire.schema(), &result.batches).map_err(|err| {
-            EngineError::Internal {
+        let whole =
+            concat_batches(wire.schema(), batches).map_err(|err| EngineError::Internal {
                 detail: format!("the result's batches do not concatenate: {err}"),
-            }
-        })?;
+            })?;
         Ok(Self {
             schema,
             batch: encoder.encode(&whole)?,
@@ -860,67 +1036,89 @@ impl InlineRows {
     }
 }
 
-/// The answer to `Query` for a job: complete with its figures, or not yet.
-///
-/// # Errors
-/// The job's failure, when it failed.
-fn job_response(job: &Job, state: &JobState) -> Result<v2::QueryResponse, EngineError> {
-    let mut response = v2::QueryResponse {
-        kind: "bigquery#queryResponse".to_string(),
-        job_reference: Some(job.reference()),
-        location: job.location.to_string(),
-        job_complete: Some(false),
-        ..Default::default()
-    };
-    if let JobState::Done(finished) = state {
+impl Job {
+    /// The anonymous table that holds the job's rows: every job's but a dry run's and one with
+    /// a destination, whether the table was ever created or not.
+    fn anonymous_table(&self) -> Result<Option<TableRef>, EngineError> {
+        let destination = self
+            .configuration
+            .query
+            .as_ref()
+            .is_some_and(|query| query.destination_table.is_some());
+        if destination || self.configuration.dry_run == Some(true) {
+            return Ok(None);
+        }
+        let dataset = DatasetRef {
+            project: self.key.project.clone(),
+            dataset: DatasetId::from_str(ANONYMOUS_DATASET)?,
+        };
+        Ok(Some(
+            dataset.table(TableId::from_str(self.key.job.as_str())?),
+        ))
+    }
+
+    /// The answer to `Query` for this job in `state`: complete with its figures, or not yet.
+    ///
+    /// # Errors
+    /// The job's failure, when it failed.
+    fn query_response(&self, state: &JobState) -> Result<v2::QueryResponse, EngineError> {
+        let mut response = v2::QueryResponse {
+            kind: "bigquery#queryResponse".to_string(),
+            job_reference: Some(self.reference()),
+            location: self.location.to_string(),
+            job_complete: Some(false),
+            ..Default::default()
+        };
+        if let JobState::Done(finished) = state {
+            let completed = finished
+                .outcome
+                .as_ref()
+                .map_err(|failure| failure.error(self.resource()))?;
+            response.job_complete = Some(true);
+            response.page_token = ROWS_IN_TABLE.to_string();
+            response.schema = Some(completed.schema.clone());
+            response.total_rows = Some(completed.total_rows);
+            response.total_bytes_processed = i64::try_from(completed.bytes_processed.bytes()).ok();
+            response.cache_hit = Some(false);
+            response.statement_type = completed.statement.name().to_string();
+        }
+        Ok(response)
+    }
+
+    /// The answer to `Query` with the whole result inline, without a job.
+    fn inline_response(&self, finished: &jobs::Finished) -> Result<v2::QueryResponse, EngineError> {
         let completed = finished
             .outcome
             .as_ref()
-            .map_err(|failure| failure.error(job.resource()))?;
-        response.job_complete = Some(true);
-        response.page_token = ROWS_IN_TABLE.to_string();
-        response.schema = Some(completed.schema.clone());
-        response.total_rows = Some(completed.total_rows);
-        response.total_bytes_processed = i64::try_from(completed.bytes_processed).ok();
-        response.cache_hit = Some(false);
-        response.statement_type = completed.statement.name().to_string();
+            .map_err(|failure| failure.error(self.resource()))?;
+        let ResultRows::Inline(rows) = &completed.rows else {
+            return Err(EngineError::Internal {
+                detail: "an inline answer for a result kept in a table".to_string(),
+            });
+        };
+        Ok(v2::QueryResponse {
+            kind: "bigquery#queryResponse".to_string(),
+            query_id: Uuid::new_v4().to_string(),
+            location: self.location.to_string(),
+            schema: Some(completed.schema.clone()),
+            total_rows: Some(completed.total_rows),
+            total_bytes_processed: i64::try_from(completed.bytes_processed.bytes()).ok(),
+            job_complete: Some(true),
+            cache_hit: Some(false),
+            statement_type: completed.statement.name().to_string(),
+            results_schema: Some(v2::query_response::ResultsSchema::ArrowSchema(
+                v2::ArrowSchema {
+                    serialized_schema: rows.schema.clone(),
+                },
+            )),
+            results: Some(v2::query_response::Results::ArrowRecordBatch(
+                v2::ArrowRecordBatch {
+                    serialized_record_batch: rows.batch.clone(),
+                },
+            )),
+            ..Default::default()
+        })
     }
-    Ok(response)
-}
-
-/// The answer to `Query` with its whole result inline, without a job.
-fn inline_response(job: &Job, finished: &jobs::Finished) -> Result<v2::QueryResponse, EngineError> {
-    let completed = finished
-        .outcome
-        .as_ref()
-        .map_err(|failure| failure.error(job.resource()))?;
-    let ResultRows::Inline(rows) = &completed.rows else {
-        return Err(EngineError::Internal {
-            detail: "an inline answer for a result kept in a table".to_string(),
-        });
-    };
-    Ok(v2::QueryResponse {
-        kind: "bigquery#queryResponse".to_string(),
-        query_id: Uuid::new_v4().to_string(),
-        location: job.location.to_string(),
-        schema: Some(completed.schema.clone()),
-        total_rows: Some(completed.total_rows),
-        total_bytes_processed: i64::try_from(completed.bytes_processed).ok(),
-        job_complete: Some(true),
-        cache_hit: Some(false),
-        statement_type: completed.statement.name().to_string(),
-        results_schema: Some(v2::query_response::ResultsSchema::ArrowSchema(
-            v2::ArrowSchema {
-                serialized_schema: rows.schema.clone(),
-            },
-        )),
-        results: Some(v2::query_response::Results::ArrowRecordBatch(
-            v2::ArrowRecordBatch {
-                serialized_record_batch: rows.batch.clone(),
-            },
-        )),
-        ..Default::default()
-    })
 }
 
 /// Refuses legacy SQL, which the engine does not parse.
@@ -967,6 +1165,13 @@ fn wait_of(timeout_ms: Option<u32>) -> Duration {
     timeout_ms.map_or(DEFAULT_WAIT, |ms| Duration::from_millis(u64::from(ms)))
 }
 
+/// A request's `maximum_bytes_billed`, `None` when it sets none.
+fn maximum_bytes_billed(bytes: Option<i64>) -> Option<ByteSize> {
+    bytes
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .map(ByteSize::from_bytes)
+}
+
 /// A job's timeout, `None` when the request sets none.
 fn timeout_of(job_timeout_ms: Option<i64>) -> Option<Duration> {
     job_timeout_ms
@@ -976,19 +1181,19 @@ fn timeout_of(job_timeout_ms: Option<i64>) -> Option<Duration> {
 }
 
 impl IpcCompression {
-    /// The compression a `Query` request asks its inline result in.
-    fn of_query(query: &v2::QueryRequest) -> Self {
+    /// The compression a `Query` request asks its inline result in, `None` for none.
+    fn of_query(query: &v2::QueryRequest) -> Option<Self> {
         use v2::arrow_serialization_options::CompressionCodec;
         use v2::query_request::ResultsFormatSerializationOptions;
         match &query.results_format_serialization_options {
             Some(ResultsFormatSerializationOptions::ArrowSerializationOptions(arrow)) => {
                 match CompressionCodec::try_from(arrow.buffer_compression) {
-                    Ok(CompressionCodec::Lz4Frame) => IpcCompression::Lz4Frame,
-                    Ok(CompressionCodec::Zstd) => IpcCompression::Zstd,
-                    _ => IpcCompression::None,
+                    Ok(CompressionCodec::Lz4Frame) => Some(IpcCompression::Lz4Frame),
+                    Ok(CompressionCodec::Zstd) => Some(IpcCompression::Zstd),
+                    _ => None,
                 }
             }
-            None => IpcCompression::None,
+            None => None,
         }
     }
 }

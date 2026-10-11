@@ -100,6 +100,9 @@ impl Engine {
             CatalogSettings::from(&config),
         ));
         let state = Arc::new(EngineState::new(&config, catalog)?);
+        if let Err(err) = state.queries.drop_expired_results().await {
+            warn!(%err, "The anonymous result tables of earlier runs could not all be deleted.");
+        }
         let (shutdown, _) = watch::channel(false);
         let in_process = InProcess::start(
             &Services::new(Arc::clone(&state), Route::InProcess),

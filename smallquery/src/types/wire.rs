@@ -455,17 +455,15 @@ fn inferred_wire_type(data_type: &DataType, column: &str) -> Result<DataType, En
 /// The compression of an IPC stream's buffers, as a read session or a query asks for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IpcCompression {
-    None,
     Lz4Frame,
     Zstd,
 }
 
-impl From<IpcCompression> for Option<CompressionType> {
+impl From<IpcCompression> for CompressionType {
     fn from(compression: IpcCompression) -> Self {
         match compression {
-            IpcCompression::None => None,
-            IpcCompression::Lz4Frame => Some(CompressionType::LZ4_FRAME),
-            IpcCompression::Zstd => Some(CompressionType::ZSTD),
+            IpcCompression::Lz4Frame => CompressionType::LZ4_FRAME,
+            IpcCompression::Zstd => CompressionType::ZSTD,
         }
     }
 }
@@ -478,10 +476,13 @@ pub(crate) struct IpcEncoder {
 }
 
 impl IpcEncoder {
-    /// An encoder of batches in `schema`.
-    pub(crate) fn new(schema: &Schema, compression: IpcCompression) -> Result<Self, EngineError> {
+    /// An encoder of batches in `schema`, their buffers compressed when `compression` is set.
+    pub(crate) fn new(
+        schema: &Schema,
+        compression: Option<IpcCompression>,
+    ) -> Result<Self, EngineError> {
         let options = IpcWriteOptions::default()
-            .try_with_compression(compression.into())
+            .try_with_compression(compression.map(CompressionType::from))
             .map_err(EngineError::ipc)?;
         let mut writer = StreamWriter::try_new_with_options(Vec::new(), schema, options)
             .map_err(EngineError::ipc)?;

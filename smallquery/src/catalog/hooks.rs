@@ -17,6 +17,8 @@ pub(crate) enum CommitPoint {
 pub(crate) struct CommitHooks {
     #[cfg(test)]
     holds: std::sync::Mutex<std::collections::HashMap<CommitPoint, testing::Hold>>,
+    #[cfg(test)]
+    panics: std::sync::Mutex<std::collections::HashSet<CommitPoint>>,
 }
 
 impl CommitHooks {
@@ -24,6 +26,12 @@ impl CommitHooks {
     pub(crate) async fn reach(&self, point: CommitPoint) {
         #[cfg(test)]
         {
+            let panics = self
+                .panics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&point);
+            assert!(!panics, "a test panics the attempt at {point:?}");
             let hold = self
                 .holds
                 .lock()
@@ -95,6 +103,14 @@ pub(crate) mod testing {
                 reached: reached_rx,
                 release: release_tx,
             }
+        }
+
+        /// Makes the next attempt that reaches `point` panic, as a defect past it would.
+        pub(crate) fn panic_at(&self, point: CommitPoint) {
+            self.panics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(point);
         }
     }
 }

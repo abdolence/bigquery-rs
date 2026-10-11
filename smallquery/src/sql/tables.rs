@@ -32,39 +32,39 @@ use iceberg_datafusion::IcebergStaticTableProvider;
 use std::any::Any;
 use std::sync::Arc;
 
-/// Registers `loaded` as `table` in `session`, read at its current snapshot.
-///
-/// # Errors
-/// The errors of building the provider and of DataFusion's registration.
-pub(crate) async fn register_table(
-    session: &SessionContext,
-    table: &TableRef,
-    loaded: &LoadedTable,
-) -> Result<(), EngineError> {
-    let provider = loaded.table_provider().await?;
-    let project = table.project.as_str();
-    let catalog = match session.catalog(project) {
-        Some(catalog) => catalog,
-        None => {
-            let catalog: Arc<dyn CatalogProvider> = Arc::new(MemoryCatalogProvider::new());
-            session.register_catalog(project, catalog.clone());
-            catalog
-        }
-    };
-    let dataset = table.dataset.as_str();
-    let schema = match catalog.schema(dataset) {
-        Some(schema) => schema,
-        None => {
-            let schema = Arc::new(MemorySchemaProvider::new());
-            catalog.register_schema(dataset, schema.clone())?;
-            schema
-        }
-    };
-    schema.register_table(table.table.to_string(), provider)?;
-    Ok(())
-}
-
 impl LoadedTable {
+    /// Registers this table as `table` in `session`, read at its current snapshot.
+    ///
+    /// # Errors
+    /// The errors of building the provider and of DataFusion's registration.
+    pub(crate) async fn register(
+        &self,
+        session: &SessionContext,
+        table: &TableRef,
+    ) -> Result<(), EngineError> {
+        let provider = self.table_provider().await?;
+        let project = table.project.as_str();
+        let catalog = match session.catalog(project) {
+            Some(catalog) => catalog,
+            None => {
+                let catalog: Arc<dyn CatalogProvider> = Arc::new(MemoryCatalogProvider::new());
+                session.register_catalog(project, catalog.clone());
+                catalog
+            }
+        };
+        let dataset = table.dataset.as_str();
+        let schema = match catalog.schema(dataset) {
+            Some(schema) => schema,
+            None => {
+                let schema = Arc::new(MemorySchemaProvider::new());
+                catalog.register_schema(dataset, schema.clone())?;
+                schema
+            }
+        };
+        schema.register_table(table.table.to_string(), provider)?;
+        Ok(())
+    }
+
     /// A provider of this table's rows at its current snapshot, every column with the wire
     /// metadata of its BigQuery type.
     async fn table_provider(&self) -> Result<Arc<dyn TableProvider>, EngineError> {

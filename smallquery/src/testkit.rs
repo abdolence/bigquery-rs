@@ -12,6 +12,8 @@ use iceberg::expr::Predicate;
 use iceberg::scan::FileScanTask;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
@@ -21,7 +23,7 @@ pub(crate) const PROJECT: &str = "lite-project";
 pub(crate) struct TestEngine {
     pub engine: Engine,
     pub db: BigQueryDb,
-    _root: TempDir,
+    root: Arc<TempDir>,
     server: JoinHandle<()>,
 }
 
@@ -39,7 +41,23 @@ impl TestEngine {
 
     /// An engine whose configuration `adjust` changes from the defaults.
     pub(crate) async fn with_config(adjust: impl FnOnce(EngineConfig) -> EngineConfig) -> Self {
-        let root = TempDir::new().expect("a temporary root");
+        let root = Arc::new(TempDir::new().expect("a temporary root"));
+        Self::on_root(root, adjust).await
+    }
+
+    /// A second engine on this engine's root, as another process opens it, whose configuration
+    /// `adjust` changes from the defaults.
+    pub(crate) async fn open_on_same_root(
+        &self,
+        adjust: impl FnOnce(EngineConfig) -> EngineConfig,
+    ) -> Self {
+        Self::on_root(Arc::clone(&self.root), adjust).await
+    }
+
+    async fn on_root(
+        root: Arc<TempDir>,
+        adjust: impl FnOnce(EngineConfig) -> EngineConfig,
+    ) -> Self {
         let url = url::Url::from_directory_path(root.path()).expect("the root is absolute");
         let engine = Engine::open(adjust(EngineConfig::new(url)))
             .await
@@ -62,7 +80,7 @@ impl TestEngine {
         Self {
             engine,
             db,
-            _root: root,
+            root,
             server,
         }
     }
@@ -111,6 +129,26 @@ impl TestEngine {
             .try_collect()
             .await
             .expect("every task plans")
+    }
+
+    /// The directories of `table` that exist under the root: its catalog pointers and its
+    /// Iceberg location.
+    pub(crate) fn table_directories(&self, table: &TableRef) -> Vec<PathBuf> {
+        let root = self.root.path();
+        let parts = [
+            table.project.to_string(),
+            table.dataset.to_string(),
+            table.table.to_string(),
+        ];
+        [
+            root.join("_smallquery")
+                .join("catalog")
+                .join(parts.iter().collect::<PathBuf>()),
+            root.join(parts.iter().collect::<PathBuf>()),
+        ]
+        .into_iter()
+        .filter(|dir| dir.exists())
+        .collect()
     }
 
     /// Fails when the table's current snapshot plans any data file path twice: no commit may add

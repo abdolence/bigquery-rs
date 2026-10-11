@@ -10,7 +10,7 @@
 
 use crate::catalog::LoadedTable;
 use crate::error::EngineError;
-use crate::types::{Column, ColumnType, Columns, Mode, RangeElement, NUMERIC_DEFAULT};
+use crate::types::{Column, ColumnName, ColumnType, Columns, Mode, RangeElement, NUMERIC_DEFAULT};
 use arrow::array::{
     new_empty_array, new_null_array, Array, ArrayRef, AsArray, BinaryBuilder, BooleanBuilder,
     Date32Builder, Decimal128Builder, Float64Builder, Int64Builder, ListArray, RecordBatch,
@@ -19,7 +19,9 @@ use arrow::array::{
 };
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer};
 use arrow::compute::{cast_with_options, take, CastOptions};
-use arrow::datatypes::{DataType, Decimal128Type, Field, FieldRef, Fields, Schema, SchemaRef};
+use arrow::datatypes::{
+    DataType, Decimal128Type, Field, FieldRef, Fields, Schema, SchemaRef, TimeUnit,
+};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_request::MissingValueInterpretation;
@@ -160,7 +162,7 @@ pub(crate) enum RequestRows<'r> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MissingValues {
     pub default: MissingValueInterpretation,
-    pub per_column: HashMap<String, MissingValueInterpretation>,
+    pub per_column: HashMap<ColumnName, MissingValueInterpretation>,
 }
 
 /// The table a write lands in: its declared columns and the engine Arrow schema, with the
@@ -388,7 +390,7 @@ impl MissingValues {
     fn check(&self, column: &Column) -> Result<(), EngineError> {
         let interpretation = self
             .per_column
-            .get(column.name.as_str())
+            .get(&column.name)
             .copied()
             .unwrap_or(self.default);
         if interpretation == MissingValueInterpretation::DefaultValue
@@ -507,7 +509,7 @@ impl Conversion<'_> {
             }));
         };
         let list = match sent.data_type() {
-            DataType::List(item) | DataType::LargeList(item) => {
+            DataType::List(item) => {
                 let list = self.cast(
                     sent,
                     &DataType::List(Arc::new(item.as_ref().clone().with_name("item"))),
@@ -733,11 +735,19 @@ impl Conversion<'_> {
         }
     }
 
-    /// `sent` cast to `target`: every wire type widens or relabels into its engine type, so a
-    /// cast fails only on a sent type that is not the column's.
+    /// `sent` in `target`, the engine type of its column. The two may differ only as the type
+    /// tables relabel a wire type into its engine type, which loses nothing; any other sent
+    /// type is not the column's, and a cast would round or reformat the values, as `2.7` into
+    /// INT64 or `12` into STRING.
     fn cast(&self, sent: &ArrayRef, target: &DataType) -> Result<ArrayRef, Rejected> {
         if sent.data_type() == target {
             return Ok(sent.clone());
+        }
+        if !relabels(sent.data_type(), target) {
+            return Err(self.mismatch(format!(
+                "a value of Arrow type {} is not of the column's type {target}",
+                sent.data_type()
+            )));
         }
         cast_with_options(
             sent,
@@ -802,6 +812,27 @@ impl RangeElement {
             })
         };
         Columns::try_from(vec![bound("start")?, bound("end")?])
+    }
+}
+
+/// Whether a wire array of type `from` relabels into the engine type `to` without changing a
+/// value: BYTES from `Binary` to `LargeBinary`, a TIMESTAMP's zone label from `UTC` to
+/// `+00:00`, and a list's element field.
+fn relabels(from: &DataType, to: &DataType) -> bool {
+    let utc = |zone: &Option<Arc<str>>| {
+        zone.as_deref()
+            .is_some_and(|zone| ["UTC", "+00:00"].contains(&zone))
+    };
+    match (from, to) {
+        (DataType::Binary, DataType::LargeBinary) => true,
+        (
+            DataType::Timestamp(TimeUnit::Microsecond, from_zone),
+            DataType::Timestamp(TimeUnit::Microsecond, to_zone),
+        ) => utc(from_zone) && utc(to_zone),
+        (DataType::List(from), DataType::List(to)) => {
+            from.data_type() == to.data_type() || relabels(from.data_type(), to.data_type())
+        }
+        _ => false,
     }
 }
 

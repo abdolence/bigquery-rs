@@ -1,3 +1,4 @@
+use crate::config::ByteSize;
 use crate::ids::{DatasetRef, JobId, Location, ProjectId, TableRef};
 use std::fmt::{Display, Formatter};
 use tonic::{Code, Status};
@@ -133,21 +134,23 @@ pub enum EngineError {
     },
     /// A query's estimated scan is above the `maximum_bytes_billed` its request set.
     #[error(
-        "the query scans an estimated {estimated} bytes, above the maximum_bytes_billed of {limit}"
+        "the query scans an estimated {} bytes, above the maximum_bytes_billed of {}",
+        estimated.bytes(),
+        limit.bytes()
     )]
     BytesBilledLimitExceeded {
         /// The bytes the scan is estimated to read.
-        estimated: u64,
+        estimated: ByteSize,
         /// The limit the request set.
-        limit: u64,
+        limit: ByteSize,
     },
     /// A job that failed, with the reason its `error_result` reports.
     #[error("{what} failed: {message}")]
     JobFailed {
         /// The job.
         what: Resource,
-        /// BigQuery's reason, as `invalidQuery` or `stopped`.
-        reason: &'static str,
+        /// Why it failed.
+        reason: JobFailureReason,
         /// What went wrong.
         message: String,
     },
@@ -165,6 +168,74 @@ pub enum EngineError {
         /// What failed.
         detail: String,
     },
+}
+
+/// Why a job failed: one of BigQuery's error reasons, which a job's `error_result` reports as
+/// its `Display`, with the failures that share a reason told apart where the status a waiting
+/// call answers differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum JobFailureReason {
+    /// `invalidQuery`: the statement or a value it produced is invalid.
+    InvalidQuery,
+    /// `notImplemented`: a construct the engine does not implement.
+    NotImplemented,
+    /// `notFound`: a resource the statement names does not exist.
+    NotFound,
+    /// `duplicate`: the destination exists, or holds rows under `WRITE_EMPTY`.
+    Duplicate,
+    /// `bytesBilledLimitExceeded`: the scan is above `maximum_bytes_billed`.
+    BytesBilledLimitExceeded,
+    /// `resourcesExceeded`: the statement needed more memory than the engine's budget.
+    ResourcesExceeded,
+    /// `stopped`: `CancelJob` stopped the job.
+    Stopped,
+    /// `timeout`: the job ran past its `job_timeout_ms`.
+    Timeout,
+    /// `internalError` for a commit whose outcome is unknown: its rows may have landed, so the
+    /// job must not be run again.
+    CommitOutcomeUnknown,
+    /// `internalError`: any other failure inside the engine.
+    Internal,
+}
+
+impl Display for JobFailureReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            JobFailureReason::InvalidQuery => "invalidQuery",
+            JobFailureReason::NotImplemented => "notImplemented",
+            JobFailureReason::NotFound => "notFound",
+            JobFailureReason::Duplicate => "duplicate",
+            JobFailureReason::BytesBilledLimitExceeded => "bytesBilledLimitExceeded",
+            JobFailureReason::ResourcesExceeded => "resourcesExceeded",
+            JobFailureReason::Stopped => "stopped",
+            JobFailureReason::Timeout => "timeout",
+            JobFailureReason::CommitOutcomeUnknown | JobFailureReason::Internal => "internalError",
+        })
+    }
+}
+
+/// The reason a job that failed with this error reports.
+impl From<&EngineError> for JobFailureReason {
+    fn from(error: &EngineError) -> Self {
+        match error {
+            EngineError::InvalidQuery { .. } | EngineError::Invalid { .. } => {
+                JobFailureReason::InvalidQuery
+            }
+            EngineError::Unsupported { .. } => JobFailureReason::NotImplemented,
+            EngineError::NotFound { .. } | EngineError::NotFoundInLocation { .. } => {
+                JobFailureReason::NotFound
+            }
+            EngineError::AlreadyExists { .. } => JobFailureReason::Duplicate,
+            EngineError::BytesBilledLimitExceeded { .. } => {
+                JobFailureReason::BytesBilledLimitExceeded
+            }
+            EngineError::ResourcesExceeded { .. } => JobFailureReason::ResourcesExceeded,
+            EngineError::CommitOutcomeUnknown { .. } => JobFailureReason::CommitOutcomeUnknown,
+            EngineError::JobFailed { reason, .. } => *reason,
+            _ => JobFailureReason::Internal,
+        }
+    }
 }
 
 /// The storage backend a root lives on, chosen by the root URI's scheme.
@@ -310,15 +381,18 @@ impl From<&EngineError> for Status {
             EngineError::ResourcesExceeded { .. } => Code::ResourceExhausted,
             EngineError::Internal { .. } => Code::Internal,
             EngineError::OutOfRange { .. } => Code::OutOfRange,
-            EngineError::JobFailed { reason, .. } => match *reason {
-                "invalidQuery" | "bytesBilledLimitExceeded" => Code::InvalidArgument,
-                "notImplemented" => Code::Unimplemented,
-                "notFound" => Code::NotFound,
-                "duplicate" => Code::AlreadyExists,
-                "resourcesExceeded" => Code::ResourceExhausted,
+            EngineError::JobFailed { reason, .. } => match reason {
+                JobFailureReason::InvalidQuery | JobFailureReason::BytesBilledLimitExceeded => {
+                    Code::InvalidArgument
+                }
+                JobFailureReason::NotImplemented => Code::Unimplemented,
+                JobFailureReason::NotFound => Code::NotFound,
+                JobFailureReason::Duplicate => Code::AlreadyExists,
+                JobFailureReason::ResourcesExceeded => Code::ResourceExhausted,
                 // A stopped job is not sent again.
-                "stopped" | "timeout" => Code::Cancelled,
-                _ => Code::Internal,
+                JobFailureReason::Stopped | JobFailureReason::Timeout => Code::Cancelled,
+                JobFailureReason::CommitOutcomeUnknown => Code::Unknown,
+                JobFailureReason::Internal => Code::Internal,
             },
         };
         Status::new(code, error.to_string())

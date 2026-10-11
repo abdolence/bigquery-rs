@@ -67,7 +67,7 @@ struct Session {
     /// The positions in `scan` of the columns the session returns.
     selected: Vec<usize>,
     wire: WireSchema,
-    compression: IpcCompression,
+    compression: Option<IpcCompression>,
     streams: Vec<Vec<FileScanTask>>,
     expires: Instant,
 }
@@ -548,19 +548,19 @@ fn encode_responses(
 }
 
 impl IpcCompression {
-    /// The compression a read session's Arrow options ask for.
-    fn of_read_options(options: &storage::read_session::TableReadOptions) -> Self {
+    /// The compression a read session's Arrow options ask for, `None` for none.
+    fn of_read_options(options: &storage::read_session::TableReadOptions) -> Option<Self> {
         use storage::arrow_serialization_options::CompressionCodec;
         use storage::read_session::table_read_options::OutputFormatSerializationOptions;
         match &options.output_format_serialization_options {
             Some(OutputFormatSerializationOptions::ArrowSerializationOptions(arrow)) => {
                 match CompressionCodec::try_from(arrow.buffer_compression) {
-                    Ok(CompressionCodec::Lz4Frame) => IpcCompression::Lz4Frame,
-                    Ok(CompressionCodec::Zstd) => IpcCompression::Zstd,
-                    _ => IpcCompression::None,
+                    Ok(CompressionCodec::Lz4Frame) => Some(IpcCompression::Lz4Frame),
+                    Ok(CompressionCodec::Zstd) => Some(IpcCompression::Zstd),
+                    _ => None,
                 }
             }
-            _ => IpcCompression::None,
+            _ => None,
         }
     }
 }

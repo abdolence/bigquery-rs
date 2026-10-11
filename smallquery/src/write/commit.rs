@@ -12,10 +12,10 @@
 //! failed group fails every member with its error: `Aborted` past the retry deadline, which the
 //! client retries, or an unknown outcome, which nobody retries.
 
-use crate::catalog::{Change, EngineCatalog, LoadedTable, PointerVersion};
+use crate::catalog::{Change, EngineCatalog, EngineCommit};
 use crate::error::{EngineError, Resource};
 use crate::ids::TableRef;
-use crate::write::WrittenFiles;
+use crate::write::{WriteDisposition, WrittenFiles};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -23,26 +23,25 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::debug;
 
-/// What an append's commit made of the table.
-#[derive(Debug, Clone)]
-pub(crate) struct Appended {
-    pub pointer_version: PointerVersion,
-    pub snapshot_id: Option<i64>,
-}
-
-impl From<&LoadedTable> for Appended {
-    fn from(table: &LoadedTable) -> Self {
-        Self {
-            pointer_version: table.version(),
-            snapshot_id: table.metadata().current_snapshot_id(),
-        }
-    }
-}
-
 /// One request waiting in its table's queue.
 struct Member {
     files: WrittenFiles,
-    answer: oneshot::Sender<Result<Appended, EngineError>>,
+    disposition: WriteDisposition,
+    answer: oneshot::Sender<Result<(), EngineError>>,
+}
+
+/// What a group's commit made of one member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// The commit failed before it looked at the table, and the member shares its error.
+    Undecided,
+    /// The member's files are in the commit.
+    Included,
+    /// The table under the name is not the identity the files were written for.
+    Replaced,
+    /// The member writes only into an empty table, and the table or an earlier member of the
+    /// group holds rows.
+    NotEmpty,
 }
 
 /// The commit queues of every table with a commit running. A table has an entry exactly while
@@ -65,6 +64,38 @@ impl std::fmt::Debug for CommitGroups {
     }
 }
 
+/// A running commit task's hold on its table's queue. A task that ends any other way than by
+/// finding its queue empty, a panic above all, drops it still armed: the queue goes, and every
+/// request in it is failed, so that the next request starts a commit task of its own.
+struct Draining<'g> {
+    groups: &'g CommitGroups,
+    table: &'g TableRef,
+    armed: bool,
+}
+
+impl Drop for Draining<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let queue = self
+            .groups
+            .queues
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(self.table)
+            .unwrap_or_default();
+        for member in queue {
+            let _ = member.answer.send(Err(EngineError::Internal {
+                detail: format!(
+                    "the commit task of {} ended before this request's commit",
+                    self.table
+                ),
+            }));
+        }
+    }
+}
+
 impl CommitGroups {
     pub(crate) fn new(catalog: Arc<EngineCatalog>, window: Duration) -> Self {
         Self {
@@ -76,21 +107,29 @@ impl CommitGroups {
         }
     }
 
-    /// Lands `files` in `table` with whatever else is queued for it, and answers once the
-    /// commit holding them has landed or failed.
+    /// Lands `files` in `table` with whatever else is queued for it, under `disposition`, and
+    /// answers once the commit holding them has landed or failed. Under
+    /// [`WriteDisposition::Empty`] the table is checked inside the commit, so of two requests
+    /// into one empty table only the first lands.
     ///
     /// # Errors
     /// [`EngineError::NotFound`] when the table was dropped or replaced since the files were
-    /// written, and the errors of the catalog's commit loop.
+    /// written, [`EngineError::AlreadyExists`] for [`WriteDisposition::Empty`] into a table
+    /// with rows, and the errors of the catalog's commit loop.
     pub(crate) async fn append(
         self: &Arc<Self>,
         table: &TableRef,
         files: WrittenFiles,
-    ) -> Result<Appended, EngineError> {
+        disposition: WriteDisposition,
+    ) -> Result<(), EngineError> {
         let (answer, answered) = oneshot::channel();
         let starts_commit = {
             let mut queues = self.queues.lock().unwrap_or_else(PoisonError::into_inner);
-            let member = Member { files, answer };
+            let member = Member {
+                files,
+                disposition,
+                answer,
+            };
             match queues.get_mut(table) {
                 Some(queue) => {
                     queue.push(member);
@@ -108,7 +147,7 @@ impl CommitGroups {
         if starts_commit {
             let groups = Arc::clone(self);
             let table = table.clone();
-            tokio::spawn(async move { groups.drain(table).await });
+            tokio::spawn(async move { groups.drain(&table).await });
         }
         answered.await.map_err(|_| EngineError::Internal {
             detail: format!("the commit task of {table} ended without answering"),
@@ -116,23 +155,29 @@ impl CommitGroups {
     }
 
     /// Commits `table`'s queue group by group until it is empty.
-    async fn drain(&self, table: TableRef) {
+    async fn drain(&self, table: &TableRef) {
+        let mut draining = Draining {
+            groups: self,
+            table,
+            armed: true,
+        };
         loop {
             if !self.window.is_zero() {
                 tokio::time::sleep(self.window).await;
             }
             let group = {
                 let mut queues = self.queues.lock().unwrap_or_else(PoisonError::into_inner);
-                match queues.get_mut(&table) {
+                match queues.get_mut(table) {
                     Some(queue) if !queue.is_empty() => std::mem::take(queue),
                     _ => {
-                        queues.remove(&table);
+                        queues.remove(table);
+                        draining.armed = false;
                         return;
                     }
                 }
             };
             debug!(%table, requests = group.len(), "Committing a group of appends.");
-            let outcomes = self.commit(&table, &group).await;
+            let outcomes = self.commit(table, &group).await;
             for (member, outcome) in group.into_iter().zip(outcomes) {
                 // A member whose request went away has nobody to answer.
                 let _ = member.answer.send(outcome);
@@ -140,31 +185,46 @@ impl CommitGroups {
         }
     }
 
-    /// Lands the files of every member written for the table identity under the name in one
-    /// `fast_append`, and returns each member's outcome, in order.
-    async fn commit(
-        &self,
-        table: &TableRef,
-        group: &[Member],
-    ) -> Vec<Result<Appended, EngineError>> {
-        let mut included = vec![false; group.len()];
+    /// Lands, in one `fast_append`, the files of every member written for the table identity
+    /// under the name whose disposition the table allows, and returns each member's outcome,
+    /// in order.
+    async fn commit(&self, table: &TableRef, group: &[Member]) -> Vec<Result<(), EngineError>> {
+        let mut verdicts = vec![Verdict::Undecided; group.len()];
         let landed = self
             .catalog
             .commit(table, |loaded| {
+                // Members are decided in queue order; a table whose snapshot does not report
+                // its rows is not known to be empty.
                 let identity = loaded.metadata().uuid();
-                for (member, include) in group.iter().zip(included.iter_mut()) {
-                    *include = member.files.table_uuid == identity;
+                let mut holds_rows = group
+                    .iter()
+                    .any(|member| member.disposition == WriteDisposition::Empty)
+                    && loaded.total_rows()? != Some(0);
+                for (member, verdict) in group.iter().zip(verdicts.iter_mut()) {
+                    *verdict = if member.files.table_uuid != identity {
+                        Verdict::Replaced
+                    } else if member.disposition == WriteDisposition::Empty && holds_rows {
+                        Verdict::NotEmpty
+                    } else {
+                        holds_rows |= member.files.rows > 0;
+                        Verdict::Included
+                    };
                 }
-                if !included.contains(&true) {
+                if !verdicts.contains(&Verdict::Included) {
+                    // Every member has its own answer; this error reaches none of them.
                     return Err(EngineError::NotFound {
                         what: Resource::Table(table.clone()),
                     });
                 }
-                let files = group
+                let mut files = group
                     .iter()
-                    .zip(&included)
-                    .filter(|(_, include)| **include)
-                    .flat_map(|(member, _)| member.files.files.iter().cloned());
+                    .zip(&verdicts)
+                    .filter(|(_, verdict)| **verdict == Verdict::Included)
+                    .flat_map(|(member, _)| member.files.files.iter().cloned())
+                    .peekable();
+                if files.peek().is_none() {
+                    return Ok(Change::Engine(EngineCommit::default()));
+                }
                 let transaction = Transaction::new(&loaded.table);
                 let append = transaction
                     .fast_append()
@@ -173,13 +233,19 @@ impl CommitGroups {
                 Ok(Change::Transaction(append.apply(transaction)?))
             })
             .await;
-        included
+        verdicts
             .into_iter()
-            .map(|include| match (&landed, include) {
-                (Ok(loaded), true) => Ok(Appended::from(loaded)),
-                (Err(err), true) => Err(err.for_member(table)),
-                (_, false) => Err(EngineError::NotFound {
+            .map(|verdict| match (verdict, &landed) {
+                (Verdict::Included, Ok(_)) => Ok(()),
+                (Verdict::Included | Verdict::Undecided, Err(err)) => Err(err.for_member(table)),
+                (Verdict::Replaced, _) => Err(EngineError::NotFound {
                     what: Resource::Table(table.clone()),
+                }),
+                (Verdict::NotEmpty, _) => Err(EngineError::AlreadyExists {
+                    what: Resource::Table(table.clone()),
+                }),
+                (Verdict::Undecided, Ok(_)) => Err(EngineError::Internal {
+                    detail: format!("the commit of {table} landed without deciding a request"),
                 }),
             })
             .collect()
@@ -223,6 +289,15 @@ impl EngineError {
             EngineError::Precondition { what, detail } => EngineError::Precondition {
                 what: what.clone(),
                 detail: detail.clone(),
+            },
+            EngineError::MissingMetadata {
+                what,
+                pointer_version,
+                metadata_location,
+            } => EngineError::MissingMetadata {
+                what: what.clone(),
+                pointer_version: *pointer_version,
+                metadata_location: metadata_location.clone(),
             },
             other => EngineError::Internal {
                 detail: format!("the commit of {table} failed: {other}"),

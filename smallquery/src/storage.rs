@@ -261,6 +261,13 @@ impl Backend {
         }
     }
 
+    /// Deletes the directory and everything under it; an absent one is not an error.
+    pub(crate) async fn delete_dir(&self, dir: &ObjectPath) -> Result<(), StorageError> {
+        match self {
+            Backend::Local(local) => local.delete_dir(dir).await,
+        }
+    }
+
     /// A `FileIO` over this backend, for Iceberg's readers and writers.
     pub(crate) fn file_io(&self) -> FileIO {
         FileIOBuilder::new(Arc::new(BackendFactory {
@@ -324,9 +331,7 @@ impl Storage for Backend {
     }
 
     async fn delete_prefix(&self, path: &str) -> iceberg::Result<()> {
-        match self {
-            Backend::Local(local) => Ok(local.delete_dir(&self.object_path(path)?).await?),
-        }
+        Ok(self.delete_dir(&self.object_path(path)?).await?)
     }
 
     async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> iceberg::Result<()> {

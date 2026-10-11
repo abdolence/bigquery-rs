@@ -242,11 +242,13 @@ impl EngineCatalog {
     /// The Iceberg table location of `table`: every identity a name ever had shares it, which
     /// is safe since every file Iceberg and the engine write there has a unique name.
     pub(crate) fn table_location(&self, table: &TableRef) -> String {
-        self.backend.location(
-            &ObjectPath::segment(&table.project)
-                .join(&table.dataset)
-                .join(&table.table),
-        )
+        self.backend.location(&Self::table_dir(table))
+    }
+
+    fn table_dir(table: &TableRef) -> ObjectPath {
+        ObjectPath::segment(&table.project)
+            .join(&table.dataset)
+            .join(&table.table)
     }
 
     /// The table, from the cache when no newer pointer exists, else from storage.
@@ -469,6 +471,21 @@ impl EngineCatalog {
         Ok(())
     }
 
+    /// Deletes an anonymous result table whole, its catalog pointers and every file at its
+    /// location, where [`EngineCatalog::purge`] keeps the pointers below a tombstone. Nothing
+    /// those pointers guard against can happen to such a table: its name carries its job's ID,
+    /// so it is never created again, and nothing commits to it once its job has ended.
+    ///
+    /// # Errors
+    /// The storage errors of the deletes.
+    pub(crate) async fn purge_anonymous(&self, table: &TableRef) -> Result<(), EngineError> {
+        let _lock = self.locks.table(table).await;
+        self.backend.delete_dir(&Self::pointer_dir(table)).await?;
+        self.forget(table);
+        self.backend.delete_dir(&Self::table_dir(table)).await?;
+        Ok(())
+    }
+
     /// The tables of `dataset` that exist, by name.
     pub(crate) async fn table_names(
         &self,
@@ -505,11 +522,14 @@ impl EngineCatalog {
 
 /// Milliseconds since the Unix epoch, by this host's clock.
 pub(crate) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-        })
+    millis(SystemTime::now())
+}
+
+/// `time` in milliseconds since the Unix epoch, 0 before it.
+pub(crate) fn millis(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |since| {
+        i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+    })
 }
 
 impl From<&TableRef> for TableIdent {

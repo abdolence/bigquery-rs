@@ -19,7 +19,6 @@ mod params;
 mod tables;
 
 pub(crate) use params::Parameters;
-pub(crate) use tables::register_table;
 
 use crate::config::ByteSize;
 use crate::error::EngineError;
@@ -362,10 +361,7 @@ impl VisitorMut for AstPass<'_> {
         // sqlparser's BigQuery dialect reads `@name` as an identifier, which DataFusion would
         // plan as a session variable.
         if let ast::Expr::Identifier(ident) = expr {
-            if ident.quote_style.is_none()
-                && ident.value.starts_with('@')
-                && !ident.value.starts_with("@@")
-            {
+            if is_named_parameter(ident) {
                 if let Err(err) = self.uses(ParameterStyle::Named) {
                     return ControlFlow::Break(err);
                 }
@@ -471,6 +467,12 @@ impl AstPass<'_> {
     }
 }
 
+/// Whether `ident` is a named parameter, `@name`, which sqlparser's BigQuery dialect reads as an
+/// identifier; `@@name` is a system variable.
+fn is_named_parameter(ident: &Ident) -> bool {
+    ident.quote_style.is_none() && ident.value.starts_with('@') && !ident.value.starts_with("@@")
+}
+
 /// Gives every select item that BigQuery leaves anonymous its `f<k>_` alias, counting such items
 /// from 0 in select-list order; a column reference keeps the column's name and a field access
 /// the field's. In a set operation the leftmost select names the columns, but every select is
@@ -484,7 +486,7 @@ fn name_select_items(body: &mut SetExpr) {
                     continue;
                 };
                 let alias = match expr {
-                    ast::Expr::Identifier(_) => continue,
+                    ast::Expr::Identifier(ident) if !is_named_parameter(ident) => continue,
                     ast::Expr::CompoundIdentifier(parts) => match parts.last() {
                         Some(last) => Ident::new(last.value.clone()),
                         None => continue,
