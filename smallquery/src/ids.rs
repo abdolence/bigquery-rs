@@ -410,6 +410,111 @@ impl Display for TableRef {
     }
 }
 
+/// A write stream's name: `projects/{project}/datasets/{dataset}/tables/{table}/streams/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteStreamName {
+    pub(crate) table: TableRef,
+    pub(crate) stream: StreamId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StreamId {
+    /// `_default`, which every table has without creating it.
+    Default,
+    /// A stream `CreateWriteStream` created.
+    Created(String),
+}
+
+impl FromStr for WriteStreamName {
+    type Err = EngineError;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        let (table, stream) = name.rsplit_once("/streams/").ok_or_else(|| {
+            EngineError::invalid(
+                format!("write stream {name:?}"),
+                "a write stream is named {table}/streams/{id}",
+            )
+        })?;
+        Ok(Self {
+            table: TableRef::from_storage_path(table)?,
+            stream: match stream {
+                "_default" => StreamId::Default,
+                id => StreamId::Created(id.to_string()),
+            },
+        })
+    }
+}
+
+impl Display for WriteStreamName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let stream = match &self.stream {
+            StreamId::Default => "_default",
+            StreamId::Created(id) => id,
+        };
+        write!(f, "{}/streams/{stream}", self.table.storage_path())
+    }
+}
+
+/// A Storage Read session's name: `projects/{project}/locations/{location}/sessions/{id}`,
+/// the location lowercased.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadSessionName {
+    pub(crate) project: ProjectId,
+    pub(crate) location: Location,
+    pub(crate) id: uuid::Uuid,
+}
+
+impl Display for ReadSessionName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "projects/{}/locations/{}/sessions/{}",
+            self.project,
+            self.location.as_str().to_ascii_lowercase(),
+            self.id
+        )
+    }
+}
+
+/// A stream of a Storage Read session: `{session}/streams/{index}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadStreamName {
+    pub(crate) session: ReadSessionName,
+    pub(crate) index: usize,
+}
+
+impl FromStr for ReadStreamName {
+    type Err = EngineError;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        let invalid = || {
+            EngineError::invalid(
+                format!("read stream {name:?}"),
+                "a read stream is named \
+                 projects/{project}/locations/{location}/sessions/{session}/streams/{index}",
+            )
+        };
+        let rest = name.strip_prefix("projects/").ok_or_else(invalid)?;
+        let (project, rest) = rest.split_once("/locations/").ok_or_else(invalid)?;
+        let (location, rest) = rest.split_once("/sessions/").ok_or_else(invalid)?;
+        let (id, index) = rest.split_once("/streams/").ok_or_else(invalid)?;
+        Ok(Self {
+            session: ReadSessionName {
+                project: project.parse()?,
+                location: location.parse()?,
+                id: id.parse().map_err(|_| invalid())?,
+            },
+            index: index.parse().map_err(|_| invalid())?,
+        })
+    }
+}
+
+impl Display for ReadStreamName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/streams/{}", self.session, self.index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

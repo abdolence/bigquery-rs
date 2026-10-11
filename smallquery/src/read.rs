@@ -9,8 +9,7 @@
 
 use crate::catalog::{EngineCatalog, LoadedTable};
 use crate::error::{EngineError, Resource};
-use crate::ids::TableRef;
-use crate::services::timestamp;
+use crate::ids::{ReadSessionName, ReadStreamName, TableRef};
 use crate::sql::SqlEngine;
 use crate::types::{Column, Columns, IpcCompression, IpcEncoder, WireSchema};
 use arrow::array::{AsArray, RecordBatch};
@@ -57,44 +56,17 @@ impl std::fmt::Debug for ReadSessions {
 
 /// One session: what its streams read and how.
 struct Session {
-    name: String,
+    name: ReadSessionName,
     file_io: FileIO,
     runtime: iceberg::Runtime,
     /// The columns the reader returns for the session's tasks, in this order.
     scan: SchemaRef,
     /// The residual restriction over `scan`, applied to every batch.
     filter: Option<Arc<dyn PhysicalExpr>>,
-    /// The positions in `scan` of the columns the session returns.
-    selected: Vec<usize>,
     wire: WireSchema,
     compression: Option<IpcCompression>,
     streams: Vec<Vec<FileScanTask>>,
     expires: Instant,
-}
-
-/// A stream of a session, as its name names it.
-struct StreamName {
-    session: Uuid,
-    index: usize,
-}
-
-impl std::str::FromStr for StreamName {
-    type Err = EngineError;
-
-    /// `projects/{project}/locations/{location}/sessions/{session}/streams/{index}`.
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        let not_found = || EngineError::NotFound {
-            what: Resource::ReadStream(name.to_string()),
-        };
-        let (session, index) = name
-            .split_once("/sessions/")
-            .and_then(|(_, rest)| rest.split_once("/streams/"))
-            .ok_or_else(not_found)?;
-        Ok(Self {
-            session: session.parse().map_err(|_| not_found())?,
-            index: index.parse().map_err(|_| not_found())?,
-        })
-    }
 }
 
 impl ReadSessions {
@@ -201,20 +173,24 @@ impl ReadSessions {
         let schema_message = IpcEncoder::new(wire.schema(), compression)?
             .schema_message()
             .to_vec();
-        let id = Uuid::new_v4();
-        let name = format!(
-            "projects/{}/locations/{}/sessions/{id}",
-            table.project,
-            dataset.location.as_str().to_ascii_lowercase()
-        );
+        let name = ReadSessionName {
+            project: table.project.clone(),
+            location: dataset.location.clone(),
+            id: Uuid::new_v4(),
+        };
         let stream_names: Vec<String> = (0..streams.len())
-            .map(|index| format!("{name}/streams/{index}"))
+            .map(|index| {
+                ReadStreamName {
+                    session: name.clone(),
+                    index,
+                }
+                .to_string()
+            })
             .collect();
         let session = Session {
             name: name.clone(),
             file_io: loaded.table.file_io().clone(),
             runtime: self.catalog.iceberg_runtime(),
-            selected: (0..selected.len()).collect(),
             scan,
             filter,
             wire,
@@ -222,15 +198,10 @@ impl ReadSessions {
             streams,
             expires: Instant::now() + self.ttl,
         };
-        {
-            let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-            let now = Instant::now();
-            sessions.retain(|_, session| session.expires > now);
-            sessions.insert(id, Arc::new(session));
-        }
+        self.live().insert(name.id, Arc::new(session));
         Ok(storage::ReadSession {
-            name,
-            expire_time: Some(timestamp(SystemTime::now() + self.ttl)),
+            name: name.to_string(),
+            expire_time: Some((SystemTime::now() + self.ttl).into()),
             data_format: storage::DataFormat::Arrow.into(),
             table: requested.table,
             table_modifiers: requested.table_modifiers,
@@ -259,18 +230,17 @@ impl ReadSessions {
         &self,
         request: storage::ReadRowsRequest,
     ) -> Result<ReceiverStream<Result<storage::ReadRowsResponse, EngineError>>, EngineError> {
-        let stream: StreamName = request.read_stream.parse()?;
-        let session = {
-            let sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-            sessions
-                .get(&stream.session)
-                .filter(|session| session.expires > Instant::now())
-                .cloned()
-        }
-        .filter(|session| stream.index < session.streams.len())
-        .ok_or_else(|| EngineError::NotFound {
-            what: Resource::ReadStream(request.read_stream.clone()),
-        })?;
+        let stream: ReadStreamName = request.read_stream.parse()?;
+        let session = self
+            .live()
+            .get(&stream.session.id)
+            .filter(|session| {
+                session.name == stream.session && stream.index < session.streams.len()
+            })
+            .cloned()
+            .ok_or_else(|| EngineError::NotFound {
+                what: Resource::ReadStream(Box::new(stream.clone())),
+            })?;
         let offset = u64::try_from(request.offset).map_err(|_| {
             EngineError::invalid("offset", format!("{} is negative", request.offset))
         })?;
@@ -281,6 +251,14 @@ impl ReadSessions {
             }
         });
         Ok(ReceiverStream::new(receiver))
+    }
+
+    /// The live sessions, locked, with the expired ones gone.
+    fn live(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Arc<Session>>> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        sessions.retain(|_, session| session.expires > now);
+        sessions
     }
 
     /// The restriction's expression over every column of the pinned schema, its convertible
@@ -473,7 +451,10 @@ impl Session {
         }
         if skip > 0 {
             return Err(EngineError::OutOfRange {
-                what: Resource::ReadStream(format!("{}/streams/{index}", self.name)),
+                what: Resource::ReadStream(Box::new(ReadStreamName {
+                    session: self.name.clone(),
+                    index,
+                })),
                 detail: format!("offset {offset} is past the stream's last row"),
             });
         }
@@ -510,8 +491,10 @@ impl Session {
             }
             None => scanned,
         };
+        // The session's columns lead the scan's; the restriction's own columns follow them.
+        let selected: Vec<usize> = (0..self.wire.schema().fields().len()).collect();
         restricted
-            .project(&self.selected)
+            .project(&selected)
             .map_err(|err| EngineError::Internal {
                 detail: format!("the session's columns do not project: {err}"),
             })

@@ -209,11 +209,8 @@ pub(crate) struct NameScope {
 }
 
 /// How a statement's parameters are named.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParameterStyle {
-    /// The statement takes none.
-    #[default]
-    None,
     /// `@name`.
     Named,
     /// `?`, numbered in source order.
@@ -226,7 +223,8 @@ pub(crate) struct Prepared {
     parsed: Box<ast::Statement>,
     kind: StatementKind,
     tables: Vec<TableRef>,
-    parameters: ParameterStyle,
+    /// `None` for a statement that takes no parameters.
+    parameters: Option<ParameterStyle>,
 }
 
 impl Statement {
@@ -243,7 +241,7 @@ impl Statement {
             scope: Some(scope),
             ctes: ctes.names,
             tables: Vec::new(),
-            parameters: ParameterStyle::None,
+            parameters: None,
             positional: 0,
         };
         if let ControlFlow::Break(err) = self.parsed.visit(&mut pass) {
@@ -312,7 +310,7 @@ struct AstPass<'s> {
     scope: Option<&'s NameScope>,
     ctes: BTreeSet<String>,
     tables: Vec<TableRef>,
-    parameters: ParameterStyle,
+    parameters: Option<ParameterStyle>,
     positional: usize,
 }
 
@@ -390,11 +388,7 @@ impl VisitorMut for AstPass<'_> {
 impl AstPass<'_> {
     /// Records that the statement uses `style`, refusing a mix of the two.
     fn uses(&mut self, style: ParameterStyle) -> Result<(), EngineError> {
-        match self.parameters {
-            ParameterStyle::None => {
-                self.parameters = style;
-                Ok(())
-            }
+        match *self.parameters.get_or_insert(style) {
             current if current == style => Ok(()),
             _ => Err(EngineError::invalid(
                 "query parameters",
@@ -539,13 +533,13 @@ pub(crate) fn restriction(
         scope: None,
         ctes: BTreeSet::new(),
         tables: Vec::new(),
-        parameters: ParameterStyle::None,
+        parameters: None,
         positional: 0,
     };
     if let ControlFlow::Break(err) = parsed.expr.visit(&mut pass) {
         return Err(err);
     }
-    if pass.parameters != ParameterStyle::None {
+    if pass.parameters.is_some() {
         return Err(EngineError::invalid(
             "row_restriction",
             "a row restriction takes no parameters",

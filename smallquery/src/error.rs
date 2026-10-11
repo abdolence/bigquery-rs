@@ -1,5 +1,7 @@
 use crate::config::ByteSize;
-use crate::ids::{DatasetRef, JobId, Location, ProjectId, TableRef};
+use crate::ids::{
+    DatasetRef, JobId, Location, ProjectId, ReadStreamName, TableRef, WriteStreamName,
+};
 use std::fmt::{Display, Formatter};
 use tonic::{Code, Status};
 
@@ -274,10 +276,10 @@ pub enum Resource {
         /// The location the job runs in, or the request named.
         location: Option<Location>,
     },
-    /// A write stream, by its full name.
-    WriteStream(String),
-    /// A read session or one of its streams, by its full name.
-    ReadStream(String),
+    /// A write stream.
+    WriteStream(Box<WriteStreamName>),
+    /// A stream of a read session.
+    ReadStream(Box<ReadStreamName>),
 }
 
 impl Display for Resource {

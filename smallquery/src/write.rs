@@ -16,8 +16,7 @@ pub(crate) use rows::{ArrowRows, MissingValues, Rejected, RequestRows, WriteTarg
 
 use crate::catalog::{EngineCatalog, LoadedTable};
 use crate::error::{EngineError, Resource};
-use crate::ids::TableRef;
-use crate::services::timestamp;
+use crate::ids::{StreamId, TableRef, WriteStreamName};
 use crate::types::{ColumnName, Columns};
 use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use gcloud_sdk::google::rpc;
@@ -46,51 +45,6 @@ pub(crate) enum WriteDisposition {
     Empty,
 }
 
-/// A write stream's name: `projects/{project}/datasets/{dataset}/tables/{table}/streams/{id}`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WriteStreamName {
-    table: TableRef,
-    stream: StreamId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum StreamId {
-    /// `_default`, which every table has without creating it.
-    Default,
-    /// A stream `CreateWriteStream` created.
-    Created(String),
-}
-
-impl std::str::FromStr for WriteStreamName {
-    type Err = EngineError;
-
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        let (table, stream) = name.rsplit_once("/streams/").ok_or_else(|| {
-            EngineError::invalid(
-                format!("write stream {name:?}"),
-                "a write stream is named {table}/streams/{id}",
-            )
-        })?;
-        Ok(Self {
-            table: TableRef::from_storage_path(table)?,
-            stream: match stream {
-                "_default" => StreamId::Default,
-                id => StreamId::Created(id.to_string()),
-            },
-        })
-    }
-}
-
-impl std::fmt::Display for WriteStreamName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let stream = match &self.stream {
-            StreamId::Default => "_default",
-            StreamId::Created(id) => id,
-        };
-        write!(f, "{}/streams/{stream}", self.table.storage_path())
-    }
-}
-
 impl Writes {
     pub(crate) fn new(catalog: Arc<EngineCatalog>, commit_window: Duration) -> Self {
         Self {
@@ -107,7 +61,7 @@ impl Writes {
         let parsed: WriteStreamName = name.parse()?;
         if parsed.stream != StreamId::Default {
             return Err(EngineError::NotFound {
-                what: Resource::WriteStream(name.to_string()),
+                what: Resource::WriteStream(Box::new(parsed)),
             });
         }
         let loaded = self.catalog.load(&parsed.table).await?;
@@ -117,7 +71,7 @@ impl Writes {
         let created = loaded
             .creation_time_ms()?
             .and_then(|ms| u64::try_from(ms).ok())
-            .map(|ms| timestamp(UNIX_EPOCH + Duration::from_millis(ms)));
+            .map(|ms| (UNIX_EPOCH + Duration::from_millis(ms)).into());
         Ok(storage::WriteStream {
             name: parsed.to_string(),
             r#type: storage::write_stream::Type::Committed.into(),
@@ -255,7 +209,7 @@ impl AppendConnection {
         })?;
         if let StreamId::Created(_) = stream.stream {
             return Err(EngineError::NotFound {
-                what: Resource::WriteStream(stream.to_string()),
+                what: Resource::WriteStream(Box::new(stream)),
             }
             .into());
         }

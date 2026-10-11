@@ -73,19 +73,22 @@ impl TryFrom<&[QueryParameter]> for Parameters {
 }
 
 impl Parameters {
-    /// `plan` with every placeholder of `style` replaced by its parameter.
+    /// `plan` with every placeholder of `style` replaced by its parameter; `plan` itself for a
+    /// statement that takes none.
     ///
     /// # Errors
     /// DataFusion's planning error, naming the placeholder, when one has no parameter.
     pub(crate) fn bind(
         &self,
         plan: LogicalPlan,
-        style: ParameterStyle,
+        style: Option<ParameterStyle>,
     ) -> Result<LogicalPlan, DataFusionError> {
         match style {
-            ParameterStyle::None => Ok(plan),
-            ParameterStyle::Named => plan.with_param_values(ParamValues::Map(self.named.clone())),
-            ParameterStyle::Positional => {
+            None => Ok(plan),
+            Some(ParameterStyle::Named) => {
+                plan.with_param_values(ParamValues::Map(self.named.clone()))
+            }
+            Some(ParameterStyle::Positional) => {
                 plan.with_param_values(ParamValues::List(self.positional.clone()))
             }
         }
