@@ -151,22 +151,36 @@ struct AnnotatedScan {
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
+    /// Whether the scan's orderings carry over: they do while every column keeps its type, and
+    /// a nested column whose fields gained metadata has another type to DataFusion.
+    keeps_order: bool,
 }
 
 impl AnnotatedScan {
-    /// The relabeling of `input`, whose partitioning it keeps.
+    /// The relabeling of `input`, whose partitioning it keeps, and its orderings when every
+    /// column keeps its type.
     fn new(input: Arc<dyn ExecutionPlan>, schema: SchemaRef) -> Self {
+        let (equivalences, keeps_order) = match input
+            .properties()
+            .equivalence_properties()
+            .clone()
+            .with_new_schema(schema.clone())
+        {
+            Ok(equivalences) => (equivalences, true),
+            Err(_) => (EquivalenceProperties::new(schema.clone()), false),
+        };
         let properties = Arc::new(
             input
                 .properties()
                 .as_ref()
                 .clone()
-                .with_eq_properties(EquivalenceProperties::new(schema.clone())),
+                .with_eq_properties(equivalences),
         );
         Self {
             input,
             schema,
             properties,
+            keeps_order,
         }
     }
 }
@@ -201,7 +215,7 @@ impl ExecutionPlan for AnnotatedScan {
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
-        vec![true]
+        vec![self.keeps_order]
     }
 
     fn with_new_children(
