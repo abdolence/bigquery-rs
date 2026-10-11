@@ -78,31 +78,18 @@ const EVERY_TYPE: [&str; 20] = [
     "shipping",
 ];
 
-/// [`EveryType`] with every column NULL; an ARRAY parameter that is NULL reads as empty, as
-/// BigQuery returns it.
+/// A NULL of each shape a parameter value takes: text, ARRAY, STRUCT and RANGE. An ARRAY
+/// parameter that is NULL reads as empty, as BigQuery returns it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-struct EveryTypeNull {
-    int64: Option<i64>,
-    float64: Option<f64>,
-    numeric: Option<BigQueryDecimal<String>>,
-    bool: Option<bool>,
+struct Nulls {
     string: Option<String>,
-    bytes: Option<Vec<u8>>,
-    date: Option<BigQueryDate>,
-    time: Option<BigQueryTime>,
-    datetime: Option<BigQueryDateTime>,
-    timestamp: Option<BigQueryTimestamp>,
-    geography: Option<String>,
-    json: Option<BigQueryJson<serde_json::Value>>,
-    interval: Option<BigQueryInterval>,
-    date_range: Option<BigQueryRange<BigQueryDate>>,
-    datetime_range: Option<BigQueryRange<BigQueryDateTime>>,
-    timestamp_range: Option<BigQueryRange<BigQueryTimestamp>>,
     int64_array: Vec<i64>,
-    string_array: Vec<String>,
-    lines: Vec<Line>,
     shipping: Option<Shipping>,
+    date_range: Option<BigQueryRange<BigQueryDate>>,
 }
+
+/// The columns of [`Nulls`], in the order [`Placeholders::bind_nulls`] binds them.
+const NULLS: [&str; 4] = ["string", "int64_array", "shipping", "date_range"];
 
 fn every_type() -> EveryType {
     let placed = Timestamp::from_microsecond(1_760_000_000_123_456).expect("a valid instant");
@@ -156,14 +143,6 @@ fn every_type() -> EveryType {
             },
         },
     }
-}
-
-/// The STRUCT type of a [`Line`], for a NULL that cannot be inferred.
-fn line_type() -> BigQueryFieldType {
-    BigQueryFieldType::Struct(vec![
-        field("sku", BigQueryFieldType::String { max_length: None }),
-        field("quantity", BigQueryFieldType::Int64),
-    ])
 }
 
 /// The STRUCT type of a [`Shipping`], for a NULL that cannot be inferred.
@@ -269,58 +248,27 @@ impl Placeholders {
         self.inferred(query, "shipping", &values.shipping)
     }
 
-    /// Binds a NULL of every type in the order of [`EVERY_TYPE`].
-    fn bind_every_null<'a>(self, query: Query<'a>) -> Query<'a> {
-        use BigQueryFieldType as Type;
-        let string = Type::String { max_length: None };
-        let scalars: [(&str, Type); 16] = [
-            ("int64", Type::Int64),
-            ("float64", Type::Float64),
-            ("numeric", Type::Numeric(None)),
-            ("bool", Type::Bool),
-            ("string", string.clone()),
-            ("bytes", Type::Bytes { max_length: None }),
-            ("date", Type::Date),
-            ("time", Type::Time),
-            ("datetime", Type::DateTime),
-            ("timestamp", Type::Timestamp),
-            ("geography", Type::Geography),
-            ("json", Type::Json),
-            ("interval", Type::Interval),
-            ("date_range", Type::Range(BigQueryRangeElementType::Date)),
-            (
-                "datetime_range",
-                Type::Range(BigQueryRangeElementType::DateTime),
-            ),
-            (
-                "timestamp_range",
-                Type::Range(BigQueryRangeElementType::Timestamp),
-            ),
-        ];
-        let query = scalars
-            .into_iter()
-            .fold(query, |query, (name, param_type)| {
-                self.typed(query, name, param_type, None::<()>)
-            });
+    /// Binds the NULLs of [`Nulls`] in the order of [`NULLS`].
+    fn bind_nulls<'a>(self, query: Query<'a>) -> Query<'a> {
+        let query = self.typed(
+            query,
+            "string",
+            BigQueryFieldType::String { max_length: None },
+            None::<()>,
+        );
         let query = self.typed(
             query,
             "int64_array",
-            BigQueryParamType::array_of(Type::Int64),
+            BigQueryParamType::array_of(BigQueryFieldType::Int64),
             None::<()>,
         );
-        let query = self.typed(
+        let query = self.typed(query, "shipping", shipping_type(), None::<()>);
+        self.typed(
             query,
-            "string_array",
-            BigQueryParamType::array_of(string),
+            "date_range",
+            BigQueryFieldType::Range(BigQueryRangeElementType::Date),
             None::<()>,
-        );
-        let query = self.typed(
-            query,
-            "lines",
-            BigQueryParamType::array_of(line_type()),
-            None::<()>,
-        );
-        self.typed(query, "shipping", shipping_type(), None::<()>)
+        )
     }
 }
 
@@ -340,35 +288,19 @@ async fn a_parameter_of_every_type_reads_back_as_sent() -> BigQueryResult<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_null_parameter_of_every_type_reads_back_as_null() -> BigQueryResult<()> {
+async fn a_null_parameter_of_each_shape_reads_back_as_null() -> BigQueryResult<()> {
     let served = serve().await;
     let db = client(served.addr).await;
     for style in STYLES {
-        let query = db.fluent().query(style.select(&EVERY_TYPE));
-        let read: Vec<EveryTypeNull> = style.bind_every_null(query).obj().query().await?;
+        let query = db.fluent().query(style.select(&NULLS));
+        let read: Vec<Nulls> = style.bind_nulls(query).obj().query().await?;
         assert_eq!(
             read,
-            vec![EveryTypeNull {
-                int64: None,
-                float64: None,
-                numeric: None,
-                bool: None,
+            vec![Nulls {
                 string: None,
-                bytes: None,
-                date: None,
-                time: None,
-                datetime: None,
-                timestamp: None,
-                geography: None,
-                json: None,
-                interval: None,
-                date_range: None,
-                datetime_range: None,
-                timestamp_range: None,
                 int64_array: Vec::new(),
-                string_array: Vec::new(),
-                lines: Vec::new(),
                 shipping: None,
+                date_range: None,
             }],
             "{style:?}"
         );

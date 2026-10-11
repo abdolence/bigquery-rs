@@ -82,7 +82,6 @@ async fn items(engine: &TestEngine, count: i64) -> Vec<Item> {
 async fn a_large_result_goes_through_a_result_table_and_storage_read() {
     let engine = TestEngine::start().await;
     let written = items(&engine, 200_000).await;
-    let started = Instant::now();
     let (mut read, stats): (Vec<Item>, BigQueryJobStats) = engine
         .db
         .fluent()
@@ -91,7 +90,6 @@ async fn a_large_result_goes_through_a_result_table_and_storage_read() {
         .query_with_stats()
         .await
         .expect("the query runs");
-    let elapsed = started.elapsed();
     read.sort_by_key(|item| item.id);
     assert_eq!(read.len(), written.len());
     assert!(
@@ -109,10 +107,6 @@ async fn a_large_result_goes_through_a_result_table_and_storage_read() {
     engine
         .assert_no_path_twice(&table_ref("shop", "items"))
         .await;
-    eprintln!(
-        "200,000 rows queried through a result table and Storage Read in {} ms",
-        elapsed.as_millis()
-    );
 }
 
 /// The fields of `field` and every field nested in it.

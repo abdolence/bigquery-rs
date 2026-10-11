@@ -162,7 +162,6 @@ async fn two_catalogs_commit_every_update_once_without_aborting() {
         .await
         .expect("the table is created");
 
-    let started = Instant::now();
     let by_transaction = tokio::spawn({
         let first = Arc::clone(&first);
         async move {
@@ -189,7 +188,6 @@ async fn two_catalogs_commit_every_update_once_without_aborting() {
         .await
         .expect("the second writer runs")
         .expect("no commit of the second writer fails");
-    eprintln!("2,000 commits by two catalogs took {:?}", started.elapsed());
 
     assert_eq!(
         pointer_versions(&first).await,

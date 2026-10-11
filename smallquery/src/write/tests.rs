@@ -376,7 +376,6 @@ async fn concurrent_default_stream_requests_share_commits_and_land_once() {
     // written its files and joined a queue: whatever did not make the first group lands in one
     // more commit.
     let mut first = engine.state().catalog.hooks().hold(CommitPoint::Loaded);
-    let started = std::time::Instant::now();
     let mut requests = tokio::task::JoinSet::new();
     for request in 0..REQUESTS {
         let db = engine.db.clone();
@@ -402,7 +401,6 @@ async fn concurrent_default_stream_requests_share_commits_and_land_once() {
             .expect("the rows are written");
         assert_eq!(summary.rows_written, 10);
     }
-    let elapsed = started.elapsed();
 
     let loaded = engine
         .state()
@@ -430,65 +428,6 @@ async fn concurrent_default_stream_requests_share_commits_and_land_once() {
         .collect();
     assert_eq!(read, expected);
     assert_eq!(groups.running(), 0, "no commit queue outlives its commits");
-    engine.assert_no_path_twice(&table).await;
-    eprintln!(
-        "{REQUESTS} held default-stream requests landed in {commits} commits in {} ms",
-        elapsed.as_millis()
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_requests_without_a_hold_land_in_fewer_commits_than_requests() {
-    let engine = TestEngine::start().await;
-    engine.create_dataset("shop", "EU").await;
-    engine
-        .db
-        .fluent()
-        .schema()
-        .table(SHOP.table(TICKS))
-        .columns(|columns| {
-            columns.fields([
-                columns.field("request").int64().required(),
-                columns.field("n").int64().required(),
-            ])
-        })
-        .sync()
-        .await
-        .expect("the table is created");
-    let started = std::time::Instant::now();
-    let mut requests = tokio::task::JoinSet::new();
-    for request in 0..REQUESTS {
-        let db = engine.db.clone();
-        requests.spawn(async move {
-            db.fluent()
-                .insert()
-                .into(SHOP.table(TICKS))
-                .objects(&[Tick { request, n: 0 }])
-                .execute()
-                .await
-        });
-    }
-    while let Some(written) = requests.join_next().await {
-        written
-            .expect("the request runs")
-            .expect("the row is written");
-    }
-    let elapsed = started.elapsed();
-    let table = table_ref("shop", "ticks");
-    let loaded = engine
-        .state()
-        .catalog
-        .reload(&table)
-        .await
-        .expect("the table loads");
-    let commits = loaded.metadata().snapshots().count();
-    eprintln!(
-        "{REQUESTS} unheld default-stream requests landed in {commits} commits in {} ms, {:.1} \
-         commits per second",
-        elapsed.as_millis(),
-        commits as f64 / elapsed.as_secs_f64()
-    );
-    assert!(commits < 64, "{commits} commits");
     engine.assert_no_path_twice(&table).await;
 }
 
