@@ -8,14 +8,16 @@ use crate::{Engine, EngineConfig, TcpEndpoint};
 use bigquery::gcloud_sdk::google_cloud_auth::credentials::anonymous;
 use bigquery::{BigQueryDatasetId, BigQueryDb, BigQueryDbOptions, BigQueryLocation};
 use futures::TryStreamExt;
+use gcloud_sdk::google::cloud::bigquery::storage::v1::big_query_write_client::BigQueryWriteClient;
 use iceberg::expr::Predicate;
 use iceberg::scan::FileScanTask;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
+use tonic::transport::Channel;
 
 /// The project every test's client works in.
 pub(crate) const PROJECT: &str = "lite-project";
@@ -54,6 +56,14 @@ impl TestEngine {
         Self::on_root(Arc::clone(&self.root), adjust).await
     }
 
+    /// This engine stopped, as a process that dies stops, and a new one opened on its root with
+    /// the configuration `adjust` makes of the defaults.
+    pub(crate) async fn restart(self, adjust: impl FnOnce(EngineConfig) -> EngineConfig) -> Self {
+        let root = Arc::clone(&self.root);
+        drop(self);
+        Self::on_root(root, adjust).await
+    }
+
     async fn on_root(
         root: Arc<TempDir>,
         adjust: impl FnOnce(EngineConfig) -> EngineConfig,
@@ -87,6 +97,11 @@ impl TestEngine {
 
     pub(crate) fn state(&self) -> &EngineState {
         self.engine.state()
+    }
+
+    /// The directory the engine's root lives in.
+    pub(crate) fn root(&self) -> &Path {
+        self.root.path()
     }
 
     /// Creates the dataset `dataset` in `location` through the client.
@@ -149,6 +164,51 @@ impl TestEngine {
         .into_iter()
         .filter(|dir| dir.exists())
         .collect()
+    }
+
+    /// Every Parquet file under the table's location, committed or not.
+    pub(crate) fn data_files(&self, table: &TableRef) -> BTreeSet<PathBuf> {
+        let mut found = BTreeSet::new();
+        let mut directories = vec![self
+            .root
+            .path()
+            .join(table.project.as_str())
+            .join(table.dataset.as_str())
+            .join(table.table.as_str())
+            .join("data")];
+        while let Some(directory) = directories.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.expect("the directory lists").path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "parquet")
+                {
+                    found.insert(path);
+                }
+            }
+        }
+        found
+    }
+
+    /// The records and segment directories of the root's write streams.
+    pub(crate) fn stream_entries(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(self.root.path().join("_smallquery").join("streams"))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.expect("the directory lists").path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A Storage Write client on the in-process channel, which sends each call once.
+    pub(crate) fn write_client(&self) -> BigQueryWriteClient<Channel> {
+        BigQueryWriteClient::new(self.engine.channel())
     }
 
     /// Fails when the table's current snapshot plans any data file path twice: no commit may add

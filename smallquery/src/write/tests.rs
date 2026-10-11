@@ -11,9 +11,9 @@ use iceberg::expr::Reference;
 use iceberg::spec::Datum;
 use serde::{Deserialize, Serialize};
 
-const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
-const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
-const TICKS: BigQueryTableId = BigQueryTableId::from_static("ticks");
+pub(super) const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
+pub(super) const ORDERS: BigQueryTableId = BigQueryTableId::from_static("orders");
+pub(super) const TICKS: BigQueryTableId = BigQueryTableId::from_static("ticks");
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Coords {
@@ -36,8 +36,8 @@ struct Line {
 
 /// A row of `orders`, one field per column type the engine stores.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct Order {
-    order_id: i64,
+pub(super) struct Order {
+    pub(super) order_id: i64,
     customer: Option<String>,
     note: Option<String>,
     price: Option<f64>,
@@ -62,7 +62,7 @@ struct Order {
 
 /// `orders` with a column of every type `Order` holds, partitioned by day on `placed_at` when
 /// `partitioned`.
-fn declare_orders(db: &BigQueryDb, partitioned: bool) -> BigQueryTableSchemaBuilder<'_> {
+pub(super) fn declare_orders(db: &BigQueryDb, partitioned: bool) -> BigQueryTableSchemaBuilder<'_> {
     let declared = db
         .fluent()
         .schema()
@@ -138,7 +138,7 @@ const OCTOBER_7: i64 = 1_791_331_200_000_000;
 const DAY: i64 = 86_400_000_000;
 
 /// Four orders on three days: every value of each type, NULLs and empty arrays included.
-fn orders() -> Vec<Order> {
+pub(super) fn orders() -> Vec<Order> {
     let full = Order {
         order_id: 1,
         customer: Some("Åsa Lindström".to_string()),
@@ -344,9 +344,9 @@ async fn a_day_partitioned_table_stores_a_file_per_day_and_prunes_by_day() {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct Tick {
-    request: i64,
-    n: i64,
+pub(super) struct Tick {
+    pub(super) request: i64,
+    pub(super) n: i64,
 }
 
 /// The requests the concurrent-writes gate sends at once.
@@ -432,7 +432,7 @@ async fn concurrent_default_stream_requests_share_commits_and_land_once() {
 }
 
 /// `shop.ticks`, empty.
-async fn create_ticks(engine: &TestEngine) {
+pub(super) async fn create_ticks(engine: &TestEngine) {
     engine.create_dataset("shop", "EU").await;
     engine
         .db

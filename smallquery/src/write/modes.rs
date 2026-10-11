@@ -881,3 +881,6 @@ impl CommittedRows {
         &paths(false) - &paths(true)
     }
 }
+
+#[cfg(test)]
+mod tests;
