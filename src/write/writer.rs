@@ -18,13 +18,16 @@ use crate::{BigQueryInstant, BigQueryWriteStreamName};
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::write_stream::Type as WriteStreamType;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     BatchCommitWriteStreamsRequest, CreateWriteStreamRequest, FinalizeWriteStreamRequest,
     FlushRowsRequest, GetWriteStreamRequest, WriteStream, WriteStreamView,
 };
+use gcloud_sdk::prost_types::Timestamp;
 use serde::Serialize;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -58,10 +61,11 @@ impl BigQueryDb {
         &self,
         span: &Span,
         name: &BigQueryWriteStreamName,
+        view: WriteStreamView,
     ) -> BigQueryResult<WriteStream> {
         let request = GetWriteStreamRequest {
             name: name.as_str().to_string(),
-            view: WriteStreamView::Full.into(),
+            view: view.into(),
         };
         self.retry(span, "get the write stream", &request, |request| {
             let mut client = self.write_client();
@@ -130,6 +134,12 @@ impl BigQueryDb {
     }
 
     /// Commits finalized pending streams of the table at `table_path` together.
+    ///
+    /// A retried commit can find every stream already committed. When each of them is a pending
+    /// stream reporting the same commit time, that time is returned. Any other stream error,
+    /// an already committed stream on the first attempt, streams committed at different
+    /// times, or a failed lookup of their commit times included, is returned as BigQuery's
+    /// stream error.
     pub(crate) async fn batch_commit(
         &self,
         span: &Span,
@@ -140,29 +150,43 @@ impl BigQueryDb {
             parent: table_path.to_string(),
             write_streams: streams.iter().map(|s| s.as_str().to_string()).collect(),
         };
+        let attempts = AtomicUsize::new(0);
         let response = self
             .retry(span, "commit the write streams", &request, |request| {
+                attempts.fetch_add(1, Ordering::Relaxed);
                 let mut client = self.write_client();
                 async move { client.batch_commit_write_streams(request).await }
             })
             .await?;
-        if let Some(error) = response.stream_errors.first() {
-            let code = gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode::try_from(error.code)
-            .map(|code| code.as_str_name().to_string())
-            .unwrap_or_else(|_| error.code.to_string());
-            return Err(BigQueryError::write_stream(
-                &code,
-                error.entity.clone(),
-                error.error_message.clone(),
-            ));
-        }
-        let commit_time = response.commit_time.ok_or_else(|| {
-            BigQueryError::write_stream(
-                "NO_COMMIT_TIME",
-                request.write_streams.join(", "),
-                "the commit reported no error and no commit time",
-            )
-        })?;
+        let commit_time = match response.stream_errors.first() {
+            None => response.commit_time.ok_or_else(|| {
+                BigQueryError::write_stream(
+                    "NO_COMMIT_TIME",
+                    request.write_streams.join(", "),
+                    "the commit reported no error and no commit time",
+                )
+            })?,
+            Some(error) => {
+                let already_committed = response.stream_errors.iter().all(|stream_error| {
+                    stream_error.code() == StorageErrorCode::StreamAlreadyCommitted
+                });
+                let earlier_commit = if already_committed && attempts.into_inner() > 1 {
+                    self.common_commit_time(span, streams).await
+                } else {
+                    None
+                };
+                earlier_commit.ok_or_else(|| {
+                    let code = StorageErrorCode::try_from(error.code)
+                        .map(|code| code.as_str_name().to_string())
+                        .unwrap_or_else(|_| error.code.to_string());
+                    BigQueryError::write_stream(
+                        &code,
+                        error.entity.clone(),
+                        error.error_message.clone(),
+                    )
+                })?
+            }
+        };
         BigQueryInstant::new(commit_time.seconds, commit_time.nanos).map_err(|err| {
             BigQueryError::write_stream(
                 "INVALID_COMMIT_TIME",
@@ -170,6 +194,33 @@ impl BigQueryDb {
                 format!("the commit time {commit_time:?} is not a timestamp: {err}"),
             )
         })
+    }
+
+    /// The commit time every one of `streams` reports, or `None` if a lookup fails, one of
+    /// them is not a committed pending stream, or they were committed at different times.
+    ///
+    /// Only a pending stream's `commit_time` is the time of a commit; a committed-type stream
+    /// reports its creation time there.
+    async fn common_commit_time(
+        &self,
+        span: &Span,
+        streams: &[BigQueryWriteStreamName],
+    ) -> Option<Timestamp> {
+        let mut common: Option<Timestamp> = None;
+        for stream in streams {
+            let stream = self
+                .get_write_stream(span, stream, WriteStreamView::Basic)
+                .await
+                .ok()?;
+            if stream.r#type() != WriteStreamType::Pending {
+                return None;
+            }
+            let commit_time = stream.commit_time?;
+            if *common.get_or_insert(commit_time) != commit_time {
+                return None;
+            }
+        }
+        common
     }
 }
 
@@ -269,7 +320,8 @@ impl WriterCore {
             BigQueryWriteMode::Default => {
                 let default =
                     BigQueryWriteStreamName::reported(format!("{table_path}/streams/_default"));
-                db.get_write_stream(&span, &default).await?
+                db.get_write_stream(&span, &default, WriteStreamView::Full)
+                    .await?
             }
             BigQueryWriteMode::Committed => {
                 db.create_write_stream(&span, &table_path, WriteStreamType::Committed)
@@ -476,7 +528,10 @@ impl WriterCore {
             return Ok(false);
         }
         self.last_refresh = Some(now);
-        let stream = self.db.get_write_stream(&self.span, &self.stream).await?;
+        let stream = self
+            .db
+            .get_write_stream(&self.span, &self.stream, WriteStreamView::Full)
+            .await?;
         let schema = BigQueryTableSchema::try_from(&stream)?;
         self.switch_plan(schema).await
     }

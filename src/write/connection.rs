@@ -25,7 +25,7 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::append_rows_response::Resp
 use gcloud_sdk::google::cloud::bigquery::storage::v1::row_error::RowErrorCode;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
-    AppendRowsRequest, AppendRowsResponse, RowError, StorageError,
+    AppendRowsRequest, AppendRowsResponse, RowError, StorageError, WriteStreamView,
 };
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::{Code, Status};
@@ -590,7 +590,11 @@ impl ConnectionTask {
         let fetched = self
             .settings
             .db
-            .get_write_stream(&self.settings.span, &self.settings.stream)
+            .get_write_stream(
+                &self.settings.span,
+                &self.settings.stream,
+                WriteStreamView::Full,
+            )
             .await
             .and_then(|stream| BigQueryTableSchema::try_from(&stream));
         match fetched {
