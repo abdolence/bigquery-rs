@@ -2,7 +2,7 @@
 //! `GetWriteStream` and `AppendRows` on it. The streams `CreateWriteStream` makes, with their
 //! finalize, flush and batch commit, answer `Unimplemented` by name.
 
-use super::{respond, unimplemented, Services};
+use super::{project_of, respond, unimplemented, Services};
 use crate::proto::storage_v1::big_query_write_server::BigQueryWrite;
 use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use tokio::sync::mpsc;
@@ -14,13 +14,6 @@ pub(crate) struct StorageWrite(pub(super) Services);
 
 const GET_WRITE_STREAM: &str = "google.cloud.bigquery.storage.v1.BigQueryWrite/GetWriteStream";
 const APPEND_ROWS: &str = "google.cloud.bigquery.storage.v1.BigQueryWrite/AppendRows";
-
-/// The project a write stream's name names, for the span.
-fn project_of(name: &str) -> &str {
-    name.strip_prefix("projects/")
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or_default()
-}
 
 #[tonic::async_trait]
 impl BigQueryWrite for StorageWrite {

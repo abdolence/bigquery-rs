@@ -147,8 +147,25 @@ impl Columns {
 fn annotate_field(field: &FieldRef, column_type: &ColumnType) -> FieldRef {
     let mut metadata = field.metadata().clone();
     metadata.extend(column_type.wire_metadata());
-    let data_type = match (field.data_type(), column_type) {
-        (DataType::List(item), _) => DataType::List(annotate_nested_item(item, column_type)),
+    Arc::new(
+        Field::new(
+            field.name(),
+            annotate_type(field.data_type(), column_type),
+            field.is_nullable(),
+        )
+        .with_metadata(metadata),
+    )
+}
+
+/// `data_type` with the wire metadata of the fields nested in it. A list's element gets none of
+/// its own: the element type's metadata is on the list field, as on the wire.
+fn annotate_type(data_type: &DataType, column_type: &ColumnType) -> DataType {
+    match (data_type, column_type) {
+        (DataType::List(item), _) => DataType::List(Arc::new(
+            item.as_ref()
+                .clone()
+                .with_data_type(annotate_type(item.data_type(), column_type)),
+        )),
         (DataType::Struct(children), ColumnType::Struct(columns)) => DataType::Struct(
             children
                 .iter()
@@ -159,21 +176,7 @@ fn annotate_field(field: &FieldRef, column_type: &ColumnType) -> FieldRef {
                 .collect(),
         ),
         (data_type, _) => data_type.clone(),
-    };
-    Arc::new(Field::new(field.name(), data_type, field.is_nullable()).with_metadata(metadata))
-}
-
-/// The element field of a REPEATED column, annotated inside: the element's own metadata goes on
-/// the list field, as on the wire.
-fn annotate_nested_item(item: &FieldRef, column_type: &ColumnType) -> FieldRef {
-    let annotated = annotate_field(item, column_type);
-    let mut metadata = annotated.metadata().clone();
-    for key in [EXTENSION_NAME, SQL_TYPE] {
-        if !item.metadata().contains_key(key) {
-            metadata.remove(key);
-        }
     }
-    Arc::new(annotated.as_ref().clone().with_metadata(metadata))
 }
 
 /// The output step of a result: the wire schema of its fields and the cast that gets each

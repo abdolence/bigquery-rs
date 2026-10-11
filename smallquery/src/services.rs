@@ -145,6 +145,13 @@ fn if_match<T>(request: &Request<T>) -> Option<String> {
         .map(|etag| etag.trim_matches('"').to_string())
 }
 
+/// The project a Storage API name names, `projects/{project}/…`, for a call's span.
+fn project_of(name: &str) -> &str {
+    name.strip_prefix("projects/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default()
+}
+
 /// A protobuf timestamp of `time`, which is never before the Unix epoch on a sane clock and is
 /// reported as the epoch if it is.
 pub(crate) fn timestamp(time: std::time::SystemTime) -> gcloud_sdk::prost_types::Timestamp {

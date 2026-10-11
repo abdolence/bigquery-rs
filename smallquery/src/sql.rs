@@ -241,7 +241,7 @@ impl Statement {
         let mut ctes = CteNames::default();
         let _ = self.parsed.visit(&mut ctes);
         let mut pass = AstPass {
-            scope,
+            scope: Some(scope),
             ctes: ctes.names,
             tables: Vec::new(),
             parameters: ParameterStyle::None,
@@ -307,9 +307,10 @@ impl VisitorMut for CteNames {
     }
 }
 
-/// The AST pass: table names, parameters and anonymous select items.
+/// The AST pass: table names, parameters and anonymous select items. Without a scope, as for a
+/// row restriction, no table name is allowed.
 struct AstPass<'s> {
-    scope: &'s NameScope,
+    scope: Option<&'s NameScope>,
     ctes: BTreeSet<String>,
     tables: Vec<TableRef>,
     parameters: ParameterStyle,
@@ -441,15 +442,18 @@ impl AstPass<'_> {
             ));
         }
         let invalid = |detail: &str| EngineError::invalid(format!("table name {name}"), detail);
+        let scope = self
+            .scope
+            .ok_or_else(|| invalid("a row restriction names no table"))?;
         let (project, dataset, table) = match parts.as_slice() {
             [table] => {
-                let dataset =
-                    self.scope.default_dataset.clone().ok_or_else(|| {
-                        invalid("an unqualified table name needs a default dataset")
-                    })?;
+                let dataset = scope
+                    .default_dataset
+                    .clone()
+                    .ok_or_else(|| invalid("an unqualified table name needs a default dataset"))?;
                 return Ok(Some(dataset.table(TableId::from_str(table)?)));
             }
-            [dataset, table] => (self.scope.project.clone(), dataset, table),
+            [dataset, table] => (scope.project.clone(), dataset, table),
             // A domain-scoped project, as in `example.com:project`, holds dots of its own.
             [project @ .., dataset, table] if project.iter().any(|part| part.contains(':')) => {
                 (ProjectId::from_str(&project.join("."))?, dataset, table)
@@ -529,12 +533,8 @@ pub(crate) fn restriction(
 ) -> Result<Expr, EngineError> {
     let state = session.state();
     let mut parsed = state.sql_to_expr_with_alias(text, &datafusion::config::Dialect::BigQuery)?;
-    let scope = NameScope {
-        project: ProjectId::from_str("restriction")?,
-        default_dataset: None,
-    };
     let mut pass = AstPass {
-        scope: &scope,
+        scope: None,
         ctes: BTreeSet::new(),
         tables: Vec::new(),
         parameters: ParameterStyle::None,

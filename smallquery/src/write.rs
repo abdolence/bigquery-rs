@@ -105,15 +105,14 @@ impl Writes {
         let dataset = self.catalog.dataset(&parsed.table.dataset_ref()).await?;
         let metadata = loaded.metadata();
         let columns = Columns::from_iceberg(metadata.current_schema(), metadata.properties())?;
-        let created_ms = metadata
-            .properties()
-            .get("bigquery.creation_time_ms")
-            .and_then(|ms| ms.parse::<u64>().ok())
-            .unwrap_or_default();
+        let created = loaded
+            .creation_time_ms()?
+            .and_then(|ms| u64::try_from(ms).ok())
+            .map(|ms| timestamp(UNIX_EPOCH + Duration::from_millis(ms)));
         Ok(storage::WriteStream {
             name: parsed.to_string(),
             r#type: storage::write_stream::Type::Committed.into(),
-            create_time: Some(timestamp(UNIX_EPOCH + Duration::from_millis(created_ms))),
+            create_time: created,
             table_schema: Some(storage::TableSchema::from(&columns)),
             write_mode: storage::write_stream::WriteMode::Insert.into(),
             location: dataset.location.to_string(),

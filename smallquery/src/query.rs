@@ -676,18 +676,8 @@ impl Queries {
     ) -> Result<(), EngineError> {
         match self.catalog.load(&destination.table).await {
             Ok(loaded) => {
-                let rows = loaded
-                    .metadata()
-                    .current_snapshot()
-                    .and_then(|snapshot| {
-                        snapshot
-                            .summary()
-                            .additional_properties
-                            .get("total-records")
-                            .and_then(|rows| rows.parse::<u64>().ok())
-                    })
-                    .unwrap_or(0);
-                if destination.write == WriteDisposition::Empty && rows > 0 {
+                // A table whose snapshot does not report its rows is not known to be empty.
+                if destination.write == WriteDisposition::Empty && loaded.total_rows()? != Some(0) {
                     return Err(EngineError::AlreadyExists {
                         what: Resource::Table(destination.table.clone()),
                     });

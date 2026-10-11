@@ -1,7 +1,7 @@
 //! `google.cloud.bigquery.storage.v1.BigQueryRead`. Sessions serve Arrow; `SplitReadStream` is
 //! never served.
 
-use super::{respond, unimplemented, Services};
+use super::{project_of, respond, unimplemented, Services};
 use crate::error::EngineError;
 use crate::proto::storage_v1::big_query_read_server::BigQueryRead;
 use futures::stream::{BoxStream, StreamExt};
@@ -13,11 +13,6 @@ pub(crate) struct StorageRead(pub(super) Services);
 
 const CREATE_READ_SESSION: &str = "google.cloud.bigquery.storage.v1.BigQueryRead/CreateReadSession";
 const READ_ROWS: &str = "google.cloud.bigquery.storage.v1.BigQueryRead/ReadRows";
-
-/// The project a Storage API `parent` names, `projects/{project}`, for the span.
-fn project_of(parent: &str) -> &str {
-    parent.strip_prefix("projects/").unwrap_or(parent)
-}
 
 #[tonic::async_trait]
 impl BigQueryRead for StorageRead {

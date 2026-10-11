@@ -791,6 +791,27 @@ pub(crate) enum TableView {
 }
 
 impl LoadedTable {
+    /// A total the current snapshot's summary reports, as `total-records`: zero for a table
+    /// without a snapshot, which holds nothing, and `None` when the snapshot does not report it.
+    fn snapshot_total(&self, key: &str) -> Result<Option<i64>, EngineError> {
+        match self.metadata().current_snapshot() {
+            None => Ok(Some(0)),
+            Some(snapshot) => parse_property(&snapshot.summary().additional_properties, key),
+        }
+    }
+
+    /// The rows the table holds, `None` when its snapshot does not report them.
+    pub(crate) fn total_rows(&self) -> Result<Option<u64>, EngineError> {
+        Ok(self
+            .snapshot_total("total-records")?
+            .and_then(|rows| u64::try_from(rows).ok()))
+    }
+
+    /// When the table was created, in milliseconds since the Unix epoch.
+    pub(crate) fn creation_time_ms(&self) -> Result<Option<i64>, EngineError> {
+        parse_property(self.metadata().properties(), CREATION_TIME_MS)
+    }
+
     /// The table as `GetTable` reports it, in the location of its dataset.
     pub(crate) fn bigquery_table(
         &self,
@@ -801,20 +822,9 @@ impl LoadedTable {
         let metadata = self.metadata();
         let definition = TableDefinition::try_from(metadata)?;
         let (time_partitioning, range_partitioning) = definition.partitioning_body();
-        // A table without a snapshot holds nothing; a snapshot that does not report a total
-        // leaves it unreported.
-        let total = |key: &str| -> Result<Option<i64>, EngineError> {
-            match metadata.current_snapshot() {
-                None => Ok(Some(0)),
-                Some(snapshot) => parse_property(&snapshot.summary().additional_properties, key),
-            }
-        };
         let (num_rows, num_bytes) = match view {
             TableView::Basic => (None, None),
-            TableView::Full => (
-                total("total-records")?.and_then(|rows| u64::try_from(rows).ok()),
-                total("total-files-size")?,
-            ),
+            TableView::Full => (self.total_rows()?, self.snapshot_total("total-files-size")?),
         };
         Ok(v2::Table {
             kind: "bigquery#table".to_string(),
@@ -837,7 +847,7 @@ impl LoadedTable {
             }),
             num_rows,
             num_bytes,
-            creation_time: parse_property(metadata.properties(), CREATION_TIME_MS)?.unwrap_or(0),
+            creation_time: self.creation_time_ms()?.unwrap_or(0),
             expiration_time: definition.expiration_ms,
             last_modified_time: u64::try_from(metadata.last_updated_ms()).unwrap_or(0),
             r#type: "TABLE".to_string(),
@@ -862,7 +872,7 @@ impl LoadedTable {
             time_partitioning,
             range_partitioning,
             clustering: definition.clustering_body(),
-            creation_time: parse_property(metadata.properties(), CREATION_TIME_MS)?.unwrap_or(0),
+            creation_time: self.creation_time_ms()?.unwrap_or(0),
             expiration_time: definition.expiration_ms.unwrap_or(0),
             labels: definition.labels.into_iter().collect(),
             ..Default::default()
