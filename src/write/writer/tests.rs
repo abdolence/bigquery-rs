@@ -12,8 +12,10 @@ use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::table_field_schema::{Mode, Type};
+use gcloud_sdk::google::cloud::bigquery::storage::v1::write_stream::Type as WriteStreamType;
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
-    AppendRowsRequest, AppendRowsResponse, TableSchema,
+    AppendRowsRequest, AppendRowsResponse, BatchCommitWriteStreamsRequest,
+    BatchCommitWriteStreamsResponse, GetWriteStreamRequest, StorageError, TableSchema, WriteStream,
 };
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::tonic::Code;
@@ -404,6 +406,116 @@ async fn pending_mode_commits_only_without_failed_batches() {
                 ]
             );
         }
+    }
+}
+
+/// A commit resent after its response was lost finds its stream already committed. The
+/// stream's own commit time is reported as the commit; the same answer to a first attempt, or
+/// to a resend whose stream lookup fails, stays BigQuery's stream error.
+#[tokio::test]
+async fn a_resent_commit_takes_an_already_committed_stream_as_committed() {
+    const COMMITTED_AT: i64 = 1_791_000_000;
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Case {
+        FirstAttempt,
+        Resent,
+        ResentLookupFails,
+    }
+    for case in [Case::FirstAttempt, Case::Resent, Case::ResentLookupFails] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fake = FakeBigQuery::start({
+            let attempts = attempts.clone();
+            move |mut call| {
+                let attempts = attempts.clone();
+                async move {
+                    match call.method() {
+                        "BatchCommitWriteStreams" => {
+                            let request: Option<BatchCommitWriteStreamsRequest> =
+                                call.next_request().await;
+                            let streams = request.map(|r| r.write_streams).unwrap_or_default();
+                            call.log(format!("BatchCommitWriteStreams {streams:?}"));
+                            if case != Case::FirstAttempt
+                                && attempts.fetch_add(1, Ordering::SeqCst) == 0
+                            {
+                                return call.drop_connection().await;
+                            }
+                            call.reply(&BatchCommitWriteStreamsResponse {
+                                commit_time: None,
+                                stream_errors: streams
+                                    .into_iter()
+                                    .map(|entity| StorageError {
+                                        code: StorageErrorCode::StreamAlreadyCommitted.into(),
+                                        entity,
+                                        error_message: "already committed".into(),
+                                    })
+                                    .collect(),
+                            });
+                        }
+                        "GetWriteStream" => {
+                            let request: Option<GetWriteStreamRequest> = call.next_request().await;
+                            let name = request.map(|r| r.name).unwrap_or_default();
+                            call.log(format!("GetWriteStream {name}"));
+                            if case == Case::ResentLookupFails {
+                                return call
+                                    .fail(Code::NotFound, "Requested entity was not found.");
+                            }
+                            call.reply(&WriteStream {
+                                name,
+                                r#type: WriteStreamType::Pending.into(),
+                                commit_time: Some(gcloud_sdk::prost_types::Timestamp {
+                                    seconds: COMMITTED_AT,
+                                    nanos: 0,
+                                }),
+                                ..Default::default()
+                            });
+                        }
+                        _ => {
+                            let Some(mut call) = call.answer_unary(schema(&[])).await else {
+                                return;
+                            };
+                            let end = StreamEnd::default();
+                            while let Some(request) = call.next_request::<AppendRowsRequest>().await
+                            {
+                                call.send(&end.answer(&request));
+                            }
+                            call.finish();
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        let (mut writer, _responses) = fake
+            .db
+            .create_streaming_writer_with_options::<Row>(
+                SHOP.table(ORDERS),
+                options().with_mode(BigQueryWriteMode::Pending),
+            )
+            .await
+            .expect("the writer opens");
+        within(writer.write_all(&[row(0), row(1)]))
+            .await
+            .expect("the rows are written");
+
+        let result = within(writer.finish()).await;
+
+        let commits = count(&fake.calls(), "BatchCommitWriteStreams");
+        if case == Case::Resent {
+            let summary = result.expect("the resent commit is the lost one");
+            assert_eq!(
+                summary.commit_time,
+                Some(jiff::Timestamp::from_second(COMMITTED_AT).expect("valid"))
+            );
+        } else {
+            match result {
+                Err(BigQueryError::WriteStreamError(err)) => {
+                    assert_eq!(err.public.code, "STREAM_ALREADY_COMMITTED", "{case:?}");
+                }
+                other => panic!("{case:?} cannot claim an earlier commit: {other:?}"),
+            }
+        }
+        let expected_commits = if case == Case::FirstAttempt { 1 } else { 2 };
+        assert_eq!(commits, expected_commits, "{case:?}");
     }
 }
 

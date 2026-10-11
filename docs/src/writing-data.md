@@ -265,6 +265,10 @@ println!("committed at {commit_time}");
 # }
 ```
 
+The commit is retried like any other call. When a retry finds every stream already committed at
+one time, `commit_write_streams` returns that commit time. Any other stream error, an already
+committed stream on the first attempt included, is a `WriteStreamError` with BigQuery's code.
+
 ## Errors
 
 - A row that does not fit the table's schema fails a streaming writer's `write()` with
