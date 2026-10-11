@@ -297,7 +297,8 @@ async fn a_typed_read_projects_the_fields_of_its_type_and_restricts_rows() {
         .fluent()
         .select()
         .from(SHOP.table(EVENTS))
-        .filter_sql("kind = 'buy' AND id >= 30")
+        // `id + 1 > 31` has no Iceberg form, so only the engine's own filter applies it.
+        .filter_sql("kind = 'buy' AND id + 1 > 31")
         .obj()
         .query()
         .await
@@ -305,7 +306,7 @@ async fn a_typed_read_projects_the_fields_of_its_type_and_restricts_rows() {
     kinds.sort_by_key(|kind| kind.id);
     let expected: Vec<EventKind> = written
         .iter()
-        .filter(|event| event.kind == "buy" && event.id >= 30)
+        .filter(|event| event.kind == "buy" && event.id + 1 > 31)
         .map(|event| EventKind {
             id: event.id,
             kind: event.kind.clone(),
