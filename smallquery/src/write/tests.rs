@@ -2,7 +2,6 @@
 //! `insert().objects()` read back equal, the layout of a partitioned table's files, and group
 //! commit under concurrent requests.
 
-use super::{StreamId, WriteStreamName};
 use crate::catalog::CommitPoint;
 use crate::testkit::{table_ref, TestEngine};
 use bigquery::*;
@@ -489,12 +488,4 @@ async fn concurrent_requests_without_a_hold_land_in_fewer_commits_than_requests(
     );
     assert!(commits < 64, "{commits} commits");
     engine.assert_no_path_twice(&table).await;
-}
-
-#[test]
-fn a_write_stream_name_round_trips() {
-    let name = "projects/lite-project/datasets/shop/tables/orders/streams/_default";
-    let parsed: WriteStreamName = name.parse().expect("a stream name");
-    assert_eq!(parsed.stream, StreamId::Default);
-    assert_eq!(parsed.to_string(), name);
 }

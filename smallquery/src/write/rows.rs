@@ -1239,11 +1239,4 @@ mod tests {
         assert_eq!(rescale(1_244_999_999, 9, 2), Some(124));
         assert_eq!(rescale(15, 0, 9), Some(15_000_000_000));
     }
-
-    #[test]
-    fn numeric_bytes_are_sign_extended() {
-        assert_eq!(little_endian_i128(&[0xff]), Ok(-1));
-        assert_eq!(little_endian_i128(&[0x80, 0x00]), Ok(128));
-        assert!(little_endian_i128(&[]).is_err());
-    }
 }

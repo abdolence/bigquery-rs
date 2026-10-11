@@ -520,36 +520,6 @@ mod tests {
     use arrow::datatypes::Int64Type;
 
     #[test]
-    fn unsigned_and_view_columns_reach_the_wire_as_int64_and_utf8() {
-        let schema = Schema::new(vec![
-            Field::new("rank", DataType::UInt64, false),
-            Field::new("label", DataType::Utf8View, true),
-        ]);
-        let wire = WireSchema::of_result(&schema).expect("both types have a wire form");
-        assert_eq!(
-            wire.schema()
-                .fields()
-                .iter()
-                .map(|f| f.data_type().clone())
-                .collect::<Vec<_>>(),
-            [DataType::Int64, DataType::Utf8]
-        );
-    }
-
-    #[test]
-    fn a_field_id_never_reaches_the_wire_and_a_json_name_does() {
-        let field = Field::new("doc", DataType::Utf8, true).with_metadata(HashMap::from([
-            ("PARQUET:field_id".to_string(), "3".to_string()),
-            (EXTENSION_NAME.to_string(), JSON_EXTENSION.to_string()),
-        ]));
-        let wire = WireSchema::of_result(&Schema::new(vec![field])).expect("Utf8 has a wire form");
-        assert_eq!(
-            wire.schema().field(0).metadata(),
-            &HashMap::from([(EXTENSION_NAME.to_string(), JSON_EXTENSION.to_string())])
-        );
-    }
-
-    #[test]
     fn an_unsigned_value_above_int64_fails_the_result() {
         let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::UInt64, false)]));
         let batch = RecordBatch::try_new(

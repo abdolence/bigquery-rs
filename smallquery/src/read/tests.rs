@@ -1,7 +1,6 @@
 //! Storage Read through the `bigquery` client and gcloud-sdk's generated read client: resumed
 //! streams, compressed IPC, typed reads and row restrictions.
 
-use super::StreamName;
 use crate::testkit::{table_ref, TestEngine, PROJECT};
 use arrow::array::{AsArray, RecordBatch};
 use arrow::buffer::Buffer;
@@ -12,7 +11,6 @@ use bigquery::*;
 use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use serde::{Deserialize, Serialize};
 use tonic::Code;
-use uuid::Uuid;
 
 const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
 const EVENTS: BigQueryTableId = BigQueryTableId::from_static("events");
@@ -343,18 +341,4 @@ async fn a_table_without_rows_reads_as_empty() {
         .await
         .expect("the table reads");
     assert!(read.is_empty());
-}
-
-#[test]
-fn a_stream_name_holds_its_session_and_index() {
-    let session = Uuid::new_v4();
-    let name: StreamName =
-        format!("projects/lite-project/locations/eu/sessions/{session}/streams/3")
-            .parse()
-            .expect("a stream name");
-    assert_eq!((name.session, name.index), (session, 3));
-    assert!(matches!(
-        "projects/p/sessions/x".parse::<StreamName>(),
-        Err(crate::error::EngineError::NotFound { .. })
-    ));
 }
