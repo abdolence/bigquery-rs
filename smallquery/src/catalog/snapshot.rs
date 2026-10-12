@@ -146,6 +146,8 @@ struct CurrentManifests {
     dead_data_manifests: usize,
     live_entries: Vec<ManifestEntryRef>,
     delete_manifests: Vec<ManifestFile>,
+    /// The bytes of the live delete files, which every engine-built snapshot keeps.
+    delete_file_bytes: u64,
 }
 
 impl CurrentManifests {
@@ -155,15 +157,18 @@ impl CurrentManifests {
         loaded: &mut LoadedManifests,
     ) -> Result<Self, EngineError> {
         let list = table.manifest_list_reader(snapshot).load().await?;
-        let data = list
-            .entries()
-            .iter()
-            .filter(|manifest| manifest.content == ManifestContentType::Data);
-        loaded.load(table, data).await?;
+        loaded.load(table, list.entries().iter()).await?;
         let mut current = Self::default();
         for manifest in list.entries() {
             match manifest.content {
-                ManifestContentType::Deletes => current.delete_manifests.push(manifest.clone()),
+                ManifestContentType::Deletes => {
+                    current.delete_file_bytes += loaded
+                        .live_entries(manifest)?
+                        .iter()
+                        .map(|entry| entry.data_file().file_size_in_bytes())
+                        .sum::<u64>();
+                    current.delete_manifests.push(manifest.clone());
+                }
                 ManifestContentType::Data => {
                     let live = loaded.live_entries(manifest)?;
                     current.data_manifests += 1;
@@ -230,6 +235,8 @@ struct Rewrite<'c> {
     kept: &'c [ManifestEntryRef],
     removed: &'c [ManifestEntryRef],
     added: &'c [DataFile],
+    /// The bytes of the delete files the snapshot carries over from its parent.
+    delete_file_bytes: u64,
 }
 
 impl Rewrite<'_> {
@@ -251,7 +258,11 @@ impl Rewrite<'_> {
             .chain(self.added)
             .collect();
         let records: u64 = live.iter().map(|file| file.record_count()).sum();
-        let bytes: u64 = live.iter().map(|file| file.file_size_in_bytes()).sum();
+        let bytes: u64 = live
+            .iter()
+            .map(|file| file.file_size_in_bytes())
+            .sum::<u64>()
+            + self.delete_file_bytes;
         for (key, total) in [
             ("total-data-files", live.len().to_string()),
             ("total-records", records.to_string()),
@@ -442,6 +453,7 @@ impl SnapshotChange {
             kept,
             removed,
             added,
+            delete_file_bytes: current.delete_file_bytes,
         })
     }
 
