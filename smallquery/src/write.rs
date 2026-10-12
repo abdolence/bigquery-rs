@@ -39,7 +39,7 @@ use tracing::debug;
 pub(crate) struct Writes {
     catalog: Arc<EngineCatalog>,
     groups: Arc<CommitGroups>,
-    streams: Streams,
+    streams: Arc<Streams>,
     /// Set by a test so that the next `AppendRows` response is never sent and its connection
     /// ends, as when the network drops it after the request was handled.
     #[cfg(test)]
@@ -63,7 +63,7 @@ impl Writes {
     ) -> Self {
         let groups = Arc::new(CommitGroups::new(catalog.clone(), commit_window));
         Self {
-            streams: Streams::new(catalog.clone(), groups.clone(), stream_ttl),
+            streams: Arc::new(Streams::new(catalog.clone(), groups.clone(), stream_ttl)),
             groups,
             catalog,
             #[cfg(test)]
@@ -126,6 +126,7 @@ impl Writes {
             .as_ref()
             .map_or(Type::Unspecified, storage::WriteStream::r#type);
         let name = self.streams.create(&table, kind).await?;
+        self.streams.sweep_soon();
         self.describe(&name).await
     }
 
@@ -177,10 +178,16 @@ impl Writes {
             .await
     }
 
-    /// Drops the write streams on the root past their TTL.
+    /// Starts dropping the write streams on the root past their TTL.
+    pub(crate) fn start_stream_sweep(&self) {
+        self.streams.sweep_soon();
+    }
+
+    /// Drops the write streams on the root past their TTL, after the sweep running, if any.
     ///
     /// # Errors
     /// As [`Streams::sweep`].
+    #[cfg(test)]
     pub(crate) async fn sweep_streams(&self) -> Result<(), EngineError> {
         self.streams.sweep().await
     }

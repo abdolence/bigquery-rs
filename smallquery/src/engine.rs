@@ -107,9 +107,7 @@ impl Engine {
         if let Err(err) = state.queries.drop_expired_results().await {
             warn!(%err, "The anonymous result tables of earlier runs could not all be deleted.");
         }
-        if let Err(err) = state.writes.sweep_streams().await {
-            warn!(%err, "The expired write streams could not all be dropped.");
-        }
+        state.writes.start_stream_sweep();
         let (shutdown, _) = watch::channel(false);
         let in_process = InProcess::start(
             &Services::new(Arc::clone(&state), Route::InProcess),

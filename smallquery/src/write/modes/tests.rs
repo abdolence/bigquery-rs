@@ -788,6 +788,38 @@ async fn streams_that_keep_committing_outlive_their_ttl_from_creation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creating_a_stream_does_not_wait_for_the_drop_of_expired_ones() {
+    let creator = TestEngine::start().await;
+    create_ticks(&creator).await;
+    let sweeper = creator
+        .open_on_same_root(|mut config| {
+            config.stream_ttl = Duration::from_millis(1);
+            config
+        })
+        .await;
+    let expired = create_stream(&creator, storage::write_stream::Type::Pending).await;
+    acknowledged(&creator, &expired, 0, &ticks(1, 3)).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let mut held = sweeper.state().catalog.hooks().hold(CommitPoint::Loaded);
+    let created = tokio::time::timeout(
+        Duration::from_secs(10),
+        create_stream(&sweeper, storage::write_stream::Type::Committed),
+    )
+    .await;
+    assert!(created.is_ok(), "the stream is created while a drop waits");
+    held.reached().await;
+    held.release();
+    sweeper
+        .state()
+        .writes
+        .sweep_streams()
+        .await
+        .expect("the expired streams are dropped");
+    assert_eq!(creator.stream_entries(), Vec::<std::path::PathBuf>::new());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_engine_commits_a_pending_stream_and_the_first_cannot_commit_it_again() {
     let first = TestEngine::start().await;
     create_ticks(&first).await;
@@ -876,6 +908,12 @@ async fn a_batch_commit_that_dies_before_its_pointer_changes_nothing_and_its_fil
             config
         })
         .await;
+    expired
+        .state()
+        .writes
+        .sweep_streams()
+        .await
+        .expect("the expired streams are dropped");
     assert_eq!(read_ticks(&expired).await, Vec::new());
     assert_eq!(expired.data_files(&table), BTreeSet::new());
     assert_eq!(expired.stream_entries(), Vec::<std::path::PathBuf>::new());

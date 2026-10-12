@@ -48,6 +48,8 @@ pub(crate) struct Streams {
     ttl: Duration,
     node: NodeId,
     created: Mutex<HashMap<WriteStreamId, Arc<tokio::sync::Mutex<Stream>>>>,
+    /// When the last sweep started, held while a sweep runs.
+    sweeping: Arc<tokio::sync::Mutex<Option<Instant>>>,
 }
 
 impl std::fmt::Debug for Streams {
@@ -196,12 +198,12 @@ impl Streams {
             ttl,
             node: NodeId::random(),
             created: Mutex::default(),
+            sweeping: Arc::default(),
         }
     }
 
     /// Creates a stream of `kind` on `table`, whose record is on storage, and a pending or
-    /// buffered stream's state in its table, when this returns. The root's expired streams are
-    /// dropped on the way.
+    /// buffered stream's state in its table, when this returns.
     ///
     /// # Errors
     /// [`EngineError::NotFound`] for a missing table, [`EngineError::Invalid`] for a type
@@ -246,9 +248,6 @@ impl Streams {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Arc::new(tokio::sync::Mutex::new(stream)));
-        if let Err(err) = self.sweep().await {
-            warn!(%err, "The expired write streams could not all be dropped.");
-        }
         Ok(name)
     }
 
@@ -638,6 +637,37 @@ impl Streams {
             .ok_or_else(|| EngineError::stream(name, StreamProblem::Expired))
     }
 
+    /// Starts a sweep on a task of its own, unless one is running or the last one started less
+    /// than an eighth of the TTL ago, so that no request waits for a sweep and a busy engine
+    /// lists the root's streams a few times per TTL only.
+    pub(crate) fn sweep_soon(self: &Arc<Self>) {
+        let Ok(mut started) = Arc::clone(&self.sweeping).try_lock_owned() else {
+            return;
+        };
+        if started.is_some_and(|started| started.elapsed() < self.ttl / 8) {
+            return;
+        }
+        *started = Some(Instant::now());
+        let streams = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(err) = streams.sweep_expired().await {
+                warn!(%err, "The expired write streams could not all be dropped.");
+            }
+            // Moved into the task and held to its end, so that no other sweep starts meanwhile.
+            drop(started);
+        });
+    }
+
+    /// Sweeps once the sweep running, if any, has finished.
+    ///
+    /// # Errors
+    /// As [`Streams::sweep_expired`].
+    #[cfg(test)]
+    pub(crate) async fn sweep(&self) -> Result<(), EngineError> {
+        let _running = self.sweeping.lock().await;
+        self.sweep_expired().await
+    }
+
     /// Drops every stream whose record the backend created more than the stream TTL ago: its
     /// state leaves its table first, so that no later commit can take its files, then the files
     /// no commit took, its segments and its record are deleted. This engine also stops serving
@@ -646,7 +676,7 @@ impl Streams {
     /// # Errors
     /// The storage errors of listing the records; a stream that cannot be dropped is logged
     /// and left for the next sweep.
-    pub(crate) async fn sweep(&self) -> Result<(), EngineError> {
+    async fn sweep_expired(&self) -> Result<(), EngineError> {
         let now = SystemTime::now();
         for (id, created) in self.staging.records().await? {
             if now
