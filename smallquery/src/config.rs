@@ -51,8 +51,8 @@ pub struct EngineConfig {
     pub spill_dir: Option<PathBuf>,
     /// How long a finished job is kept. Default 24 hours.
     pub job_ttl: Duration,
-    /// How long a created write stream lives, from when the backend created its record. Default
-    /// 24 hours.
+    /// How long a created write stream lives: a pending stream from its creation, a committed
+    /// or buffered stream from its last commit. Default 24 hours.
     pub stream_ttl: Duration,
     /// How long a read session lives. Default 6 hours.
     pub session_ttl: Duration,

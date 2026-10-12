@@ -750,6 +750,44 @@ async fn a_restarted_engine_reports_when_a_pending_stream_was_committed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streams_that_keep_committing_outlive_their_ttl_from_creation() {
+    let ttl = Duration::from_secs(2);
+    let engine = TestEngine::with_config(|mut config| {
+        config.stream_ttl = ttl;
+        config
+    })
+    .await;
+    create_ticks(&engine).await;
+    let committed = create_stream(&engine, storage::write_stream::Type::Committed).await;
+    let buffered = create_stream(&engine, storage::write_stream::Type::Buffered).await;
+    let mut client = engine.write_client();
+    for request in 0..3 {
+        if request > 0 {
+            tokio::time::sleep(ttl * 3 / 5).await;
+        }
+        if request == 2 {
+            engine
+                .state()
+                .writes
+                .sweep_streams()
+                .await
+                .expect("the expired streams are dropped");
+        }
+        for stream in [&committed, &buffered] {
+            acknowledged(&engine, stream, request, &ticks(request, 1)).await;
+        }
+        client
+            .flush_rows(storage::FlushRowsRequest {
+                write_stream: buffered.clone(),
+                offset: Some(request),
+            })
+            .await
+            .expect("the buffered stream flushes");
+    }
+    assert_eq!(read_ticks(&engine).await.len(), 6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_engine_commits_a_pending_stream_and_the_first_cannot_commit_it_again() {
     let first = TestEngine::start().await;
     create_ticks(&first).await;

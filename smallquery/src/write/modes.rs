@@ -35,7 +35,7 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use iceberg::TableUpdate;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use storage::write_stream::Type;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{debug, warn};
@@ -62,6 +62,9 @@ impl std::fmt::Debug for Streams {
 struct Stream {
     id: WriteStreamId,
     record: StreamRecord,
+    /// When this engine last started writing the record. The backend's creation time of the
+    /// record, which a sweep measures the TTL from, is no earlier.
+    written: Instant,
     /// The offset the next append takes.
     next: RowOffset,
     finalized: bool,
@@ -218,6 +221,7 @@ impl Streams {
             created_at_ms: now_ms(),
             creator: self.node,
         };
+        let written = Instant::now();
         self.staging.write_record(id, &record).await?;
         if mode != StreamMode::Committed {
             self.groups
@@ -231,6 +235,7 @@ impl Streams {
         let stream = Stream {
             id,
             record,
+            written,
             next: RowOffset::default(),
             finalized: false,
             flushed: None,
@@ -303,6 +308,7 @@ impl Streams {
                 stream.failed |= err.commit_may_have_landed();
                 return Err(err);
             }
+            self.touch(&mut stream).await;
         } else {
             let files = writer.write_staged(batch, offset).await?;
             self.staging
@@ -435,7 +441,25 @@ impl Streams {
                 self.staging.delete_data_file(&path).await;
             }
         }
+        self.touch(&mut stream).await;
         Ok(offset)
+    }
+
+    /// Writes the record of a stream whose rows a commit just took again, once an eighth of the
+    /// TTL has passed since it was last written. A sweep drops a stream whose record the backend
+    /// created a TTL ago, so a committed or buffered stream lives the TTL from its last commit,
+    /// and a pending stream, whose rows commit once, the TTL from its creation.
+    async fn touch(&self, stream: &mut Stream) {
+        if stream.written.elapsed() < self.ttl / 8 {
+            return;
+        }
+        let written = Instant::now();
+        match self.staging.write_record(stream.id, &stream.record).await {
+            Ok(()) => stream.written = written,
+            Err(err) => {
+                warn!(stream = %stream.id, %err, "A write stream's record could not be written again.");
+            }
+        }
     }
 
     /// Writes `segment`, whose rows straddle `offset`, again as two segments: its rows up to
@@ -616,7 +640,8 @@ impl Streams {
 
     /// Drops every stream whose record the backend created more than the stream TTL ago: its
     /// state leaves its table first, so that no later commit can take its files, then the files
-    /// no commit took, its segments and its record are deleted.
+    /// no commit took, its segments and its record are deleted. This engine also stops serving
+    /// its own streams past the TTL.
     ///
     /// # Errors
     /// The storage errors of listing the records; a stream that cannot be dropped is logged
@@ -637,6 +662,14 @@ impl Streams {
                 }
             }
         }
+        self.created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, stream| {
+                stream
+                    .try_lock()
+                    .map_or(true, |stream| stream.written.elapsed() < self.ttl)
+            });
         Ok(())
     }
 
@@ -723,7 +756,12 @@ impl Streams {
             .cloned();
         if let Some(stream) = created {
             let stream = stream.lock_owned().await;
-            if stream.record.table == name.table {
+            if stream.written.elapsed() >= self.ttl {
+                self.created
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
+            } else if stream.record.table == name.table {
                 return Ok(stream);
             }
         }
