@@ -487,3 +487,32 @@ async fn a_pending_stream_open_across_a_truncate_and_an_overwrite_commits_its_ro
         [rows(100..104), rows(200..201)].concat()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_truncate_on_a_cached_empty_table_removes_the_rows_another_engine_appended() {
+    let first = TestEngine::start().await;
+    create_events(&first).await;
+    let second = first
+        .open_on_same_root(|mut config| {
+            config.catalog_cache_ttl = config.pointer_min_age / 2;
+            config
+        })
+        .await;
+    second
+        .state()
+        .catalog
+        .load(&events())
+        .await
+        .expect("the empty table loads into the cache");
+    insert(&first, 0..10).await;
+
+    let removed_rows = second
+        .state()
+        .catalog
+        .commit_snapshot(&events(), &SnapshotChange::Truncate)
+        .await
+        .expect("the table is truncated");
+
+    assert_eq!(removed_rows, 10);
+    assert_eq!(count_and_sum(&first).await, (0, None));
+}

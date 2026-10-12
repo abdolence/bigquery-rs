@@ -62,6 +62,13 @@ pub(crate) struct BuiltSnapshot {
     removed_rows: u64,
 }
 
+impl BuiltSnapshot {
+    /// Whether the change leaves the table as it is.
+    pub(super) fn is_unchanged(&self) -> bool {
+        self.commit.updates.is_empty()
+    }
+}
+
 #[derive(Default)]
 struct CurrentManifests {
     data_manifests: usize,

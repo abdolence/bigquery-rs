@@ -318,13 +318,8 @@ impl EngineCatalog {
                     self.attempt_engine(table, &loaded, commit, recheck).await?
                 }
                 Change::Snapshot(built) => {
-                    let attempted = self
-                        .attempt_engine(table, &loaded, built.commit, recheck)
-                        .await?;
-                    if let Attempted::Lost(Lost::Race | Lost::Unmet(_)) = attempted {
-                        self.discard(&built.written).await;
-                    }
-                    attempted
+                    self.attempt_snapshot(table, &loaded, built, recheck)
+                        .await?
                 }
                 Change::Transaction(transaction) => {
                     self.attempt_transaction(table, &loaded, transaction, recheck)
@@ -500,6 +495,36 @@ impl EngineCatalog {
         }
         self.hooks.reach(CommitPoint::Loaded).await;
         Ok(loaded)
+    }
+
+    /// Commits a snapshot built on `loaded`, deleting what it wrote when the attempt loses.
+    ///
+    /// A snapshot that changes nothing lands through no pointer, so nothing has proven that
+    /// `loaded`, which may come from the cache, is still the newest pointer: the table is read
+    /// again, and a newer pointer makes the attempt lose to the commit that created it.
+    async fn attempt_snapshot(
+        &self,
+        table: &TableRef,
+        loaded: &LoadedTable,
+        built: BuiltSnapshot,
+        recheck: bool,
+    ) -> Result<Attempted<LoadedTable>, EngineError> {
+        let unchanged = built.is_unchanged();
+        let attempted = match self
+            .attempt_engine(table, loaded, built.commit, recheck)
+            .await?
+        {
+            Attempted::Landed(_)
+                if unchanged && self.reload(table).await?.version() != loaded.version() =>
+            {
+                Attempted::Lost(Lost::Race)
+            }
+            attempted => attempted,
+        };
+        if let Attempted::Lost(Lost::Race | Lost::Unmet(_)) = attempted {
+            self.discard(&built.written).await;
+        }
+        Ok(attempted)
     }
 
     async fn attempt_engine(
