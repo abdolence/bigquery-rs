@@ -190,6 +190,10 @@ pub(super) struct Contention {
 /// loop.
 const MIN_BASE: Duration = Duration::from_millis(10);
 
+/// The longest a commit waits to leave another writer a window, so that one slow attempt does
+/// not slow every later commit of the table by as much.
+const MAX_WAY: Duration = Duration::from_secs(1);
+
 /// How many times a pointer create whose outcome was unknown, and whose object is absent, is
 /// sent again.
 const CREATE_ATTEMPTS: u32 = 3;
@@ -342,7 +346,7 @@ impl EngineCatalog {
         let Some(attempt) = attempt else {
             return false;
         };
-        tokio::time::sleep(uniform_up_to(attempt)).await;
+        tokio::time::sleep(uniform_up_to(attempt.min(MAX_WAY))).await;
         true
     }
 
@@ -354,6 +358,8 @@ impl EngineCatalog {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if saw_another_writer {
+            let deadline = self.settings.commit_retry_deadline;
+            contention.retain(|_, known| known.seen.elapsed() < deadline);
             contention.insert(
                 table.clone(),
                 Contention {
