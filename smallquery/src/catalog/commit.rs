@@ -59,7 +59,7 @@ pub(crate) enum Change {
 }
 
 /// What each attempt of a commit applies, built from the table that attempt loaded.
-pub(super) trait AttemptChange {
+pub(crate) trait AttemptChange {
     fn for_attempt(
         &mut self,
         loaded: &LoadedTable,
@@ -287,7 +287,8 @@ impl EngineCatalog {
     /// Every attempt loads the table again and asks `change` for a change built on it. The
     /// table's in-process lock is held across every attempt, so the process's other commits on
     /// the table queue behind this one. An attempt whose load finds another table identity
-    /// under the name stops the commit: what it was built for is gone.
+    /// under the name stops the commit: what it was built for is gone. A snapshot an attempt
+    /// built is deleted again when the attempt loses before anything names it.
     ///
     /// # Errors
     /// [`EngineError::NotFound`] when the table does not exist or was replaced,
@@ -295,16 +296,6 @@ impl EngineCatalog {
     /// as stored, [`EngineError::Aborted`] past `commit_retry_deadline`,
     /// [`EngineError::CommitOutcomeUnknown`], never retried, and whatever `change` returns.
     pub(crate) async fn commit(
-        &self,
-        table: &TableRef,
-        change: impl FnMut(&LoadedTable) -> Result<Change, EngineError>,
-    ) -> Result<LoadedTable, EngineError> {
-        self.commit_with(table, change).await
-    }
-
-    /// [`EngineCatalog::commit`] for a change whose attempts read or write storage. A snapshot
-    /// an attempt built is deleted again when the attempt loses before anything names it.
-    pub(super) async fn commit_with(
         &self,
         table: &TableRef,
         mut change: impl AttemptChange,

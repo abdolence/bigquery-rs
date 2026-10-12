@@ -94,7 +94,7 @@ impl Tables {
         let loaded = self
             .0
             .catalog()
-            .commit(&table, |loaded| {
+            .commit(&table, |loaded: &LoadedTable| {
                 let current = loaded.version().to_string();
                 if let Some(etag) = etag.as_ref().filter(|etag| **etag != current) {
                     return Err(EngineError::Precondition {

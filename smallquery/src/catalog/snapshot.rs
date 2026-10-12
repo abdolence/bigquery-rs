@@ -460,7 +460,7 @@ impl EngineCatalog {
             prepared: Some(change.build(table, &loaded, target_entries).await?),
             removed_rows: 0,
         };
-        let committed = self.commit_with(table, &mut attempts).await;
+        let committed = self.commit(table, &mut attempts).await;
         if let Some(unused) = attempts.prepared.take() {
             self.discard(&unused.written).await;
         }

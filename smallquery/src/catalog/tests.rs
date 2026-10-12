@@ -94,7 +94,7 @@ async fn set_by_transaction(
     key: &str,
 ) -> Result<LoadedTable, EngineError> {
     catalog
-        .commit(&orders(), |loaded| {
+        .commit(&orders(), |loaded: &LoadedTable| {
             let transaction = Transaction::new(&loaded.table);
             let action = transaction
                 .update_table_properties()
@@ -107,7 +107,7 @@ async fn set_by_transaction(
 /// Sets the property `key` through an engine commit.
 async fn set_by_engine(catalog: &EngineCatalog, key: &str) -> Result<LoadedTable, EngineError> {
     catalog
-        .commit(&orders(), |_| {
+        .commit(&orders(), |_: &LoadedTable| {
             Ok(Change::Engine(EngineCommit {
                 requirements: Vec::new(),
                 updates: vec![TableUpdate::SetProperties {
@@ -788,7 +788,7 @@ async fn a_requirement_unmet_by_the_stored_table_fails_the_commit() {
         }],
     ] {
         let outcome = catalog
-            .commit(&orders(), |_| {
+            .commit(&orders(), |_: &LoadedTable| {
                 Ok(Change::Engine(EngineCommit {
                     requirements: vec![iceberg::TableRequirement::UuidMatch {
                         uuid: another_table,

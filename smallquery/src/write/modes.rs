@@ -655,7 +655,7 @@ impl Streams {
         let mut committed = CommittedRows::Unknown;
         let released = self
             .catalog
-            .commit(&record.table, |loaded| {
+            .commit(&record.table, |loaded: &LoadedTable| {
                 committed = CommittedRows::Unknown;
                 if record.check_identity(loaded).is_err() {
                     return Ok(Change::Engine(EngineCommit::default()));

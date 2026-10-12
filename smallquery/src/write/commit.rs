@@ -16,7 +16,7 @@
 //! loaded, after the members before it, and lands in the same commit as its files, or the
 //! member is refused and its files left out.
 
-use crate::catalog::{Change, EngineCatalog, EngineCommit};
+use crate::catalog::{Change, EngineCatalog, EngineCommit, LoadedTable};
 use crate::error::{EngineError, Resource, StreamProblem};
 use crate::ids::{StreamId, TableRef, WriteStreamId, WriteStreamName};
 use crate::storage::{StoredStream, StreamChange};
@@ -224,7 +224,7 @@ impl CommitGroups {
         let mut verdicts = vec![Verdict::Undecided; group.len()];
         let landed = self
             .catalog
-            .commit(table, |loaded| {
+            .commit(table, |loaded: &LoadedTable| {
                 // Members are decided in queue order; a table whose snapshot does not report
                 // its rows is not known to be empty.
                 let identity = loaded.metadata().uuid();
