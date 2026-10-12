@@ -4,7 +4,7 @@
 //! engine's appends removes their rows too, and open write streams outlive both kinds that
 //! remove rows.
 
-use super::SnapshotChange;
+use super::{LoadedManifests, SnapshotChange};
 use crate::catalog::commit::Lost;
 use crate::catalog::{now_ms, CommitPoint, LoadedTable};
 use crate::ids::TableRef;
@@ -561,7 +561,7 @@ async fn a_snapshot_stamped_more_than_a_minute_before_the_last_commit_loses_its_
     insert(&engine, 0..10).await;
     let loaded = reload(&engine).await;
     let built = SnapshotChange::Truncate
-        .build(&events(), &loaded, 8192)
+        .build(&events(), &loaded, 8192, &mut LoadedManifests::default())
         .await
         .expect("the snapshot builds");
     let last_commit = loaded.metadata().last_updated_ms();

@@ -11,6 +11,7 @@ use super::commit::{AttemptChange, Lost};
 use super::{Change, EngineCatalog, EngineCommit, LoadedTable};
 use crate::error::{EngineError, Resource};
 use crate::ids::TableRef;
+use futures::{stream, StreamExt, TryStreamExt};
 use iceberg::spec::{
     DataFile, FormatVersion, ManifestContentType, ManifestEntry, ManifestEntryRef, ManifestFile,
     ManifestListWriter, ManifestWriter, ManifestWriterBuilder, Operation, Snapshot, SnapshotRef,
@@ -19,6 +20,7 @@ use iceberg::spec::{
 };
 use iceberg::table::Table;
 use iceberg::{TableRequirement, TableUpdate};
+use std::collections::HashMap;
 use std::fmt::Arguments;
 use uuid::Uuid;
 
@@ -147,26 +149,78 @@ struct CurrentManifests {
 }
 
 impl CurrentManifests {
-    async fn read(table: &Table, snapshot: &SnapshotRef) -> Result<Self, EngineError> {
-        let mut current = Self::default();
+    async fn read(
+        table: &Table,
+        snapshot: &SnapshotRef,
+        loaded: &mut LoadedManifests,
+    ) -> Result<Self, EngineError> {
         let list = table.manifest_list_reader(snapshot).load().await?;
+        let data = list
+            .entries()
+            .iter()
+            .filter(|manifest| manifest.content == ManifestContentType::Data);
+        loaded.load(table, data).await?;
+        let mut current = Self::default();
         for manifest in list.entries() {
             match manifest.content {
                 ManifestContentType::Deletes => current.delete_manifests.push(manifest.clone()),
                 ManifestContentType::Data => {
+                    let live = loaded.live_entries(manifest)?;
                     current.data_manifests += 1;
-                    let (entries, _) = manifest.load_manifest(table.file_io()).await?.into_parts();
-                    let live_before = current.live_entries.len();
-                    current
-                        .live_entries
-                        .extend(entries.into_iter().filter(|entry| entry.is_alive()));
-                    if current.live_entries.len() == live_before {
+                    if live.is_empty() {
                         current.dead_data_manifests += 1;
                     }
+                    current.live_entries.extend_from_slice(live);
                 }
             }
         }
         Ok(current)
+    }
+}
+
+/// How many manifests one build reads at once.
+const CONCURRENT_MANIFEST_READS: usize = 16;
+
+/// The live entries of the manifests a commit has read, by manifest path. A manifest is never
+/// rewritten under its path, so what one attempt read holds for every later one.
+#[derive(Default)]
+struct LoadedManifests(HashMap<String, Vec<ManifestEntryRef>>);
+
+impl LoadedManifests {
+    /// Reads those of `manifests` not read yet, several at once.
+    async fn load<'m>(
+        &mut self,
+        table: &Table,
+        manifests: impl Iterator<Item = &'m ManifestFile>,
+    ) -> Result<(), EngineError> {
+        // Owned values: a stream over borrowed manifests makes the commit future not `Send`.
+        let unread: Vec<ManifestFile> = manifests
+            .filter(|manifest| !self.0.contains_key(&manifest.manifest_path))
+            .cloned()
+            .collect();
+        let read: Vec<(String, Vec<ManifestEntryRef>)> = stream::iter(unread)
+            .map(|manifest| {
+                let file_io = table.file_io().clone();
+                async move {
+                    let (entries, _) = manifest.load_manifest(&file_io).await?.into_parts();
+                    let live = entries.into_iter().filter(|entry| entry.is_alive());
+                    Ok::<_, EngineError>((manifest.manifest_path, live.collect()))
+                }
+            })
+            .buffered(CONCURRENT_MANIFEST_READS)
+            .try_collect()
+            .await?;
+        self.0.extend(read);
+        Ok(())
+    }
+
+    fn live_entries(&self, manifest: &ManifestFile) -> Result<&[ManifestEntryRef], EngineError> {
+        self.0
+            .get(&manifest.manifest_path)
+            .map(Vec::as_slice)
+            .ok_or_else(|| EngineError::Internal {
+                detail: format!("the manifest {} was not read", manifest.manifest_path),
+            })
     }
 }
 
@@ -396,6 +450,7 @@ impl SnapshotChange {
         table: &TableRef,
         loaded: &LoadedTable,
         target_entries: usize,
+        manifests: &mut LoadedManifests,
     ) -> Result<BuiltSnapshot, EngineError> {
         let metadata = loaded.metadata();
         if let SnapshotChange::Overwrite { table_uuid, .. } = self {
@@ -430,7 +485,7 @@ impl SnapshotChange {
             },
         ];
         let current = match parent {
-            Some(parent) => CurrentManifests::read(&loaded.table, parent).await?,
+            Some(parent) => CurrentManifests::read(&loaded.table, parent, manifests).await?,
             None => CurrentManifests::default(),
         };
         let Some(rewrite) = self.rewrite(&current, target_entries) else {
@@ -477,6 +532,7 @@ struct SnapshotAttempts<'c> {
     table: &'c TableRef,
     change: &'c SnapshotChange,
     prepared: Option<BuiltSnapshot>,
+    manifests: LoadedManifests,
     removed_rows: u64,
 }
 
@@ -490,7 +546,7 @@ impl AttemptChange for &mut SnapshotAttempts<'_> {
                 }
                 let target_entries = self.catalog.settings.manifest_merge_target_entries;
                 self.change
-                    .build(self.table, loaded, target_entries)
+                    .build(self.table, loaded, target_entries, &mut self.manifests)
                     .await?
             }
         };
@@ -518,11 +574,16 @@ impl EngineCatalog {
     ) -> Result<u64, EngineError> {
         let target_entries = self.settings.manifest_merge_target_entries;
         let loaded = self.load(table).await?;
+        let mut manifests = LoadedManifests::default();
+        let prepared = change
+            .build(table, &loaded, target_entries, &mut manifests)
+            .await?;
         let mut attempts = SnapshotAttempts {
             catalog: self,
             table,
             change,
-            prepared: Some(change.build(table, &loaded, target_entries).await?),
+            prepared: Some(prepared),
+            manifests,
             removed_rows: 0,
         };
         let committed = self.commit(table, &mut attempts).await;
