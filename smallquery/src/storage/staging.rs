@@ -6,8 +6,8 @@
 //!   `_smallquery/streams/<id>/seg-<first>-<last>-<uuid>.json`: one acknowledged request each,
 //!   offsets `first` to `last`, with the data files it staged. A segment is written before its
 //!   request is acknowledged and never rewritten;
-//! - the table properties `smallquery.stream.<id>.state` and `smallquery.stream.<id>.flushed`
-//!   of a pending or buffered stream, from the commit that registers the stream to the one that
+//! - the table properties `smallquery.stream.<id>.state`, `.flushed` and `.commit_time` of a
+//!   pending or buffered stream, from the commit that registers the stream to the one that
 //!   drops it. Every commit of the stream's rows changes them, and only from the state it
 //!   expects, so the table's pointer chain fences each engine's commits against every other's.
 //!
@@ -55,6 +55,7 @@ pub(crate) enum StreamMode {
 enum StreamProperty {
     State,
     Flushed,
+    CommitTime,
 }
 
 impl StreamProperty {
@@ -62,6 +63,7 @@ impl StreamProperty {
         let name = match self {
             StreamProperty::State => "state",
             StreamProperty::Flushed => "flushed",
+            StreamProperty::CommitTime => "commit_time",
         };
         format!("smallquery.stream.{stream}.{name}")
     }
@@ -112,6 +114,8 @@ pub(crate) struct StoredStream {
     pub state: StreamState,
     /// A buffered stream's last flushed offset.
     pub flushed: Option<RowOffset>,
+    /// When a pending stream's rows were committed, in milliseconds since the Unix epoch.
+    pub committed_at_ms: Option<i64>,
 }
 
 impl StoredStream {
@@ -132,6 +136,13 @@ impl StoredStream {
             flushed: value(StreamProperty::Flushed)
                 .map(|flushed| flushed.parse())
                 .transpose()?,
+            committed_at_ms: value(StreamProperty::CommitTime)
+                .map(|time| {
+                    time.parse().map_err(|_| EngineError::Internal {
+                        detail: format!("{time:?} is no commit time"),
+                    })
+                })
+                .transpose()?,
         }))
     }
 
@@ -145,14 +156,19 @@ impl StoredStream {
             self.flushed
                 .map(|flushed| (StreamProperty::Flushed.key(stream), flushed.to_string())),
         );
+        properties.extend(
+            self.committed_at_ms
+                .map(|time| (StreamProperty::CommitTime.key(stream), time.to_string())),
+        );
         properties
     }
 
     /// The keys of every property a table may hold of `stream`.
-    pub(crate) fn keys(stream: WriteStreamId) -> [String; 2] {
+    pub(crate) fn keys(stream: WriteStreamId) -> [String; 3] {
         [
             StreamProperty::State.key(stream),
             StreamProperty::Flushed.key(stream),
+            StreamProperty::CommitTime.key(stream),
         ]
     }
 }
@@ -166,8 +182,10 @@ pub(crate) enum StreamChange {
     Register(WriteStreamId),
     /// A pending stream takes no more rows.
     Finalize(WriteStreamId),
-    /// A batch commit: the pending stream goes from finalized to committed.
-    Commit(WriteStreamId),
+    /// A batch commit: the pending stream goes from finalized to committed at `at_ms`, which
+    /// `GetWriteStream` reports on any engine, so that a client that sends a landed batch commit
+    /// again can tell when it landed.
+    Commit { stream: WriteStreamId, at_ms: i64 },
     /// A flush: the buffered stream's last flushed offset goes from `from`, `None` before its
     /// first flush, to `to`.
     Flush {
@@ -182,7 +200,7 @@ impl StreamChange {
         match self {
             StreamChange::Register(stream)
             | StreamChange::Finalize(stream)
-            | StreamChange::Commit(stream)
+            | StreamChange::Commit { stream, .. }
             | StreamChange::Flush { stream, .. } => stream,
         }
     }
@@ -200,6 +218,7 @@ impl StreamChange {
                 StreamChange::Register(_) => Ok(StoredStream {
                     state: StreamState::Open,
                     flushed: None,
+                    committed_at_ms: None,
                 }),
                 _ => Err(StreamProblem::Expired),
             };
@@ -209,14 +228,15 @@ impl StreamChange {
                 state: StreamState::Finalized,
                 ..current
             }),
-            (StreamChange::Commit(_), StreamState::Finalized) => Ok(StoredStream {
+            (StreamChange::Commit { at_ms, .. }, StreamState::Finalized) => Ok(StoredStream {
                 state: StreamState::Committed,
+                committed_at_ms: Some(at_ms),
                 ..current
             }),
-            (StreamChange::Commit(_), StreamState::Committed) => {
+            (StreamChange::Commit { .. }, StreamState::Committed) => {
                 Err(StreamProblem::AlreadyCommitted)
             }
-            (StreamChange::Commit(_), StreamState::Open) => Err(StreamProblem::NotFinalized),
+            (StreamChange::Commit { .. }, StreamState::Open) => Err(StreamProblem::NotFinalized),
             (StreamChange::Flush { from, to, .. }, StreamState::Open)
                 if current.flushed == from =>
             {

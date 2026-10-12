@@ -254,12 +254,18 @@ impl Streams {
     pub(crate) async fn describe(
         &self,
         name: &WriteStreamName,
+        loaded: &LoadedTable,
     ) -> Result<StreamDescription, EngineError> {
-        let record = self.record(name, name.created("GetWriteStream")?).await?;
+        let id = name.created("GetWriteStream")?;
+        let record = self.record(name, id).await?;
+        let stored = match record.check_identity(loaded) {
+            Ok(()) => StoredStream::read(id, loaded.metadata().properties())?,
+            Err(_) => None,
+        };
         Ok(StreamDescription {
             kind: record.mode.into(),
             created_at_ms: record.created_at_ms,
-            committed_at_ms: None,
+            committed_at_ms: stored.and_then(|stored| stored.committed_at_ms),
         })
     }
 
@@ -510,12 +516,19 @@ impl Streams {
             return Ok(Self::refused(&refused));
         }
         let loaded = self.catalog.load(table).await?;
+        let committed_at_ms = now_ms();
+        let mut changes = Vec::new();
         for (name, id, record) in &streams {
             record.check_identity(&loaded)?;
+            let change = StreamChange::Commit {
+                stream: *id,
+                at_ms: committed_at_ms,
+            };
             let stored = StoredStream::read(*id, loaded.metadata().properties())?;
-            if let Err(problem) = StreamChange::Commit(*id).apply(stored) {
+            if let Err(problem) = change.apply(stored) {
                 refused.push(EngineError::stream(name, problem));
             }
+            changes.push(change);
         }
         if !refused.is_empty() {
             return Ok(Self::refused(&refused));
@@ -528,11 +541,6 @@ impl Streams {
             }
         }
         let files = WrittenFiles::staged(&staged, &loaded)?;
-        let changes = streams
-            .iter()
-            .map(|(_, id, _)| StreamChange::Commit(*id))
-            .collect();
-        let committed_at_ms = now_ms();
         match self.groups.commit_streams(table, files, changes).await {
             Ok(()) => Ok(storage::BatchCommitWriteStreamsResponse {
                 commit_time: proto_time(committed_at_ms),

@@ -714,6 +714,42 @@ async fn an_engine_that_did_not_create_a_stream_acknowledges_none_of_its_rows() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_engine_reports_when_a_pending_stream_was_committed() {
+    let engine = TestEngine::start().await;
+    create_ticks(&engine).await;
+    let stream = create_stream(&engine, storage::write_stream::Type::Pending).await;
+    acknowledged(&engine, &stream, 0, &ticks(1, 3)).await;
+    let mut client = engine.write_client();
+    client
+        .finalize_write_stream(storage::FinalizeWriteStreamRequest {
+            name: stream.clone(),
+        })
+        .await
+        .expect("the stream is finalized");
+    let committed = client
+        .batch_commit_write_streams(storage::BatchCommitWriteStreamsRequest {
+            parent: TICKS_PATH.to_string(),
+            write_streams: vec![stream.clone()],
+        })
+        .await
+        .expect("the batch commit answers")
+        .into_inner();
+    let commit_time = committed.commit_time.expect("the commit reports its time");
+
+    let restarted = engine.restart(|config| config).await;
+    let described = restarted
+        .write_client()
+        .get_write_stream(storage::GetWriteStreamRequest {
+            name: stream,
+            ..Default::default()
+        })
+        .await
+        .expect("the stream is described")
+        .into_inner();
+    assert_eq!(described.commit_time, Some(commit_time));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_engine_commits_a_pending_stream_and_the_first_cannot_commit_it_again() {
     let first = TestEngine::start().await;
     create_ticks(&first).await;

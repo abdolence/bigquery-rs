@@ -89,7 +89,7 @@ impl Writes {
                 None,
             ),
             StreamId::Created(_) => {
-                let stream = self.streams.describe(name).await?;
+                let stream = self.streams.describe(name, &loaded).await?;
                 (
                     stream.kind,
                     proto_time(stream.created_at_ms),
