@@ -575,3 +575,106 @@ async fn a_snapshot_stamped_more_than_a_minute_before_the_last_commit_loses_its_
         .is_ok());
     engine.state().catalog.discard(&built.written).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_merge_drops_a_manifest_without_live_entries_beside_an_oversized_one() {
+    #[derive(Debug, Serialize)]
+    struct Visit {
+        id: i64,
+        day: BigQueryDate,
+    }
+    let engine = TestEngine::with_config(|mut config| {
+        config.maintenance.manifest_merge_target_entries = 2;
+        config
+    })
+    .await;
+    engine.create_dataset("shop", "EU").await;
+    let visits_id = BigQueryTableId::from_static("visits");
+    engine
+        .db
+        .fluent()
+        .schema()
+        .table(SHOP.table(visits_id.clone()))
+        .columns(|columns| {
+            columns.fields([columns.field("id").int64(), columns.field("day").date()])
+        })
+        .partition_by_day("day")
+        .sync()
+        .await
+        .expect("the table is created");
+    let visits = table_ref("shop", "visits");
+    let insert_days = |days: Range<i8>| {
+        let rows: Vec<Visit> = days
+            .map(|day| Visit {
+                id: i64::from(day),
+                day: BigQueryDate(jiff::civil::date(2026, 10, day)),
+            })
+            .collect();
+        let db = &engine.db;
+        let table = SHOP.table(visits_id.clone());
+        async move {
+            db.fluent()
+                .insert()
+                .into(table)
+                .objects(&rows)
+                .execute()
+                .await
+                .expect("the rows are written");
+        }
+    };
+    insert_days(1..2).await;
+    engine
+        .state()
+        .catalog
+        .commit_snapshot(&visits, &SnapshotChange::Truncate)
+        .await
+        .expect("the table is truncated");
+    insert_days(2..5).await;
+    let before = engine
+        .state()
+        .catalog
+        .reload(&visits)
+        .await
+        .expect("the table loads");
+    let live_per_manifest: Vec<usize> = data_manifests(&before)
+        .await
+        .iter()
+        .map(|manifest| {
+            manifest
+                .entries()
+                .iter()
+                .filter(|entry| entry.is_alive())
+                .count()
+        })
+        .collect();
+    assert_eq!(
+        live_per_manifest.iter().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([0, 3]),
+        "the truncate's manifest beside the three-file append's"
+    );
+
+    engine
+        .state()
+        .catalog
+        .commit_snapshot(&visits, &SnapshotChange::MergeManifests)
+        .await
+        .expect("the manifests merge");
+
+    let after = engine
+        .state()
+        .catalog
+        .reload(&visits)
+        .await
+        .expect("the table loads");
+    let snapshot = after
+        .metadata()
+        .current_snapshot()
+        .expect("the table has a snapshot");
+    assert_eq!(snapshot.summary().operation, Operation::Replace);
+    let entries_per_manifest: Vec<usize> = data_manifests(&after)
+        .await
+        .iter()
+        .map(|manifest| manifest.entries().len())
+        .collect();
+    assert_eq!(entries_per_manifest, [2, 1]);
+}

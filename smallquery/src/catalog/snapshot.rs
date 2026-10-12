@@ -140,6 +140,8 @@ impl BuiltSnapshot {
 #[derive(Default)]
 struct CurrentManifests {
     data_manifests: usize,
+    /// The data manifests without a live entry, which only a merge drops.
+    dead_data_manifests: usize,
     live_entries: Vec<ManifestEntryRef>,
     delete_manifests: Vec<ManifestFile>,
 }
@@ -154,9 +156,13 @@ impl CurrentManifests {
                 ManifestContentType::Data => {
                     current.data_manifests += 1;
                     let (entries, _) = manifest.load_manifest(table.file_io()).await?.into_parts();
+                    let live_before = current.live_entries.len();
                     current
                         .live_entries
                         .extend(entries.into_iter().filter(|entry| entry.is_alive()));
+                    if current.live_entries.len() == live_before {
+                        current.dead_data_manifests += 1;
+                    }
                 }
             }
         }
@@ -369,8 +375,8 @@ impl SnapshotChange {
                 SnapshotChange::Overwrite { files, .. } => (&[], live, files),
             };
         let operation = match (self, removed.is_empty(), added.is_empty()) {
-            (SnapshotChange::MergeManifests, ..) => (kept.len().div_ceil(target_entries)
-                < current.data_manifests)
+            (SnapshotChange::MergeManifests, ..) => (current.dead_data_manifests > 0
+                || kept.len().div_ceil(target_entries) < current.data_manifests)
                 .then_some(Operation::Replace)?,
             (_, true, true) => return None,
             (_, false, false) => Operation::Overwrite,
