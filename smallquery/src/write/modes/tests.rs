@@ -12,6 +12,7 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1 as storage;
 use gcloud_sdk::prost::Message;
 use gcloud_sdk::prost_types::{field_descriptor_proto, DescriptorProto, FieldDescriptorProto};
 use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use storage::append_rows_response::Response;
 use storage::storage_error::StorageErrorCode;
@@ -207,7 +208,11 @@ async fn an_exactly_once_insert_lands_every_request_once() {
 async fn a_request_sent_again_after_its_response_was_lost_lands_once() {
     let engine = TestEngine::start().await;
     create_ticks(&engine).await;
-    engine.state().writes.lose_next_response();
+    engine
+        .state()
+        .writes
+        .lose_response
+        .store(true, Ordering::SeqCst);
     let written = ticks(1, 10);
 
     let summary = engine
@@ -223,7 +228,7 @@ async fn a_request_sent_again_after_its_response_was_lost_lands_once() {
         .expect("the rows are written");
 
     assert!(
-        !engine.state().writes.loses_a_response(),
+        !engine.state().writes.lose_response.load(Ordering::SeqCst),
         "a response was lost"
     );
     assert_eq!((summary.rows_written, summary.rows_failed), (10, 0));

@@ -24,7 +24,9 @@ use iceberg::spec::{
     deserialize_data_file_from_json, serialize_data_file_to_json, DataFile, TableMetadata,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::time::SystemTime;
 use tracing::warn;
 use uuid::Uuid;
@@ -276,49 +278,65 @@ impl ListedSegment {
     }
 }
 
-/// The segments a commit takes of everything a stream staged, in offset order: none at or
-/// below `flushed`, whose rows a flush committed through the lower half of a split, and one
-/// per range, since a request sent again, or the halves of a split whose original survived,
-/// stage the same rows twice. Of segments sharing a first offset the longest is taken, then
-/// the one the backend created first.
-///
-/// # Errors
-/// The segment that leaves a gap after the ones taken, or overlaps one without being covered
-/// by it: no order of the engine's writes produces either.
-pub(crate) fn select_segments(
-    mut segments: Vec<ListedSegment>,
-    flushed: Option<RowOffset>,
-) -> Result<Vec<ListedSegment>, ListedSegment> {
-    segments.retain(|segment| flushed.is_none_or(|flushed| segment.first > flushed));
-    segments.sort_by(|a, b| {
-        a.first
-            .cmp(&b.first)
-            .then(b.last.cmp(&a.last))
-            .then(a.created.cmp(&b.created))
-    });
-    let mut next = flushed.map_or(RowOffset::default(), |flushed| flushed.after(1));
-    let mut taken = Vec::new();
-    for segment in segments {
-        if segment.last < next {
-            continue;
+/// A stream's segments, as a listing names them, in no order.
+#[derive(Debug)]
+pub(crate) struct Segments(Vec<ListedSegment>);
+
+impl Segments {
+    /// The segments a commit takes of everything a stream staged, in offset order: none at or
+    /// below `flushed`, whose rows a flush committed through the lower half of a split, and one
+    /// per range, since a request sent again, or the halves of a split whose original survived,
+    /// stage the same rows twice. Of segments sharing a first offset the longest is taken, then
+    /// the one the backend created first.
+    ///
+    /// # Errors
+    /// The segment that leaves a gap after the ones taken, or overlaps one without being
+    /// covered by it: no order of the engine's writes produces either.
+    pub(crate) fn select(
+        self,
+        flushed: Option<RowOffset>,
+    ) -> Result<Vec<ListedSegment>, ListedSegment> {
+        let mut segments = self.0;
+        segments.retain(|segment| flushed.is_none_or(|flushed| segment.first > flushed));
+        segments.sort_by(|a, b| {
+            a.first
+                .cmp(&b.first)
+                .then(b.last.cmp(&a.last))
+                .then(a.created.cmp(&b.created))
+        });
+        let mut next = flushed.map_or(RowOffset::default(), |flushed| flushed.after(1));
+        let mut taken = Vec::new();
+        for segment in segments {
+            if segment.last < next {
+                continue;
+            }
+            if segment.first != next {
+                return Err(segment);
+            }
+            next = segment.last.after(1);
+            taken.push(segment);
         }
-        if segment.first != next {
-            return Err(segment);
-        }
-        next = segment.last.after(1);
-        taken.push(segment);
+        Ok(taken)
     }
-    Ok(taken)
+}
+
+impl IntoIterator for Segments {
+    type Item = ListedSegment;
+    type IntoIter = std::vec::IntoIter<ListedSegment>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
 }
 
 /// What a segment holds.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SegmentFiles {
     pub files: Vec<StagedFile>,
 }
 
 /// A data file of staged rows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StagedFile {
     /// The file's Iceberg location.
     pub path: String,
@@ -327,7 +345,7 @@ pub(crate) struct StagedFile {
     /// The schema the file was written with.
     pub schema_id: i32,
     /// The Iceberg `DataFile`, in Iceberg's own JSON form.
-    pub data_file: serde_json::Value,
+    pub data_file: Box<RawValue>,
 }
 
 impl StagedFile {
@@ -346,7 +364,7 @@ impl StagedFile {
             path,
             rows,
             schema_id: schema.schema_id(),
-            data_file: serde_json::from_str(&json).map_err(|err| EngineError::Internal {
+            data_file: RawValue::from_string(json).map_err(|err| EngineError::Internal {
                 detail: format!("a data file's JSON does not parse: {err}"),
             })?,
         })
@@ -366,7 +384,7 @@ impl StagedFile {
                 })?;
         let spec = metadata.default_partition_spec();
         Ok(deserialize_data_file_from_json(
-            &self.data_file.to_string(),
+            self.data_file.get(),
             spec.spec_id(),
             &spec.partition_type(schema)?,
             schema,
@@ -374,31 +392,21 @@ impl StagedFile {
     }
 }
 
-/// The offsets of a run of consecutive rows: `start` up to `end`, without `end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OffsetRange {
-    pub start: RowOffset,
-    pub end: RowOffset,
-}
-
 /// Offsets in ascending order, as runs of consecutive ones. A file of an unpartitioned table
 /// holds one run; a file of one partition holds a run for each stretch of a request's rows
 /// that fell into that partition.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct OffsetRanges(Vec<OffsetRange>);
+pub(crate) struct OffsetRanges(Vec<Range<RowOffset>>);
 
 impl OffsetRanges {
     /// `offsets`, which ascend.
     pub(crate) fn from_ascending(offsets: impl IntoIterator<Item = RowOffset>) -> Self {
-        let mut ranges: Vec<OffsetRange> = Vec::new();
+        let mut ranges: Vec<Range<RowOffset>> = Vec::new();
         for offset in offsets {
             match ranges.last_mut() {
                 Some(last) if last.end == offset => last.end = offset.after(1),
-                _ => ranges.push(OffsetRange {
-                    start: offset,
-                    end: offset.after(1),
-                }),
+                _ => ranges.push(offset..offset.after(1)),
             }
         }
         Self(ranges)
@@ -434,14 +442,8 @@ impl OffsetRanges {
                 tail.push(range);
             } else {
                 let cut = range.start.after(left);
-                head.push(OffsetRange {
-                    start: range.start,
-                    end: cut,
-                });
-                tail.push(OffsetRange {
-                    start: cut,
-                    end: range.end,
-                });
+                head.push(range.start..cut);
+                tail.push(cut..range.end);
                 left = 0;
             }
         }
@@ -521,21 +523,19 @@ impl Staging {
             .await
     }
 
-    /// The stream's segments, in no order.
-    pub(crate) async fn segments(
-        &self,
-        stream: WriteStreamId,
-    ) -> Result<Vec<ListedSegment>, EngineError> {
-        Ok(self
-            .backend
-            .list(&Self::segments_directory(stream))
-            .await?
-            .into_iter()
-            .filter_map(|listed| match listed.kind {
-                ListedKind::Object { created } => ListedSegment::parse(&listed.name, created),
-                ListedKind::Directory => None,
-            })
-            .collect())
+    /// The stream's segments.
+    pub(crate) async fn segments(&self, stream: WriteStreamId) -> Result<Segments, EngineError> {
+        Ok(Segments(
+            self.backend
+                .list(&Self::segments_directory(stream))
+                .await?
+                .into_iter()
+                .filter_map(|listed| match listed.kind {
+                    ListedKind::Object { created } => ListedSegment::parse(&listed.name, created),
+                    ListedKind::Directory => None,
+                })
+                .collect(),
+        ))
     }
 
     /// What `segment` of the stream holds, `None` once it is deleted.
@@ -630,16 +630,20 @@ mod tests {
             resent_first.clone(),
         ];
 
-        let taken = select_segments(all.clone(), None).expect("the segments line up");
+        let taken = Segments(all.clone())
+            .select(None)
+            .expect("the segments line up");
         assert_eq!(taken, [resent_first, split_original, after.clone()]);
 
         let flushed = RowOffset::default().after(5);
-        let taken = select_segments(all, Some(flushed)).expect("the segments line up");
+        let taken = Segments(all)
+            .select(Some(flushed))
+            .expect("the segments line up");
         assert_eq!(taken, [upper_half, after]);
 
-        let gap = select_segments(vec![segment(0, 3, 1), segment(5, 7, 2)], None);
+        let gap = Segments(vec![segment(0, 3, 1), segment(5, 7, 2)]).select(None);
         assert_eq!(gap, Err(segment(5, 7, 2)));
-        let overlap = select_segments(vec![segment(0, 3, 1), segment(2, 5, 2)], None);
+        let overlap = Segments(vec![segment(0, 3, 1), segment(2, 5, 2)]).select(None);
         assert_eq!(overlap, Err(segment(2, 5, 2)));
     }
 }

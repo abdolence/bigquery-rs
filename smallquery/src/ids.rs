@@ -516,6 +516,12 @@ impl RowOffset {
     pub(crate) fn rows_to(self, end: RowOffset) -> u64 {
         end.0.saturating_sub(self.0)
     }
+
+    /// The offset as the Storage API carries it. An offset past `i64::MAX` saturates; no
+    /// stream of the API's `i64` offsets reaches one.
+    pub(crate) fn as_i64(self) -> i64 {
+        i64::try_from(self.0).unwrap_or(i64::MAX)
+    }
 }
 
 /// # Errors
@@ -542,14 +548,6 @@ impl FromStr for RowOffset {
             .parse()
             .map(Self)
             .map_err(|_| EngineError::invalid("offset", format!("{offset:?} is no row offset")))
-    }
-}
-
-/// The offset as the Storage API carries it; an offset past `i64::MAX` saturates, which no
-/// stream of the API's `i64` offsets reaches.
-impl From<RowOffset> for i64 {
-    fn from(offset: RowOffset) -> Self {
-        i64::try_from(offset.0).unwrap_or(i64::MAX)
     }
 }
 

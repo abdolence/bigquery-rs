@@ -73,7 +73,12 @@ impl BigQueryWrite for StorageWrite {
                 let span = services.span(APPEND_ROWS, &project);
                 let response = connection.append(request).instrument(span).await;
                 #[cfg(test)]
-                if services.state.writes.take_lost_response() {
+                if services
+                    .state
+                    .writes
+                    .lose_response
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
                     return;
                 }
                 if responses.send(Ok(response)).await.is_err() {

@@ -26,8 +26,8 @@ use crate::catalog::{now_ms, Change, EngineCatalog, EngineCommit, LoadedTable};
 use crate::error::{EngineError, Resource, StreamProblem};
 use crate::ids::{NodeId, RowOffset, StreamId, TableRef, WriteStreamId, WriteStreamName};
 use crate::storage::{
-    select_segments, ListedSegment, SegmentFiles, StagedFile, Staging, StoredStream, StreamChange,
-    StreamMode, StreamRecord, StreamState,
+    ListedSegment, SegmentFiles, StagedFile, Staging, StoredStream, StreamChange, StreamMode,
+    StreamRecord, StreamState,
 };
 use crate::write::{proto_time, CommitGroups, TableWriter, WriteDisposition, WrittenFiles};
 use arrow::array::RecordBatch;
@@ -617,10 +617,14 @@ impl Streams {
         stream: WriteStreamId,
         flushed: Option<RowOffset>,
     ) -> Result<Vec<ListedSegment>, EngineError> {
-        select_segments(self.staging.segments(stream).await?, flushed).map_err(|segment| {
-            warn!(%stream, segment = segment.name, "A write stream's segments overlap.");
-            EngineError::stream(name, StreamProblem::ChangedElsewhere)
-        })
+        self.staging
+            .segments(stream)
+            .await?
+            .select(flushed)
+            .map_err(|segment| {
+                warn!(%stream, segment = segment.name, "A write stream's segments overlap.");
+                EngineError::stream(name, StreamProblem::ChangedElsewhere)
+            })
     }
 
     /// What `segment` of the stream holds. A segment listed and then gone was deleted with its

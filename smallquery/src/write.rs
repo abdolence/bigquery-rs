@@ -43,7 +43,7 @@ pub(crate) struct Writes {
     /// Set by a test so that the next `AppendRows` response is never sent and its connection
     /// ends, as when the network drops it after the request was handled.
     #[cfg(test)]
-    lose_response: std::sync::atomic::AtomicBool,
+    pub(crate) lose_response: std::sync::atomic::AtomicBool,
 }
 
 /// What an append requires of the table it lands in.
@@ -140,7 +140,7 @@ impl Writes {
     ) -> Result<storage::FinalizeWriteStreamResponse, EngineError> {
         let rows = self.streams.finalize(&name.parse()?).await?;
         Ok(storage::FinalizeWriteStreamResponse {
-            row_count: rows.into(),
+            row_count: rows.as_i64(),
         })
     }
 
@@ -160,7 +160,7 @@ impl Writes {
             .flush(&request.write_stream.parse()?, RowOffset::try_from(offset)?)
             .await?;
         Ok(storage::FlushRowsResponse {
-            offset: flushed.into(),
+            offset: flushed.as_i64(),
         })
     }
 
@@ -230,25 +230,6 @@ impl Writes {
     pub(crate) fn groups(&self) -> &Arc<CommitGroups> {
         &self.groups
     }
-
-    #[cfg(test)]
-    pub(crate) fn lose_next_response(&self) {
-        self.lose_response
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Whether the next response is still to be lost.
-    #[cfg(test)]
-    pub(crate) fn loses_a_response(&self) -> bool {
-        self.lose_response.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Whether the response at hand is the one to lose; it is lost once.
-    #[cfg(test)]
-    pub(crate) fn take_lost_response(&self) -> bool {
-        self.lose_response
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-    }
 }
 
 /// One `AppendRows` connection: the stream and the writer schema its first request named, which
@@ -276,7 +257,7 @@ impl AppendConnection {
         match outcome {
             Ok(appended) => {
                 response.response = Some(Response::AppendResult(AppendResult {
-                    offset: appended.offset.map(i64::from),
+                    offset: appended.offset.map(RowOffset::as_i64),
                 }));
                 response.updated_schema = appended.updated_schema;
             }
