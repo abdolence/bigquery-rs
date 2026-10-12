@@ -170,19 +170,14 @@ enum ReadBack {
 
 /// What this process saw of other writers of one table.
 ///
-/// A process that commits on top of its own commits builds each one from its cache, while
-/// another process must first load the pointer it created and parse the metadata that pointer
-/// names. The first starts building on each new pointer before the second can, so it wins every
-/// race against the second for as long as it has commits to make, whatever the second's retry
-/// delays. So while another writer of the table was seen within the last
-/// `commit_retry_deadline`, the longest that writer's commit keeps retrying, each commit of this
-/// process first waits a delay drawn between zero and its last attempt's duration, which leaves
-/// the other a window to land in. Nothing here decides a commit's outcome.
+/// A process that commits on top of its own commits builds from its cache, while another must
+/// first load and parse the pointer the first created, so the first wins every race for as
+/// long as it has commits to make. While another writer was seen within the last
+/// `commit_retry_deadline`, each commit therefore first waits a delay drawn up to its last
+/// attempt's duration, leaving the other a window to land in.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Contention {
-    /// When another writer was last seen.
     seen: Instant,
-    /// How long this process's last attempt on the table took.
     attempt: Duration,
 }
 
@@ -190,8 +185,7 @@ pub(super) struct Contention {
 /// loop.
 const MIN_BASE: Duration = Duration::from_millis(10);
 
-/// The longest a commit waits to leave another writer a window, so that one slow attempt does
-/// not slow every later commit of the table by as much.
+/// So that one slow attempt does not slow every later commit of the table by as much.
 const MAX_WAY: Duration = Duration::from_secs(1);
 
 /// How many times a pointer create whose outcome was unknown, and whose object is absent, is
@@ -324,8 +318,7 @@ impl EngineCatalog {
         }
     }
 
-    /// Waits as [`Contention`] says while another writer of the table was seen recently, and
-    /// returns whether it was.
+    /// Returns whether another writer of the table was seen recently.
     async fn make_way(&self, table: &TableRef) -> bool {
         let attempt = {
             let mut contention = self
@@ -350,8 +343,8 @@ impl EngineCatalog {
         true
     }
 
-    /// Notes how long an attempt on the table took, and whether it saw another writer: a
-    /// commit it did not make under the pointer it had cached, or a race it lost.
+    /// An attempt saw another writer when it found a commit it did not make under the pointer
+    /// it had cached, or lost a race.
     fn attempted(&self, table: &TableRef, attempt: Duration, saw_another_writer: bool) {
         let mut contention = self
             .contention
@@ -884,7 +877,6 @@ fn jitter(base: Duration, attempt: u32) -> Duration {
     uniform_up_to(grown.min(ceiling))
 }
 
-/// A delay drawn uniformly between zero and `cap`.
 fn uniform_up_to(cap: Duration) -> Duration {
     let micros = u64::try_from(cap.as_micros()).unwrap_or(u64::MAX);
     Duration::from_micros(rand::random_range(0..=micros))

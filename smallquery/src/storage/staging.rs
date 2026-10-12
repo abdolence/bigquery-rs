@@ -1,20 +1,16 @@
 //! What the root holds of the write streams `CreateWriteStream` makes:
 //!
 //! - the stream record, `_smallquery/streams/<id>.json`, written before the stream is
-//!   reported: its type, its table and the engine that created it;
-//! - the segments of a pending or buffered stream,
-//!   `_smallquery/streams/<id>/seg-<first>-<last>-<uuid>.json`: one acknowledged request each,
-//!   offsets `first` to `last`, with the data files it staged. A segment is written before its
-//!   request is acknowledged and never rewritten;
-//! - the table properties `smallquery.stream.<id>.state`, `.flushed` and `.commit_time` of a
-//!   pending or buffered stream, from the commit that registers the stream to the one that
-//!   drops it. Every commit of the stream's rows changes them, and only from the state it
-//!   expects, so the table's pointer chain fences each engine's commits against every other's.
+//!   reported;
+//! - a pending or buffered stream's segments,
+//!   `_smallquery/streams/<id>/seg-<first>-<last>-<uuid>.json`, one per acknowledged request,
+//!   written before the acknowledgement and never rewritten;
+//! - a pending or buffered stream's table properties `smallquery.stream.<id>.state`,
+//!   `.flushed` and `.commit_time`, from the commit that registers the stream to the one that
+//!   drops it.
 //!
 //! A staged data file lives in the table's `data/` directory under its final name, and no
-//! snapshot references it until a flush or a batch commit adds it. Its rows' offsets are
-//! recorded with it, so that a flush can tell which of its rows are at or below the flushed
-//! offset.
+//! snapshot references it until a flush or a batch commit adds it.
 
 use super::{Backend, ListedKind, ObjectPath};
 use crate::error::{EngineError, StreamProblem};
@@ -31,19 +27,17 @@ use std::time::SystemTime;
 use tracing::warn;
 use uuid::Uuid;
 
-/// A stream's record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StreamRecord {
     pub mode: StreamMode,
     pub table: TableRef,
-    /// The table identity the stream writes into: a table dropped and created again under the
-    /// name is another table, which the stream's rows never reach.
+    /// A table dropped and created again under the name is another table, which the stream's
+    /// rows never reach.
     pub table_uuid: Uuid,
     pub created_at_ms: i64,
     pub creator: NodeId,
 }
 
-/// The type of a created stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StreamMode {
@@ -52,7 +46,6 @@ pub(crate) enum StreamMode {
     Buffered,
 }
 
-/// The table properties a pending or buffered stream's state is kept in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamProperty {
     State,
@@ -71,12 +64,10 @@ impl StreamProperty {
     }
 }
 
-/// Where a pending or buffered stream is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamState {
     Open,
-    /// A pending stream that takes no more rows; a buffered stream's finalize stays with its
-    /// creator.
+    /// Pending streams only; a buffered stream's finalize stays with its creator.
     Finalized,
     Committed,
 }
@@ -91,8 +82,6 @@ impl StreamState {
     }
 }
 
-/// # Errors
-/// [`EngineError::Internal`] for a value the engine never writes.
 impl std::str::FromStr for StreamState {
     type Err = EngineError;
 
@@ -108,23 +97,16 @@ impl std::str::FromStr for StreamState {
     }
 }
 
-/// What a table holds of a pending or buffered stream, from the commit that registers it at its
-/// creation to the one that drops it: a stream whose state is absent is gone, and no commit
-/// takes its rows.
+/// What a table holds of a pending or buffered stream: a stream whose state is absent is gone,
+/// and no commit takes its rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StoredStream {
     pub state: StreamState,
-    /// A buffered stream's last flushed offset.
     pub flushed: Option<RowOffset>,
-    /// When a pending stream's rows were committed, in milliseconds since the Unix epoch.
     pub committed_at_ms: Option<i64>,
 }
 
 impl StoredStream {
-    /// What `properties` hold of `stream`.
-    ///
-    /// # Errors
-    /// [`EngineError::Internal`] for a value the engine never writes.
     pub(crate) fn read(
         stream: WriteStreamId,
         properties: &HashMap<String, String>,
@@ -148,7 +130,6 @@ impl StoredStream {
         }))
     }
 
-    /// The properties that hold this state of `stream`.
     pub(crate) fn properties(self, stream: WriteStreamId) -> Vec<(String, String)> {
         let mut properties = vec![(
             StreamProperty::State.key(stream),
@@ -165,7 +146,6 @@ impl StoredStream {
         properties
     }
 
-    /// The keys of every property a table may hold of `stream`.
     pub(crate) fn keys(stream: WriteStreamId) -> [String; 3] {
         [
             StreamProperty::State.key(stream),
@@ -175,21 +155,18 @@ impl StoredStream {
     }
 }
 
-/// A change of a stream's state, made by a commit only on the state it starts from: whatever
-/// engine commits it, the table then holds exactly what the stream has committed.
+/// A change of a stream's state, made by a commit only on the state it starts from, so that
+/// whichever engine commits it, the table holds exactly what the stream has committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamChange {
-    /// A new pending or buffered stream: until it is registered, and once it is dropped, no
-    /// commit takes its rows.
     Register(WriteStreamId),
-    /// A pending stream takes no more rows.
     Finalize(WriteStreamId),
-    /// A batch commit: the pending stream goes from finalized to committed at `at_ms`, which
-    /// `GetWriteStream` reports on any engine, so that a client that sends a landed batch commit
-    /// again can tell when it landed.
-    Commit { stream: WriteStreamId, at_ms: i64 },
-    /// A flush: the buffered stream's last flushed offset goes from `from`, `None` before its
-    /// first flush, to `to`.
+    /// `at_ms` is what `GetWriteStream` reports on any engine, so that a client that sends a
+    /// landed batch commit again can tell when it landed.
+    Commit {
+        stream: WriteStreamId,
+        at_ms: i64,
+    },
     Flush {
         stream: WriteStreamId,
         from: Option<RowOffset>,
@@ -207,10 +184,6 @@ impl StreamChange {
         }
     }
 
-    /// The stream's state after the change, given the state `current` it finds.
-    ///
-    /// # Errors
-    /// Why the stream refuses the change when `current` is not the state it starts from.
     pub(crate) fn apply(
         self,
         current: Option<StoredStream>,
@@ -252,20 +225,15 @@ impl StreamChange {
     }
 }
 
-/// A segment as a listing names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ListedSegment {
     pub first: RowOffset,
-    /// The offset of the segment's last row.
     pub last: RowOffset,
-    /// The object's name.
     pub name: String,
     pub created: SystemTime,
 }
 
 impl ListedSegment {
-    /// The segment an object named `name` holds, for names [`Staging::write_segment`] gives;
-    /// anything else in the directory is no segment.
     fn parse(name: &str, created: SystemTime) -> Option<Self> {
         let rest = name.strip_prefix("seg-")?.strip_suffix(".json")?;
         let mut parts = rest.splitn(3, '-');
@@ -278,20 +246,18 @@ impl ListedSegment {
     }
 }
 
-/// A stream's segments, as a listing names them, in no order.
+/// A stream's segments, in no order.
 #[derive(Debug)]
 pub(crate) struct Segments(Vec<ListedSegment>);
 
 impl Segments {
-    /// The segments a commit takes of everything a stream staged, in offset order: none at or
-    /// below `flushed`, whose rows a flush committed through the lower half of a split, and one
-    /// per range, since a request sent again, or the halves of a split whose original survived,
-    /// stage the same rows twice. Of segments sharing a first offset the longest is taken, then
-    /// the one the backend created first.
+    /// The segments a commit takes, in offset order: none at or below `flushed`, and one per
+    /// range, since a request sent again, or the halves of a split whose original survived,
+    /// stage the same rows twice.
     ///
     /// # Errors
-    /// The segment that leaves a gap after the ones taken, or overlaps one without being
-    /// covered by it: no order of the engine's writes produces either.
+    /// The segment that leaves a gap or overlaps without being covered: no order of the
+    /// engine's writes produces either.
     pub(crate) fn select(
         self,
         flushed: Option<RowOffset>,
@@ -329,28 +295,22 @@ impl IntoIterator for Segments {
     }
 }
 
-/// What a segment holds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SegmentFiles {
     pub files: Vec<StagedFile>,
 }
 
-/// A data file of staged rows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StagedFile {
-    /// The file's Iceberg location.
     pub path: String,
-    /// The offsets of the file's rows, in the file's row order.
+    /// In the file's row order.
     pub rows: OffsetRanges,
-    /// The schema the file was written with.
     pub schema_id: i32,
-    /// The Iceberg `DataFile`, in Iceberg's own JSON form.
     pub data_file: Box<RawValue>,
 }
 
 impl StagedFile {
-    /// `file`, written with `metadata`'s current schema and default partition spec, whose rows
-    /// have the offsets `rows`.
+    /// `file` must be written with `metadata`'s current schema and default partition spec.
     pub(crate) fn new(
         file: DataFile,
         rows: OffsetRanges,
@@ -370,8 +330,7 @@ impl StagedFile {
         })
     }
 
-    /// The Iceberg `DataFile`, read with the schema it was written with from `metadata`, the
-    /// metadata of the table identity it was written for.
+    /// `metadata` is the metadata of the table identity the file was written for.
     pub(crate) fn data_file(&self, metadata: &TableMetadata) -> Result<DataFile, EngineError> {
         let schema =
             metadata
@@ -392,15 +351,13 @@ impl StagedFile {
     }
 }
 
-/// Offsets in ascending order, as runs of consecutive ones. A file of an unpartitioned table
-/// holds one run; a file of one partition holds a run for each stretch of a request's rows
-/// that fell into that partition.
+/// Offsets in ascending order, as runs of consecutive ones. A file of one partition holds a run
+/// for each stretch of a request's rows that fell into that partition.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct OffsetRanges(Vec<Range<RowOffset>>);
 
 impl OffsetRanges {
-    /// `offsets`, which ascend.
     pub(crate) fn from_ascending(offsets: impl IntoIterator<Item = RowOffset>) -> Self {
         let mut ranges: Vec<Range<RowOffset>> = Vec::new();
         for offset in offsets {
@@ -412,7 +369,6 @@ impl OffsetRanges {
         Self(ranges)
     }
 
-    /// The number of offsets.
     pub(crate) fn rows(&self) -> u64 {
         self.0
             .iter()
@@ -420,7 +376,6 @@ impl OffsetRanges {
             .sum()
     }
 
-    /// The number of offsets below `end`; they come first.
     pub(crate) fn rows_before(&self, end: RowOffset) -> u64 {
         self.0
             .iter()
@@ -428,7 +383,6 @@ impl OffsetRanges {
             .sum()
     }
 
-    /// The first `rows` offsets, and the rest.
     pub(crate) fn split(self, rows: u64) -> (Self, Self) {
         let mut head = Vec::new();
         let mut tail = Vec::new();
@@ -451,7 +405,6 @@ impl OffsetRanges {
     }
 }
 
-/// The write streams of one root on its storage.
 #[derive(Debug, Clone)]
 pub(crate) struct Staging {
     backend: Backend,
@@ -474,7 +427,7 @@ impl Staging {
         Self::directory().join(stream)
     }
 
-    /// Writes the stream's record; durable once this returns.
+    /// Durable once this returns.
     pub(crate) async fn write_record(
         &self,
         stream: WriteStreamId,
@@ -483,7 +436,6 @@ impl Staging {
         self.put(&Self::record(stream), record).await
     }
 
-    /// The stream's record, or `None` when the stream has none.
     pub(crate) async fn read_record(
         &self,
         stream: WriteStreamId,
@@ -492,8 +444,6 @@ impl Staging {
     }
 
     /// Every stream with a record, with the time the backend reports the record was created.
-    /// Other files in the directory, such as the staging file of a write that never finished,
-    /// are not streams.
     pub(crate) async fn records(&self) -> Result<Vec<(WriteStreamId, SystemTime)>, EngineError> {
         Ok(self
             .backend
@@ -509,8 +459,7 @@ impl Staging {
             .collect())
     }
 
-    /// Writes one acknowledged request of the stream, offsets `first` to `last`, as a new
-    /// segment; durable once this returns.
+    /// Durable once this returns.
     pub(crate) async fn write_segment(
         &self,
         stream: WriteStreamId,
@@ -523,7 +472,6 @@ impl Staging {
             .await
     }
 
-    /// The stream's segments.
     pub(crate) async fn segments(&self, stream: WriteStreamId) -> Result<Segments, EngineError> {
         Ok(Segments(
             self.backend
@@ -538,7 +486,6 @@ impl Staging {
         ))
     }
 
-    /// What `segment` of the stream holds, `None` once it is deleted.
     pub(crate) async fn read_segment(
         &self,
         stream: WriteStreamId,
@@ -548,8 +495,7 @@ impl Staging {
             .await
     }
 
-    /// Deletes `segment` of the stream, logging a failure: its callers delete a segment that no
-    /// commit takes any more.
+    /// Logs a failure: callers delete only a segment no commit takes any more.
     pub(crate) async fn delete_segment(&self, stream: WriteStreamId, segment: &ListedSegment) {
         let path = Self::segments_directory(stream).join(&segment.name);
         if let Err(err) = self.backend.delete(&path).await {
@@ -557,7 +503,6 @@ impl Staging {
         }
     }
 
-    /// Deletes the stream's segments, then its record.
     pub(crate) async fn delete_stream(&self, stream: WriteStreamId) -> Result<(), EngineError> {
         self.backend
             .delete_dir(&Self::segments_directory(stream))
@@ -565,8 +510,8 @@ impl Staging {
         Ok(self.backend.delete(&Self::record(stream)).await?)
     }
 
-    /// Deletes the data file at an Iceberg location, logging a failure: its callers delete
-    /// files no snapshot references, which the orphan sweep removes otherwise.
+    /// Logs a failure: callers delete only files no snapshot references, which the orphan
+    /// sweep removes otherwise.
     pub(crate) async fn delete_data_file(&self, location: &str) {
         let deleted = match self.backend.object_path(location) {
             Ok(path) => self.backend.delete(&path).await,

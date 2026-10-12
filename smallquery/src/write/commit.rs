@@ -12,10 +12,9 @@
 //! failed group fails every member with its error: `Aborted` past the retry deadline, which the
 //! client retries, or an unknown outcome, which nobody retries.
 //!
-//! A change of a write stream's state is a member too, with the files a flush or a batch commit
-//! adds: the change is checked on the table the commit loaded, after the changes of the members
-//! before it, and lands in the same commit as the files, or the member is refused and its files
-//! left out.
+//! A change of a write stream's state is a member too: it is checked on the table the commit
+//! loaded, after the members before it, and lands in the same commit as its files, or the
+//! member is refused and its files left out.
 
 use crate::catalog::{Change, EngineCatalog, EngineCommit};
 use crate::error::{EngineError, Resource, StreamProblem};
@@ -49,7 +48,6 @@ enum Verdict {
     /// The member writes only into an empty table, and the table or an earlier member of the
     /// group holds rows.
     NotEmpty,
-    /// A write stream of the member is not in the committed state its change starts from.
     Refused {
         stream: WriteStreamId,
         problem: StreamProblem,
@@ -137,12 +135,7 @@ impl CommitGroups {
         self.join(table, files, disposition, Vec::new()).await
     }
 
-    /// Lands `files` in `table` together with the changes `streams` make of their write
-    /// streams' committed state, all of it or none.
-    ///
-    /// # Errors
-    /// [`EngineError::WriteStream`] for a stream whose committed state in the table is not the
-    /// one its change starts from, and the errors of [`CommitGroups::append`].
+    /// Lands `files` and the stream changes together, or neither.
     pub(crate) async fn commit_streams(
         self: &Arc<Self>,
         table: &TableRef,
@@ -337,8 +330,6 @@ impl CommitGroups {
 }
 
 impl Member {
-    /// The states the member's stream changes leave, given the table's `stored` properties and
-    /// the states `changed` by earlier members of its group.
     fn stream_states(
         &self,
         stored: &HashMap<String, String>,

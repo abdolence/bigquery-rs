@@ -33,15 +33,13 @@ use storage::write_stream::Type;
 use tonic::Code;
 use tracing::debug;
 
-/// The write side of one engine: the catalog, every table's commit group and the created
-/// write streams.
 #[derive(Debug)]
 pub(crate) struct Writes {
     catalog: Arc<EngineCatalog>,
     groups: Arc<CommitGroups>,
     streams: Arc<Streams>,
-    /// Set by a test so that the next `AppendRows` response is never sent and its connection
-    /// ends, as when the network drops it after the request was handled.
+    /// The next `AppendRows` response is never sent and its connection ends, as when the
+    /// network drops it after the request was handled.
     #[cfg(test)]
     pub(crate) lose_response: std::sync::atomic::AtomicBool,
 }
@@ -71,10 +69,6 @@ impl Writes {
         }
     }
 
-    /// The write stream `name` names, as `GetWriteStream` reports it.
-    ///
-    /// # Errors
-    /// [`EngineError::NotFound`] for a missing table or stream.
     pub(crate) async fn stream(&self, name: &str) -> Result<storage::WriteStream, EngineError> {
         self.describe(&name.parse()?).await
     }
@@ -110,12 +104,6 @@ impl Writes {
         })
     }
 
-    /// Creates the stream `CreateWriteStream` asks for, and reports it as `GetWriteStream`
-    /// does.
-    ///
-    /// # Errors
-    /// [`EngineError::NotFound`] for a missing table, [`EngineError::Invalid`] for a type that
-    /// is not committed, pending or buffered.
     pub(crate) async fn create_stream(
         &self,
         request: &storage::CreateWriteStreamRequest,
@@ -130,10 +118,6 @@ impl Writes {
         self.describe(&name).await
     }
 
-    /// Finalizes the stream `name` names and reports its row count.
-    ///
-    /// # Errors
-    /// As [`Streams::finalize`], and [`EngineError::WriteStream`] for the default stream.
     pub(crate) async fn finalize(
         &self,
         name: &str,
@@ -144,10 +128,6 @@ impl Writes {
         })
     }
 
-    /// Flushes a buffered stream to the offset the request names.
-    ///
-    /// # Errors
-    /// As [`Streams::flush`], and [`EngineError::Invalid`] for a request without an offset.
     pub(crate) async fn flush(
         &self,
         request: &storage::FlushRowsRequest,
@@ -164,10 +144,6 @@ impl Writes {
         })
     }
 
-    /// Commits the pending streams the request names in one commit.
-    ///
-    /// # Errors
-    /// As [`Streams::batch_commit`].
     pub(crate) async fn batch_commit(
         &self,
         request: &storage::BatchCommitWriteStreamsRequest,
@@ -178,15 +154,10 @@ impl Writes {
             .await
     }
 
-    /// Starts dropping the write streams on the root past their TTL.
     pub(crate) fn start_stream_sweep(&self) {
         self.streams.sweep_soon();
     }
 
-    /// Drops the write streams on the root past their TTL, after the sweep running, if any.
-    ///
-    /// # Errors
-    /// As [`Streams::sweep`].
     #[cfg(test)]
     pub(crate) async fn sweep_streams(&self) -> Result<(), EngineError> {
         self.streams.sweep().await
@@ -304,7 +275,6 @@ impl AppendConnection {
         response
     }
 
-    /// The request's rows written and landed, or staged on a pending or buffered stream.
     async fn try_append(
         &mut self,
         request: storage::AppendRowsRequest,
@@ -418,11 +388,9 @@ impl AppendConnection {
     }
 }
 
-/// A request handled.
 struct Appended {
-    /// The offset of its rows, on a stream with offsets.
     offset: Option<RowOffset>,
-    /// The table schema to report, when it changed since the connection last reported one.
+    /// Only when it changed since the connection last reported one.
     updated_schema: Option<storage::TableSchema>,
 }
 
@@ -466,8 +434,7 @@ impl TryFrom<&storage::AppendRowsRequest> for MissingValues {
 }
 
 impl EngineError {
-    /// The `StorageError` code the Storage API reports this error with, which the client
-    /// branches on.
+    /// The client branches on this code.
     fn storage_code(&self) -> Option<StorageErrorCode> {
         match self {
             EngineError::NotFound {
@@ -481,7 +448,6 @@ impl EngineError {
         }
     }
 
-    /// This error of a write stream as the `StorageError` a batch commit reports for it.
     pub(crate) fn stream_error(&self) -> Option<storage::StorageError> {
         let (EngineError::NotFound {
             what: Resource::WriteStream(name),
@@ -500,10 +466,8 @@ impl EngineError {
         ))
     }
 
-    /// This error as an in-band `AppendRows` status about `stream`, with the `StorageError`
-    /// the client branches on. A commit whose outcome is unknown answers `Internal` on an
-    /// `at_least_once` stream, which the client sends again, and `Unknown` on a stream with
-    /// offsets, which it does not.
+    /// A commit whose outcome is unknown answers `Internal` on an `at_least_once` stream,
+    /// which the client sends again, and `Unknown` on a stream with offsets, which it does not.
     fn in_band(&self, stream: &str, at_least_once: bool) -> rpc::Status {
         let code = match self {
             EngineError::CommitOutcomeUnknown { .. } if at_least_once => Code::Internal,
@@ -531,7 +495,6 @@ impl StreamProblem {
     }
 }
 
-/// A `StorageError` of `code` about `entity`.
 fn storage_error(code: StorageErrorCode, entity: &str, message: String) -> storage::StorageError {
     storage::StorageError {
         code: code.into(),
@@ -562,7 +525,7 @@ fn in_band(
     }
 }
 
-/// `ms` milliseconds after the Unix epoch, as the APIs carry a time; `None` before the epoch.
+/// `None` before the epoch.
 pub(crate) fn proto_time(ms: i64) -> Option<gcloud_sdk::prost_types::Timestamp> {
     u64::try_from(ms)
         .ok()

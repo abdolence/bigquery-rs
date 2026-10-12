@@ -1,26 +1,14 @@
-//! The write streams `CreateWriteStream` makes, each with offsets, so that a request sent again
-//! lands once:
+//! The write streams `CreateWriteStream` makes. Only a stream's creator serves its appends,
+//! flushes and finalize, since only it knows the next offset; a batch commit and
+//! `GetWriteStream` read storage and the table, so any engine on the root serves them.
 //!
-//! - a committed stream commits each request as it comes, through the table's commit group;
-//! - a pending stream stages each request as a segment and commits every segment at
-//!   `BatchCommitWriteStreams`, together with the other streams named there, in one commit;
-//! - a buffered stream stages each request as a segment and commits the segments up to the
-//!   offset of each `FlushRows`.
+//! A pending or buffered stream's state lives in its table's properties, and every commit of
+//! its rows changes that state only from the state it expects. The pointer chain therefore
+//! fences each engine's commits of the stream against every other's, and a sweep's drop lands
+//! before anything of the stream is deleted.
 //!
-//! Only the engine that created a stream serves its appends, flushes and finalize, since only it
-//! knows the stream's next offset. A batch commit and `GetWriteStream` read the stream from
-//! storage and from its table, so any engine on the root serves them.
-//!
-//! A pending or buffered stream's state lives in its table's properties, from the commit that
-//! registers the stream to the commit that drops it, and every commit of its rows changes that
-//! state only from the state it expects. The pointer chain therefore fences every engine's
-//! commits of the stream against every other's, and the drop of an expired stream, by whichever
-//! engine sweeps the root, lands before anything of the stream is deleted: the creator's next
-//! commit of the stream finds no state and is refused.
-//!
-//! Each stream has a lock in its creator, held across every change of its state and taken before
-//! the table's commit lock. A commit whose outcome is unknown stops the stream: whatever comes
-//! next is refused rather than risk a second copy.
+//! A stream's lock is taken before the table's commit lock. A commit whose outcome is unknown
+//! stops the stream: whatever comes next is refused rather than risk a second copy.
 
 use crate::catalog::{now_ms, Change, EngineCatalog, EngineCommit, LoadedTable};
 use crate::error::{EngineError, Resource, StreamProblem};
@@ -40,7 +28,6 @@ use storage::write_stream::Type;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{debug, warn};
 
-/// The created write streams of one engine.
 pub(crate) struct Streams {
     catalog: Arc<EngineCatalog>,
     groups: Arc<CommitGroups>,
@@ -48,7 +35,7 @@ pub(crate) struct Streams {
     ttl: Duration,
     node: NodeId,
     created: Mutex<HashMap<WriteStreamId, Arc<tokio::sync::Mutex<Stream>>>>,
-    /// When the last sweep started, held while a sweep runs.
+    /// When the last sweep started; held while a sweep runs.
     sweeping: Arc<tokio::sync::Mutex<Option<Instant>>>,
 }
 
@@ -60,31 +47,25 @@ impl std::fmt::Debug for Streams {
     }
 }
 
-/// A stream this engine created.
 struct Stream {
     id: WriteStreamId,
     record: StreamRecord,
-    /// When this engine last started writing the record. The backend's creation time of the
-    /// record, which a sweep measures the TTL from, is no earlier.
+    /// No later than the backend's creation time of the record, which a sweep measures the
+    /// TTL from.
     written: Instant,
-    /// The offset the next append takes.
     next: RowOffset,
     finalized: bool,
-    /// A buffered stream's last flushed offset.
     flushed: Option<RowOffset>,
-    /// Set once a commit of the stream's rows ended with an unknown outcome.
+    /// A commit of the stream's rows ended with an unknown outcome.
     failed: bool,
 }
 
-/// What `GetWriteStream` reports of a created stream.
 pub(crate) struct StreamDescription {
     pub kind: Type,
     pub created_at_ms: i64,
     pub committed_at_ms: Option<i64>,
 }
 
-/// # Errors
-/// [`EngineError::Invalid`] for a type that is not committed, pending or buffered.
 impl TryFrom<Type> for StreamMode {
     type Error = EngineError;
 
@@ -112,7 +93,6 @@ impl From<StreamMode> for Type {
 }
 
 impl StreamRecord {
-    /// Refuses a table that is not the identity the stream writes into.
     fn check_identity(&self, loaded: &LoadedTable) -> Result<(), EngineError> {
         if loaded.metadata().uuid() == self.table_uuid {
             Ok(())
@@ -125,7 +105,6 @@ impl StreamRecord {
 }
 
 impl WriteStreamName {
-    /// The ID of the created stream this names, which `request` applies to.
     fn created(&self, request: &'static str) -> Result<WriteStreamId, EngineError> {
         match self.stream {
             StreamId::Created(id) => Ok(id),
@@ -148,7 +127,6 @@ impl Stream {
         }
     }
 
-    /// Refuses an append at `offset` the stream cannot take.
     fn check_append(&self, offset: RowOffset) -> Result<(), EngineError> {
         let problem = if self.failed {
             StreamProblem::OutcomeUnknown
@@ -170,8 +148,6 @@ impl Stream {
         Err(EngineError::stream(&self.name(), problem))
     }
 
-    /// Refuses an append to a pending or buffered stream that `loaded` no longer holds open,
-    /// whose rows no commit would take.
     fn check_open(&self, loaded: &LoadedTable) -> Result<(), EngineError> {
         if self.record.mode == StreamMode::Committed {
             return Ok(());
@@ -202,12 +178,6 @@ impl Streams {
         }
     }
 
-    /// Creates a stream of `kind` on `table`, whose record is on storage, and a pending or
-    /// buffered stream's state in its table, when this returns.
-    ///
-    /// # Errors
-    /// [`EngineError::NotFound`] for a missing table, [`EngineError::Invalid`] for a type
-    /// that is not committed, pending or buffered.
     pub(crate) async fn create(
         &self,
         table: &TableRef,
@@ -251,10 +221,6 @@ impl Streams {
         Ok(name)
     }
 
-    /// What `GetWriteStream` reports of the stream.
-    ///
-    /// # Errors
-    /// [`EngineError::NotFound`] for a stream that does not exist.
     pub(crate) async fn describe(
         &self,
         name: &WriteStreamName,
@@ -273,14 +239,6 @@ impl Streams {
         })
     }
 
-    /// Appends `batch`, rows of `loaded` in its engine types, at `offset`, and returns the
-    /// offset. A committed stream's rows are visible once this returns; a pending or buffered
-    /// stream's are staged as a segment.
-    ///
-    /// # Errors
-    /// [`EngineError::WriteStream`] for an offset or a state the stream refuses,
-    /// [`EngineError::NotFound`] for a stream that does not exist or a table that is not the
-    /// one the stream was created on, and the errors of the write and the commit.
     pub(crate) async fn append(
         &self,
         name: &WriteStreamName,
@@ -323,13 +281,8 @@ impl Streams {
         Ok(offset)
     }
 
-    /// Finalizes the stream, which then takes no more rows, and returns the offset after its
-    /// last row. A pending stream is finalized in its table, where a batch commit on any engine
-    /// finds it; the others in their creator only. Finalizing a finalized stream changes nothing.
-    ///
-    /// # Errors
-    /// [`EngineError::NotFound`] for a stream that does not exist or whose table is not the
-    /// identity it writes into, and the errors of the pending stream's commit.
+    /// A pending stream is finalized in its table, where a batch commit on any engine finds
+    /// it; the others in their creator only.
     pub(crate) async fn finalize(&self, name: &WriteStreamName) -> Result<RowOffset, EngineError> {
         let mut stream = self.lock(name, "FinalizeWriteStream").await?;
         if !stream.finalized && stream.record.mode == StreamMode::Pending {
@@ -353,17 +306,9 @@ impl Streams {
         Ok(stream.next)
     }
 
-    /// Commits every row of the buffered stream up to and including `offset`, and returns
-    /// `offset`. A flush at an offset already flushed commits nothing.
-    ///
-    /// The segment with rows on both sides of `offset` is first written again as two segments,
-    /// one per side, both before the commit; the commit then takes the lower one, and the
-    /// original goes once the commit has landed.
-    ///
-    /// # Errors
-    /// [`EngineError::WriteStream`] for a stream that is not buffered, whose last commit's
-    /// outcome is unknown or that was dropped, [`EngineError::OutOfRange`] for an offset past
-    /// the stream's rows, and the errors of the split and the commit.
+    /// The segment with rows on both sides of `offset` is written again as two segments
+    /// before the commit, which takes the lower one; the original goes only once the commit
+    /// has landed.
     pub(crate) async fn flush(
         &self,
         name: &WriteStreamName,
@@ -444,10 +389,9 @@ impl Streams {
         Ok(offset)
     }
 
-    /// Writes the record of a stream whose rows a commit just took again, once an eighth of the
-    /// TTL has passed since it was last written. A sweep drops a stream whose record the backend
-    /// created a TTL ago, so a committed or buffered stream lives the TTL from its last commit,
-    /// and a pending stream, whose rows commit once, the TTL from its creation.
+    /// A sweep drops a stream whose record the backend created a TTL ago, so rewriting the
+    /// record after a commit makes a committed or buffered stream live the TTL from its last
+    /// commit; a pending stream lives it from its creation.
     async fn touch(&self, stream: &mut Stream) {
         if stream.written.elapsed() < self.ttl / 8 {
             return;
@@ -461,10 +405,8 @@ impl Streams {
         }
     }
 
-    /// Writes `segment`, whose rows straddle `offset`, again as two segments: its rows up to
-    /// and including `offset`, and the rest. A file with rows on both sides is rewritten as
-    /// two; any other goes to its side as it is. Returns the files of the lower segment and the
-    /// paths of the files rewritten, which no segment names once the original is gone.
+    /// Returns the lower segment's files and the paths of the rewritten files, which no segment
+    /// names once the original is gone.
     async fn split(
         &self,
         stream: WriteStreamId,
@@ -501,13 +443,8 @@ impl Streams {
         Ok((lower.files, rewritten))
     }
 
-    /// Commits every named pending stream of `table` in one commit, or none of them: a stream
-    /// that is not a finalized, uncommitted pending stream of the table is reported in the
-    /// response's `stream_errors`, and then nothing is committed.
-    ///
-    /// # Errors
-    /// [`EngineError::Invalid`] for a name that is no write stream's, and the errors of the
-    /// commit.
+    /// Commits every named stream or none: one that is not a finalized, uncommitted pending
+    /// stream of `table` goes to `stream_errors`, and nothing is committed.
     pub(crate) async fn batch_commit(
         &self,
         table: &TableRef,
@@ -574,7 +511,6 @@ impl Streams {
         }
     }
 
-    /// The pending stream `name` names, which a batch commit takes.
     async fn pending(
         &self,
         name: &WriteStreamName,
@@ -594,7 +530,6 @@ impl Streams {
         }
     }
 
-    /// A batch commit's answer when it commits nothing because of `refused`.
     fn refused(refused: &[EngineError]) -> storage::BatchCommitWriteStreamsResponse {
         storage::BatchCommitWriteStreamsResponse {
             commit_time: None,
@@ -605,12 +540,6 @@ impl Streams {
         }
     }
 
-    /// The segments a commit of the stream takes, in offset order: those above `flushed`, one
-    /// per range.
-    ///
-    /// # Errors
-    /// [`EngineError::WriteStream`] when the segments do not line up, which no order of the
-    /// engine's writes produces, and the storage errors of the listing.
     async fn select(
         &self,
         name: &WriteStreamName,
@@ -627,8 +556,7 @@ impl Streams {
             })
     }
 
-    /// What `segment` of the stream holds. A segment listed and then gone was deleted with its
-    /// stream, which a sweep dropped meanwhile.
+    /// A segment listed and then gone was deleted by a sweep that dropped its stream.
     async fn staged(
         &self,
         name: &WriteStreamName,
@@ -641,9 +569,8 @@ impl Streams {
             .ok_or_else(|| EngineError::stream(name, StreamProblem::Expired))
     }
 
-    /// Starts a sweep on a task of its own, unless one is running or the last one started less
-    /// than an eighth of the TTL ago, so that no request waits for a sweep and a busy engine
-    /// lists the root's streams a few times per TTL only.
+    /// No request waits for a sweep, and a busy engine lists the root's streams only a few
+    /// times per TTL.
     pub(crate) fn sweep_soon(self: &Arc<Self>) {
         let Ok(mut started) = Arc::clone(&self.sweeping).try_lock_owned() else {
             return;
@@ -662,24 +589,14 @@ impl Streams {
         });
     }
 
-    /// Sweeps once the sweep running, if any, has finished.
-    ///
-    /// # Errors
-    /// As [`Streams::sweep_expired`].
     #[cfg(test)]
     pub(crate) async fn sweep(&self) -> Result<(), EngineError> {
         let _running = self.sweeping.lock().await;
         self.sweep_expired().await
     }
 
-    /// Drops every stream whose record the backend created more than the stream TTL ago: its
-    /// state leaves its table first, so that no later commit can take its files, then the files
-    /// no commit took, its segments and its record are deleted. This engine also stops serving
-    /// its own streams past the TTL.
-    ///
-    /// # Errors
-    /// The storage errors of listing the records; a stream that cannot be dropped is logged
-    /// and left for the next sweep.
+    /// An expired stream's state leaves its table before any of its files is deleted, so that
+    /// no later commit can take them.
     async fn sweep_expired(&self) -> Result<(), EngineError> {
         let now = SystemTime::now();
         for (id, created) in self.staging.records().await? {
@@ -707,7 +624,6 @@ impl Streams {
         Ok(())
     }
 
-    /// Deletes the stream `id` from storage, its state in its table first.
     async fn expire(&self, id: WriteStreamId) -> Result<(), EngineError> {
         if let Some(record) = self.staging.read_record(id).await? {
             let committed = self.release(id, &record).await?;
@@ -728,8 +644,6 @@ impl Streams {
         self.staging.delete_stream(id).await
     }
 
-    /// Removes the stream's state from its table, and returns what the state said the stream
-    /// had committed.
     async fn release(
         &self,
         id: WriteStreamId,
@@ -775,7 +689,6 @@ impl Streams {
         }
     }
 
-    /// The stream `name` names, locked, for `request`, which only the stream's creator serves.
     async fn lock(
         &self,
         name: &WriteStreamName,
@@ -802,7 +715,6 @@ impl Streams {
         Err(self.not_served(name, id).await?)
     }
 
-    /// Why this engine does not serve the stream `name` names.
     async fn not_served(
         &self,
         name: &WriteStreamName,
@@ -816,7 +728,6 @@ impl Streams {
         })
     }
 
-    /// The record of the stream `name` names, whose ID is `id`.
     async fn record(
         &self,
         name: &WriteStreamName,
@@ -833,18 +744,15 @@ impl Streams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommittedRows {
     Nothing,
-    /// The rows up to and including the offset.
     Through(RowOffset),
     Everything,
-    /// The table holds no state of the stream: it is gone, is another identity, or another
-    /// sweep removed the state first.
+    /// The table is gone, is another identity, or another sweep removed the state first.
     Unknown,
 }
 
 impl CommittedRows {
-    /// The files of `segments` that no commit took. A file named by a segment whose rows may
-    /// have been committed is kept, so a file is deleted only when nothing could reference it;
-    /// a file kept wrongly is the orphan sweep's.
+    /// A file named by any segment whose rows may have been committed is kept; a file kept
+    /// wrongly is the orphan sweep's.
     fn uncommitted_files(self, segments: &[(ListedSegment, SegmentFiles)]) -> BTreeSet<String> {
         let maybe_committed = |segment: &ListedSegment| match self {
             CommittedRows::Nothing => false,

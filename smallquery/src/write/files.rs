@@ -57,8 +57,7 @@ pub(crate) struct WrittenFiles {
 }
 
 impl WrittenFiles {
-    /// No files, for a commit that changes only a write stream's state in the table identity
-    /// `table_uuid`.
+    /// For a commit that changes only a write stream's state.
     pub(crate) fn none(table_uuid: Uuid) -> Self {
         Self {
             files: Vec::new(),
