@@ -15,6 +15,7 @@ mod commit;
 mod datasets;
 mod hooks;
 mod pointer;
+mod snapshot;
 
 pub(crate) use commit::{Change, EngineCommit};
 pub(crate) use datasets::{DatasetEntry, NewDataset};
@@ -22,6 +23,7 @@ use hooks::CommitHooks;
 pub(crate) use hooks::CommitPoint;
 pub(crate) use pointer::PointerVersion;
 use pointer::{LivePointer, PointerBody, PointerHead, Tombstone};
+pub(crate) use snapshot::SnapshotChange;
 
 use crate::config::EngineConfig;
 use crate::error::{EngineError, Resource};
@@ -44,6 +46,8 @@ pub(crate) struct CatalogSettings {
     pub catalog_cache_ttl: Duration,
     pub commit_retry_deadline: Duration,
     pub default_location: Location,
+    /// The entries one manifest of an engine-built snapshot holds at most; never zero.
+    pub manifest_merge_target_entries: usize,
 }
 
 impl From<&EngineConfig> for CatalogSettings {
@@ -53,6 +57,7 @@ impl From<&EngineConfig> for CatalogSettings {
             catalog_cache_ttl: config.catalog_cache_ttl,
             commit_retry_deadline: config.commit_retry_deadline,
             default_location: config.default_location.clone(),
+            manifest_merge_target_entries: config.maintenance.manifest_merge_target_entries,
         }
     }
 }

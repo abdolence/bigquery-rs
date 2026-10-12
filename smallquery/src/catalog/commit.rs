@@ -16,6 +16,7 @@
 
 use super::hooks::CommitPoint;
 use super::pointer::{LivePointer, PointerBody, PointerHead, PointerVersion, Tombstone};
+use super::snapshot::BuiltSnapshot;
 use super::{now_ms, EngineCatalog, LoadedTable, NameState};
 use crate::error::{EngineError, Resource};
 use crate::ids::TableRef;
@@ -31,6 +32,7 @@ use iceberg::{
 };
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -52,6 +54,25 @@ pub(crate) enum Change {
     Transaction(Transaction),
     /// A change the engine computed from the loaded table.
     Engine(EngineCommit),
+    /// A snapshot the engine built on the loaded table.
+    Snapshot(BuiltSnapshot),
+}
+
+/// What each attempt of a commit applies, built from the table that attempt loaded.
+pub(super) trait AttemptChange {
+    fn for_attempt(
+        &mut self,
+        loaded: &LoadedTable,
+    ) -> impl Future<Output = Result<Change, EngineError>> + Send;
+}
+
+impl<F: FnMut(&LoadedTable) -> Result<Change, EngineError>> AttemptChange for F {
+    fn for_attempt(
+        &mut self,
+        loaded: &LoadedTable,
+    ) -> impl Future<Output = Result<Change, EngineError>> + Send {
+        std::future::ready(self(loaded))
+    }
 }
 
 /// The first pointer of a table identity.
@@ -85,8 +106,12 @@ pub(super) enum Attempted<T> {
 /// Why an attempt did not land.
 #[derive(Debug)]
 pub(super) enum Lost {
-    /// Another commit created the pointer version first, or pruning had freed it.
+    /// Another commit created the pointer version first, and nothing names what the attempt
+    /// wrote.
     Race,
+    /// The attempt created its pointer in a name pruning had freed: the pointer, below the
+    /// oldest live one, names the attempt's metadata until the pruning removes it.
+    Stray,
     /// A requirement does not hold on the loaded table; the iceberg error says which.
     Unmet(String),
 }
@@ -99,6 +124,9 @@ impl Lost {
         let detail = match self {
             Lost::Race => {
                 format!("{table}: a concurrent commit created the next catalog pointer first")
+            }
+            Lost::Stray => {
+                format!("{table}: the commit's catalog pointer went into a name pruning had freed")
             }
             Lost::Unmet(detail) => format!("{table}: {detail}"),
         };
@@ -269,7 +297,17 @@ impl EngineCatalog {
     pub(crate) async fn commit(
         &self,
         table: &TableRef,
-        mut change: impl FnMut(&LoadedTable) -> Result<Change, EngineError>,
+        change: impl FnMut(&LoadedTable) -> Result<Change, EngineError>,
+    ) -> Result<LoadedTable, EngineError> {
+        self.commit_with(table, change).await
+    }
+
+    /// [`EngineCatalog::commit`] for a change whose attempts read or write storage. A snapshot
+    /// an attempt built is deleted again when the attempt loses before anything names it.
+    pub(super) async fn commit_with(
+        &self,
+        table: &TableRef,
+        mut change: impl AttemptChange,
     ) -> Result<LoadedTable, EngineError> {
         let _lock = self.locks.table(table).await;
         let contended = self.make_way(table).await;
@@ -284,15 +322,19 @@ impl EngineCatalog {
             // A retry is likely to find its pointer version taken again, and so is any attempt
             // while another writer is about.
             let recheck = contended || attempt > 1;
-            let attempted = match change(&loaded)? {
-                Change::Engine(commit) => match self.propose(&loaded, commit)? {
-                    Proposed::Metadata(proposal) => {
-                        self.attempt_metadata(table, Base::Live(&loaded.head), *proposal, recheck)
-                            .await?
+            let attempted = match change.for_attempt(&loaded).await? {
+                Change::Engine(commit) => {
+                    self.attempt_engine(table, &loaded, commit, recheck).await?
+                }
+                Change::Snapshot(built) => {
+                    let attempted = self
+                        .attempt_engine(table, &loaded, built.commit, recheck)
+                        .await?;
+                    if let Attempted::Lost(Lost::Race | Lost::Unmet(_)) = attempted {
+                        self.discard(&built.written).await;
                     }
-                    Proposed::Unchanged => Attempted::Landed(loaded),
-                    Proposed::Unmet(detail) => Attempted::Lost(Lost::Unmet(detail)),
-                },
+                    attempted
+                }
                 Change::Transaction(transaction) => {
                     self.attempt_transaction(table, &loaded, transaction, recheck)
                         .await?
@@ -301,7 +343,7 @@ impl EngineCatalog {
             self.attempted(
                 table,
                 started.elapsed(),
-                moved || matches!(attempted, Attempted::Lost(Lost::Race)),
+                moved || matches!(attempted, Attempted::Lost(Lost::Race | Lost::Stray)),
             );
             match attempted {
                 Attempted::Landed(loaded) => return Ok(loaded),
@@ -439,15 +481,7 @@ impl EngineCatalog {
             requirements: commit.take_requirements(),
             updates: commit.take_updates(),
         };
-        let attempted = match self.propose(&loaded, pair)? {
-            Proposed::Metadata(proposal) => {
-                self.attempt_metadata(&table, Base::Live(&loaded.head), *proposal, false)
-                    .await?
-            }
-            Proposed::Unchanged => Attempted::Landed(loaded),
-            Proposed::Unmet(detail) => Attempted::Lost(Lost::Unmet(detail)),
-        };
-        match attempted {
+        match self.attempt_engine(&table, &loaded, pair, false).await? {
             Attempted::Landed(loaded) => Ok(loaded),
             Attempted::Lost(lost) => Err(lost.conflict(&table).into()),
         }
@@ -475,6 +509,23 @@ impl EngineCatalog {
         }
         self.hooks.reach(CommitPoint::Loaded).await;
         Ok(loaded)
+    }
+
+    async fn attempt_engine(
+        &self,
+        table: &TableRef,
+        loaded: &LoadedTable,
+        commit: EngineCommit,
+        recheck: bool,
+    ) -> Result<Attempted<LoadedTable>, EngineError> {
+        Ok(match self.propose(loaded, commit)? {
+            Proposed::Metadata(proposal) => {
+                self.attempt_metadata(table, Base::Live(&loaded.head), *proposal, recheck)
+                    .await?
+            }
+            Proposed::Unchanged => Attempted::Landed(loaded.clone()),
+            Proposed::Unmet(detail) => Attempted::Lost(Lost::Unmet(detail)),
+        })
     }
 
     /// What `commit` makes of the loaded table: its requirements are checked first, also when
@@ -696,7 +747,7 @@ impl EngineCatalog {
                     pointer_version = version.number(),
                     "A commit's pointer went into a name pruning had freed; it is lost.",
                 );
-                Ok(Attempted::Lost(Lost::Race))
+                Ok(Attempted::Lost(Lost::Stray))
             }
         }
     }
@@ -856,7 +907,7 @@ impl EngineCatalog {
 
     /// Deletes the file at an Iceberg location, logging a failure: its callers delete files
     /// that nothing can name any more, which the orphan sweep removes otherwise.
-    async fn delete_location(&self, location: &str) {
+    pub(super) async fn delete_location(&self, location: &str) {
         let deleted = match self.backend.object_path(location) {
             Ok(path) => self.backend.delete(&path).await,
             Err(err) => Err(err),
@@ -1010,21 +1061,10 @@ impl Catalog for AttemptCatalog<'_> {
             requirements: commit.take_requirements(),
             updates: commit.take_updates(),
         };
-        let outcome = match self.catalog.propose(self.loaded, pair) {
-            Ok(Proposed::Metadata(proposal)) => {
-                self.catalog
-                    .attempt_metadata(
-                        self.table,
-                        Base::Live(&self.loaded.head),
-                        *proposal,
-                        self.recheck,
-                    )
-                    .await
-            }
-            Ok(Proposed::Unchanged) => Ok(Attempted::Landed(self.loaded.clone())),
-            Ok(Proposed::Unmet(detail)) => Ok(Attempted::Lost(Lost::Unmet(detail))),
-            Err(err) => Err(err),
-        };
+        let outcome = self
+            .catalog
+            .attempt_engine(self.table, self.loaded, pair, self.recheck)
+            .await;
         let answer = match &outcome {
             Ok(Attempted::Landed(loaded)) => Ok(loaded.table.clone()),
             Ok(Attempted::Lost(lost)) => Err(lost.conflict(self.table)),
