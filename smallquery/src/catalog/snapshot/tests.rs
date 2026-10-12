@@ -10,7 +10,6 @@ use crate::catalog::{now_ms, CommitPoint, LoadedTable};
 use crate::ids::TableRef;
 use crate::testkit::{table_ref, TestEngine, PROJECT};
 use bigquery::*;
-use futures::TryStreamExt;
 use iceberg::spec::{Manifest, ManifestContentType, ManifestStatus, Operation, Summary};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -127,26 +126,19 @@ async fn reload(engine: &TestEngine) -> LoadedTable {
         .expect("the table loads")
 }
 
-/// The file tasks Iceberg's own scan plans for `loaded` at `snapshot_id`.
-async fn planned(loaded: &LoadedTable, snapshot_id: i64) -> BTreeSet<PlannedTask> {
-    loaded
-        .table
-        .scan()
-        .snapshot_id(snapshot_id)
-        .build()
-        .expect("the scan builds")
-        .plan_files()
+/// The file tasks Iceberg's own scan plans for `shop.events` at `snapshot_id`.
+async fn planned(engine: &TestEngine, snapshot_id: i64) -> BTreeSet<PlannedTask> {
+    engine
+        .plan_files(&events(), Some(snapshot_id), None)
         .await
-        .expect("the files plan")
-        .map_ok(|task| PlannedTask {
+        .into_iter()
+        .map(|task| PlannedTask {
             data_file_path: task.data_file_path,
             start: task.start,
             length: task.length,
             record_count: task.record_count,
         })
-        .try_collect()
-        .await
-        .expect("every task plans")
+        .collect()
 }
 
 /// The data manifests of `loaded`'s current snapshot.
@@ -252,7 +244,7 @@ async fn merging_the_manifests_of_200_appends_keeps_every_file_row_and_total() {
         .clone();
     let manifests_before = data_manifests(&before).await;
     assert_eq!(manifests_before.len(), 200);
-    let planned_before = planned(&before, parent.snapshot_id()).await;
+    let planned_before = planned(&engine, parent.snapshot_id()).await;
     let queried_before = count_and_sum(&engine).await;
     assert_eq!(queried_before, (200, Some((0..200).sum::<i64>() * 10)));
 
@@ -282,13 +274,13 @@ async fn merging_the_manifests_of_200_appends_keeps_every_file_row_and_total() {
         "every live entry is kept as Existing with the numbers it had"
     );
     assert_eq!(
-        planned(&after, snapshot.snapshot_id()).await,
+        planned(&engine, snapshot.snapshot_id()).await,
         planned_before
     );
     assert_eq!(totals(snapshot.summary()), totals(parent.summary()));
     assert_eq!(count_and_sum(&engine).await, queried_before);
     assert_eq!(
-        planned(&after, parent.snapshot_id()).await,
+        planned(&engine, parent.snapshot_id()).await,
         planned_before,
         "time travel to the snapshot before the merge plans the same files"
     );
@@ -312,7 +304,7 @@ async fn a_truncate_removes_every_live_file_and_time_travel_still_reads_them() {
         .expect("the appends made a snapshot")
         .clone();
     let live_before = entries(&data_manifests(&before).await, ManifestStatus::Added);
-    let planned_before = planned(&before, parent.snapshot_id()).await;
+    let planned_before = planned(&engine, parent.snapshot_id()).await;
     assert_eq!(planned_before.len(), 10);
 
     let removed_rows = engine
@@ -360,10 +352,10 @@ async fn a_truncate_removes_every_live_file_and_time_travel_still_reads_them() {
             .collect(),
         "every removed file is a Deleted entry of the new snapshot with its own numbers"
     );
-    assert!(planned(&after, snapshot.snapshot_id()).await.is_empty());
+    assert!(planned(&engine, snapshot.snapshot_id()).await.is_empty());
     assert_eq!(count_and_sum(&engine).await, (0, None));
     assert_eq!(
-        planned(&after, parent.snapshot_id()).await,
+        planned(&engine, parent.snapshot_id()).await,
         planned_before,
         "time travel to the snapshot before the truncate plans the removed files"
     );
@@ -432,7 +424,7 @@ async fn a_truncate_that_loses_to_another_engine_s_appends_removes_their_rows_to
         [appended.snapshot_id(), snapshot.snapshot_id()],
         "the snapshot log holds the appends and then the truncate"
     );
-    assert!(planned(&loaded, snapshot.snapshot_id()).await.is_empty());
+    assert!(planned(&first, snapshot.snapshot_id()).await.is_empty());
     assert_eq!(count_and_sum(&first).await, (0, None));
     assert_eq!(
         unnamed_avro_files(&first, &loaded).await,

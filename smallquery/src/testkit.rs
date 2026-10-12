@@ -117,10 +117,12 @@ impl TestEngine {
             .expect("the dataset is created");
     }
 
-    /// The file tasks the table's current snapshot plans, with `predicate` when set.
+    /// The file tasks the table plans at `snapshot_id`, its current snapshot when unset, with
+    /// `predicate` when set.
     pub(crate) async fn plan_files(
         &self,
         table: &TableRef,
+        snapshot_id: Option<i64>,
         predicate: Option<Predicate>,
     ) -> Vec<FileScanTask> {
         let loaded = self
@@ -129,7 +131,7 @@ impl TestEngine {
             .reload(table)
             .await
             .expect("the table loads");
-        let Some(snapshot) = loaded.metadata().current_snapshot_id() else {
+        let Some(snapshot) = snapshot_id.or(loaded.metadata().current_snapshot_id()) else {
             return Vec::new();
         };
         let mut scan = loaded.table.scan().snapshot_id(snapshot);
@@ -215,7 +217,7 @@ impl TestEngine {
     /// a path the table already holds.
     pub(crate) async fn assert_no_path_twice(&self, table: &TableRef) {
         let paths: Vec<String> = self
-            .plan_files(table, None)
+            .plan_files(table, None, None)
             .await
             .into_iter()
             .map(|task| task.data_file_path)

@@ -101,7 +101,7 @@ async fn a_large_result_goes_through_a_result_table_and_storage_read() {
         .job
         .expect("a result too large to answer inline has a job");
     let result_table = table_ref(ANONYMOUS_DATASET, job.job_id.as_str());
-    let tasks = engine.plan_files(&result_table, None).await;
+    let tasks = engine.plan_files(&result_table, None, None).await;
     assert!(!tasks.is_empty(), "the result table holds the rows");
     engine.assert_no_path_twice(&result_table).await;
     engine
@@ -182,7 +182,7 @@ async fn a_dry_run_reports_the_schema_and_the_bytes_scanned_without_a_job() {
         .await
         .expect("the dry run plans");
     let planned: u64 = engine
-        .plan_files(&table_ref("shop", "items"), None)
+        .plan_files(&table_ref("shop", "items"), None, None)
         .await
         .iter()
         .map(|task| task.length)
@@ -414,7 +414,7 @@ async fn a_write_truncate_job_replaces_every_file_of_its_destination_in_one_snap
         .expect("the inserts made a snapshot")
         .clone();
     let files_before: std::collections::BTreeSet<String> = engine
-        .plan_files(&copies, None)
+        .plan_files(&copies, None, None)
         .await
         .into_iter()
         .map(|task| task.data_file_path)
@@ -455,7 +455,7 @@ async fn a_write_truncate_job_replaces_every_file_of_its_destination_in_one_snap
         iceberg::spec::Operation::Overwrite
     );
     assert_eq!(snapshot.parent_snapshot_id(), Some(replaced.snapshot_id()));
-    let tasks = engine.plan_files(&copies, None).await;
+    let tasks = engine.plan_files(&copies, None, None).await;
     assert!(tasks
         .iter()
         .all(|task| !files_before.contains(&task.data_file_path)));

@@ -414,7 +414,7 @@ async fn a_flush_inside_a_request_makes_exactly_the_rows_to_its_offset_readable(
 /// The day directories of the files the current snapshot of `shop.orders` plans, sorted.
 async fn planned_days(engine: &TestEngine) -> Vec<String> {
     let mut days: Vec<String> = engine
-        .plan_files(&table_ref("shop", "orders"), None)
+        .plan_files(&table_ref("shop", "orders"), None, None)
         .await
         .into_iter()
         .map(|task| {

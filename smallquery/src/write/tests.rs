@@ -305,7 +305,7 @@ async fn a_day_partitioned_table_stores_a_file_per_day_and_prunes_by_day() {
 
     let orders = table_ref("shop", "orders");
     let mut directories: Vec<String> = engine
-        .plan_files(&orders, None)
+        .plan_files(&orders, None, None)
         .await
         .into_iter()
         .map(|task| {
@@ -335,7 +335,7 @@ async fn a_day_partitioned_table_stores_a_file_per_day_and_prunes_by_day() {
     let second_day = Reference::new("placed_at")
         .greater_than_or_equal_to(Datum::timestamptz_micros(OCTOBER_7 + DAY))
         .and(Reference::new("placed_at").less_than(Datum::timestamptz_micros(OCTOBER_7 + 2 * DAY)));
-    let pruned = engine.plan_files(&orders, Some(second_day)).await;
+    let pruned = engine.plan_files(&orders, None, Some(second_day)).await;
     assert_eq!(pruned.len(), 1);
     assert!(pruned[0]
         .data_file_path
