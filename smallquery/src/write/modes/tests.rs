@@ -526,6 +526,193 @@ async fn eight_writers_of_every_mode_on_one_table_end_with_the_exact_sum() {
         .await;
 }
 
+/// Appends `rows` to `stream` at `offset` on a connection of its own, and fails unless the
+/// engine acknowledges them.
+async fn acknowledged(engine: &TestEngine, stream: &str, offset: i64, rows: &[Tick]) {
+    let responses = append(
+        engine,
+        vec![append_request(
+            stream,
+            Some(offset),
+            tick_descriptor(&[]),
+            rows,
+        )],
+    )
+    .await;
+    assert_eq!(
+        responses[0].response,
+        Some(Response::AppendResult(
+            storage::append_rows_response::AppendResult {
+                offset: Some(offset)
+            }
+        )),
+        "the rows at offset {offset} are acknowledged"
+    );
+}
+
+/// An engine on `engine`'s root whose stream TTL has passed for every stream already created,
+/// once it has dropped them.
+async fn sweeper_of(engine: &TestEngine) -> TestEngine {
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let sweeper = engine
+        .open_on_same_root(|mut config| {
+            config.stream_ttl = Duration::from_millis(1);
+            config
+        })
+        .await;
+    sweeper
+        .state()
+        .writes
+        .sweep_streams()
+        .await
+        .expect("the expired streams are dropped");
+    sweeper
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_another_engine_expired_reports_no_commit_on_its_creator() {
+    let creator = TestEngine::start().await;
+    create_ticks(&creator).await;
+    let pending = create_stream(&creator, storage::write_stream::Type::Pending).await;
+    let buffered = create_stream(&creator, storage::write_stream::Type::Buffered).await;
+    for stream in [&pending, &buffered] {
+        acknowledged(&creator, stream, 0, &ticks(1, 3)).await;
+        acknowledged(&creator, stream, 3, &ticks(2, 3)).await;
+    }
+    let _sweeper = sweeper_of(&creator).await;
+
+    let mut client = creator.write_client();
+    let finalized = client
+        .finalize_write_stream(storage::FinalizeWriteStreamRequest {
+            name: pending.clone(),
+        })
+        .await;
+    assert_eq!(
+        finalized
+            .expect_err("an expired stream finalizes nothing")
+            .code(),
+        Code::NotFound
+    );
+    let committed = client
+        .batch_commit_write_streams(storage::BatchCommitWriteStreamsRequest {
+            parent: TICKS_PATH.to_string(),
+            write_streams: vec![pending],
+        })
+        .await
+        .expect("the batch commit answers")
+        .into_inner();
+    assert_eq!(committed.commit_time, None);
+    assert_eq!(
+        committed
+            .stream_errors
+            .iter()
+            .map(storage::StorageError::code)
+            .collect::<Vec<_>>(),
+        [StorageErrorCode::StreamNotFound]
+    );
+    let flushed = client
+        .flush_rows(storage::FlushRowsRequest {
+            write_stream: buffered,
+            offset: Some(4),
+        })
+        .await;
+    assert_eq!(
+        flushed
+            .expect_err("an expired stream flushes nothing")
+            .code(),
+        Code::NotFound
+    );
+    assert_eq!(read_ticks(&creator).await, Vec::new());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flush_held_while_another_engine_expires_its_stream_lands_nothing() {
+    let creator = TestEngine::start().await;
+    create_ticks(&creator).await;
+    let stream = create_stream(&creator, storage::write_stream::Type::Buffered).await;
+    acknowledged(&creator, &stream, 0, &ticks(1, 3)).await;
+    acknowledged(&creator, &stream, 3, &ticks(2, 3)).await;
+
+    let mut held = creator.state().catalog.hooks().hold(CommitPoint::Loaded);
+    let mut client = creator.write_client();
+    let flush = tokio::spawn({
+        let stream = stream.clone();
+        async move {
+            client
+                .flush_rows(storage::FlushRowsRequest {
+                    write_stream: stream,
+                    offset: Some(4),
+                })
+                .await
+        }
+    });
+    held.reached().await;
+    let _sweeper = sweeper_of(&creator).await;
+    held.release();
+
+    let flushed = flush.await.expect("the flush runs");
+    assert_eq!(
+        flushed
+            .expect_err("the flush lands nothing of an expired stream")
+            .code(),
+        Code::NotFound
+    );
+    assert_eq!(read_ticks(&creator).await, Vec::new());
+    creator
+        .assert_no_path_twice(&table_ref("shop", "ticks"))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_engine_that_did_not_create_a_stream_acknowledges_none_of_its_rows() {
+    let creator = TestEngine::start().await;
+    create_ticks(&creator).await;
+    let stream = create_stream(&creator, storage::write_stream::Type::Pending).await;
+    acknowledged(&creator, &stream, 0, &ticks(1, 3)).await;
+    let other = creator.open_on_same_root(|config| config).await;
+    other
+        .write_client()
+        .get_write_stream(storage::GetWriteStreamRequest {
+            name: stream.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("the other engine describes the stream");
+
+    let mut client = creator.write_client();
+    client
+        .finalize_write_stream(storage::FinalizeWriteStreamRequest {
+            name: stream.clone(),
+        })
+        .await
+        .expect("the creator finalizes the stream");
+    let committed = client
+        .batch_commit_write_streams(storage::BatchCommitWriteStreamsRequest {
+            parent: TICKS_PATH.to_string(),
+            write_streams: vec![stream.clone()],
+        })
+        .await
+        .expect("the batch commit answers")
+        .into_inner();
+    assert_eq!(committed.stream_errors, Vec::new());
+
+    let late = append(
+        &other,
+        vec![append_request(
+            &stream,
+            Some(3),
+            tick_descriptor(&[]),
+            &ticks(2, 3),
+        )],
+    )
+    .await;
+    assert_eq!(
+        in_band_error(&late[0]),
+        (Code::NotFound, Some(StorageErrorCode::StreamNotFound))
+    );
+    assert_eq!(read_ticks(&other).await, ticks(1, 3));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_engine_commits_a_pending_stream_and_the_first_cannot_commit_it_again() {
     let first = TestEngine::start().await;
@@ -635,9 +822,10 @@ async fn a_batch_commit_that_dies_before_its_pointer_changes_nothing_and_its_fil
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_flush_that_dies_after_its_pointer_leaves_segments_no_later_flush_takes_twice() {
+async fn a_flush_that_dies_after_its_pointer_leaves_its_rows_to_the_drop_of_its_stream() {
     let engine = TestEngine::start().await;
     create_ticks(&engine).await;
+    let table = table_ref("shop", "ticks");
     let mut writer = tick_writer(&engine, BigQueryWriteMode::Buffered, 4).await;
     writer
         .write_all(&ticks(1, 12))
@@ -674,26 +862,38 @@ async fn a_flush_that_dies_after_its_pointer_leaves_segments_no_later_flush_take
         ticks(1, 6),
         "the flush landed"
     );
-    let mut client = restarted.write_client();
-    let flushed = client
+    let refused = restarted
+        .write_client()
         .flush_rows(storage::FlushRowsRequest {
-            write_stream: stream.clone(),
+            write_stream: stream,
             offset: Some(11),
         })
-        .await
-        .expect("the rest flushes")
-        .into_inner();
-    assert_eq!(flushed.offset, 11);
-    let finalized = client
-        .finalize_write_stream(storage::FinalizeWriteStreamRequest { name: stream })
-        .await
-        .expect("the stream finalizes")
-        .into_inner();
-    assert_eq!(finalized.row_count, 12);
-    assert_eq!(read_ticks(&restarted).await, ticks(1, 12));
-    restarted
-        .assert_no_path_twice(&table_ref("shop", "ticks"))
         .await;
+    assert_eq!(
+        refused.expect_err("only the creator flushes").code(),
+        Code::NotFound
+    );
+
+    let expired = restarted
+        .restart(|mut config| {
+            config.stream_ttl = Duration::from_millis(1);
+            config
+        })
+        .await;
+    expired
+        .state()
+        .writes
+        .sweep_streams()
+        .await
+        .expect("the expired streams are dropped");
+    assert_eq!(read_ticks(&expired).await, ticks(1, 6));
+    assert_eq!(
+        expired.data_files(&table).len(),
+        2,
+        "the committed files stay, and the split original and the unflushed files go"
+    );
+    assert_eq!(expired.stream_entries(), Vec::<std::path::PathBuf>::new());
+    expired.assert_no_path_twice(&table).await;
 }
 
 /// The pointer versions under `shop.ticks`, each with the metadata location it names and the

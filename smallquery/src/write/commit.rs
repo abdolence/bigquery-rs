@@ -12,15 +12,15 @@
 //! failed group fails every member with its error: `Aborted` past the retry deadline, which the
 //! client retries, or an unknown outcome, which nobody retries.
 //!
-//! A flush or a batch commit of a write stream is a member too, carrying the change of the
-//! stream's committed state that its files make: the change is checked on the table the commit
-//! loaded, after the changes of the members before it, and lands in the same commit as the
-//! files, or the member is refused and its files left out.
+//! A change of a write stream's state is a member too, with the files a flush or a batch commit
+//! adds: the change is checked on the table the commit loaded, after the changes of the members
+//! before it, and lands in the same commit as the files, or the member is refused and its files
+//! left out.
 
 use crate::catalog::{Change, EngineCatalog, EngineCommit};
 use crate::error::{EngineError, Resource, StreamProblem};
 use crate::ids::{StreamId, TableRef, WriteStreamId, WriteStreamName};
-use crate::storage::StreamChange;
+use crate::storage::{StoredStream, StreamChange};
 use crate::write::{WriteDisposition, WrittenFiles};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use std::collections::HashMap;
@@ -239,17 +239,16 @@ impl CommitGroups {
                     .iter()
                     .any(|member| member.disposition == WriteDisposition::Empty)
                     && loaded.total_rows()? != Some(0);
-                let mut properties = HashMap::new();
+                let mut streams = HashMap::new();
                 for (member, verdict) in group.iter().zip(verdicts.iter_mut()) {
                     *verdict = if member.files.table_uuid != identity {
                         Verdict::Replaced
                     } else if member.disposition == WriteDisposition::Empty && holds_rows {
                         Verdict::NotEmpty
                     } else {
-                        match member.stream_properties(loaded.metadata().properties(), &properties)
-                        {
-                            Ok(set) => {
-                                properties.extend(set);
+                        match member.stream_states(loaded.metadata().properties(), &streams) {
+                            Ok(changed) => {
+                                streams.extend(changed);
                                 holds_rows |= member.files.rows > 0;
                                 Verdict::Included
                             }
@@ -269,6 +268,10 @@ impl CommitGroups {
                     .filter(|(_, verdict)| **verdict == Verdict::Included)
                     .flat_map(|(member, _)| member.files.files.iter().cloned())
                     .peekable();
+                let properties: Vec<_> = streams
+                    .into_iter()
+                    .flat_map(|(stream, state)| state.properties(stream))
+                    .collect();
                 if files.peek().is_none() && properties.is_empty() {
                     return Ok(Change::Engine(EngineCommit::default()));
                 }
@@ -334,25 +337,24 @@ impl CommitGroups {
 }
 
 impl Member {
-    /// The table properties the member's stream changes set, given the table's `stored`
-    /// properties and those `set` by earlier members of its group.
-    fn stream_properties(
+    /// The states the member's stream changes leave, given the table's `stored` properties and
+    /// the states `changed` by earlier members of its group.
+    fn stream_states(
         &self,
         stored: &HashMap<String, String>,
-        set: &HashMap<String, String>,
-    ) -> Result<Vec<(String, String)>, Verdict> {
+        changed: &HashMap<WriteStreamId, StoredStream>,
+    ) -> Result<Vec<(WriteStreamId, StoredStream)>, Verdict> {
         self.streams
             .iter()
             .map(|change| {
-                let key = change.key();
-                let current = set.get(&key).or_else(|| stored.get(&key));
-                change
-                    .value(current.map(String::as_str))
-                    .map(|value| (key, value))
-                    .map_err(|problem| Verdict::Refused {
-                        stream: change.stream(),
-                        problem,
-                    })
+                let stream = change.stream();
+                let refused = |problem| Verdict::Refused { stream, problem };
+                let current = match changed.get(&stream) {
+                    Some(state) => Some(*state),
+                    None => StoredStream::read(stream, stored)
+                        .map_err(|_| refused(StreamProblem::ChangedElsewhere))?,
+                };
+                Ok((stream, change.apply(current).map_err(refused)?))
             })
             .collect()
     }

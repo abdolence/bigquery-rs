@@ -1,14 +1,15 @@
 //! What the root holds of the write streams `CreateWriteStream` makes:
 //!
-//! - the stream record, `_smallquery/streams/<id>.json`, written once before the stream is
-//!   reported: its type and its table;
+//! - the stream record, `_smallquery/streams/<id>.json`, written before the stream is
+//!   reported: its type, its table and the engine that created it;
 //! - the segments of a pending or buffered stream,
 //!   `_smallquery/streams/<id>/seg-<first>-<last>-<uuid>.json`: one acknowledged request each,
 //!   offsets `first` to `last`, with the data files it staged. A segment is written before its
 //!   request is acknowledged and never rewritten;
-//! - the table properties `smallquery.stream.<id>.state` and `smallquery.stream.<id>.flushed`,
-//!   which the commits that change them set, so that what a stream has committed is exactly what
-//!   the table's newest pointer says.
+//! - the table properties `smallquery.stream.<id>.state` and `smallquery.stream.<id>.flushed`
+//!   of a pending or buffered stream, from the commit that registers the stream to the one that
+//!   drops it. Every commit of the stream's rows changes them, and only from the state it
+//!   expects, so the table's pointer chain fences each engine's commits against every other's.
 //!
 //! A staged data file lives in the table's `data/` directory under its final name, and no
 //! snapshot references it until a flush or a batch commit adds it. Its rows' offsets are
@@ -17,7 +18,7 @@
 
 use super::{Backend, ListedKind, ObjectPath};
 use crate::error::{EngineError, StreamProblem};
-use crate::ids::{RowOffset, TableRef, WriteStreamId};
+use crate::ids::{NodeId, RowOffset, TableRef, WriteStreamId};
 use bytes::Bytes;
 use iceberg::spec::{
     deserialize_data_file_from_json, serialize_data_file_to_json, DataFile, TableMetadata,
@@ -37,31 +38,27 @@ pub(crate) struct StreamRecord {
     /// name is another table, which the stream's rows never reach.
     pub table_uuid: Uuid,
     pub created_at_ms: i64,
+    pub creator: NodeId,
 }
 
 /// The type of a created stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StreamMode {
-    /// Each request commits as it comes.
     Committed,
-    /// Requests are staged, and commit together at one batch commit.
     Pending,
-    /// Requests are staged, and commit up to the offset of each flush.
     Buffered,
 }
 
-/// The table properties a stream's committed state is kept in.
+/// The table properties a pending or buffered stream's state is kept in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamProperty {
-    /// A pending stream's state: [`PendingState`].
+enum StreamProperty {
     State,
-    /// A buffered stream's last flushed offset.
     Flushed,
 }
 
 impl StreamProperty {
-    pub(crate) fn key(self, stream: WriteStreamId) -> String {
+    fn key(self, stream: WriteStreamId) -> String {
         let name = match self {
             StreamProperty::State => "state",
             StreamProperty::Flushed => "flushed",
@@ -70,60 +67,36 @@ impl StreamProperty {
     }
 }
 
-/// A pending stream's state, as its table's state property holds it.
+/// Where a pending or buffered stream is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PendingState {
-    /// The table holds no state property for an open stream, which saves a commit for every
-    /// stream created.
+pub(crate) enum StreamState {
     Open,
+    /// A pending stream that takes no more rows; a buffered stream's finalize stays with its
+    /// creator.
     Finalized,
     Committed,
 }
 
-impl PendingState {
-    pub(crate) fn as_str(self) -> &'static str {
+impl StreamState {
+    fn as_str(self) -> &'static str {
         match self {
-            PendingState::Open => "open",
-            PendingState::Finalized => "finalized",
-            PendingState::Committed => "committed",
+            StreamState::Open => "open",
+            StreamState::Finalized => "finalized",
+            StreamState::Committed => "committed",
         }
-    }
-
-    /// The state a table's state property `value` holds; a table without it holds an open
-    /// stream.
-    ///
-    /// # Errors
-    /// [`EngineError::Internal`] for a value the engine never writes.
-    pub(crate) fn from_property(value: Option<&str>) -> Result<Self, EngineError> {
-        value.map_or(Ok(PendingState::Open), str::parse)
-    }
-
-    /// The state of the pending stream `stream` in a table's `properties`.
-    ///
-    /// # Errors
-    /// As [`PendingState::from_property`].
-    pub(crate) fn in_table(
-        stream: WriteStreamId,
-        properties: &HashMap<String, String>,
-    ) -> Result<Self, EngineError> {
-        Self::from_property(
-            properties
-                .get(&StreamProperty::State.key(stream))
-                .map(String::as_str),
-        )
     }
 }
 
 /// # Errors
 /// [`EngineError::Internal`] for a value the engine never writes.
-impl std::str::FromStr for PendingState {
+impl std::str::FromStr for StreamState {
     type Err = EngineError;
 
     fn from_str(state: &str) -> Result<Self, Self::Err> {
         match state {
-            "open" => Ok(PendingState::Open),
-            "finalized" => Ok(PendingState::Finalized),
-            "committed" => Ok(PendingState::Committed),
+            "open" => Ok(StreamState::Open),
+            "finalized" => Ok(StreamState::Finalized),
+            "committed" => Ok(StreamState::Committed),
             other => Err(EngineError::Internal {
                 detail: format!("{other:?} is no write stream state"),
             }),
@@ -131,11 +104,68 @@ impl std::str::FromStr for PendingState {
     }
 }
 
-/// A change of a stream's committed state, made by the commit that adds the stream's files, and
-/// only on the state it starts from: what the stream committed is then exactly what the table
-/// says, whichever process asks.
+/// What a table holds of a pending or buffered stream, from the commit that registers it at its
+/// creation to the one that drops it: a stream whose state is absent is gone, and no commit
+/// takes its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoredStream {
+    pub state: StreamState,
+    /// A buffered stream's last flushed offset.
+    pub flushed: Option<RowOffset>,
+}
+
+impl StoredStream {
+    /// What `properties` hold of `stream`.
+    ///
+    /// # Errors
+    /// [`EngineError::Internal`] for a value the engine never writes.
+    pub(crate) fn read(
+        stream: WriteStreamId,
+        properties: &HashMap<String, String>,
+    ) -> Result<Option<Self>, EngineError> {
+        let value = |property: StreamProperty| properties.get(&property.key(stream));
+        let Some(state) = value(StreamProperty::State) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            state: state.parse()?,
+            flushed: value(StreamProperty::Flushed)
+                .map(|flushed| flushed.parse())
+                .transpose()?,
+        }))
+    }
+
+    /// The properties that hold this state of `stream`.
+    pub(crate) fn properties(self, stream: WriteStreamId) -> Vec<(String, String)> {
+        let mut properties = vec![(
+            StreamProperty::State.key(stream),
+            self.state.as_str().to_string(),
+        )];
+        properties.extend(
+            self.flushed
+                .map(|flushed| (StreamProperty::Flushed.key(stream), flushed.to_string())),
+        );
+        properties
+    }
+
+    /// The keys of every property a table may hold of `stream`.
+    pub(crate) fn keys(stream: WriteStreamId) -> [String; 2] {
+        [
+            StreamProperty::State.key(stream),
+            StreamProperty::Flushed.key(stream),
+        ]
+    }
+}
+
+/// A change of a stream's state, made by a commit only on the state it starts from: whatever
+/// engine commits it, the table then holds exactly what the stream has committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamChange {
+    /// A new pending or buffered stream: until it is registered, and once it is dropped, no
+    /// commit takes its rows.
+    Register(WriteStreamId),
+    /// A pending stream takes no more rows.
+    Finalize(WriteStreamId),
     /// A batch commit: the pending stream goes from finalized to committed.
     Commit(WriteStreamId),
     /// A flush: the buffered stream's last flushed offset goes from `from`, `None` before its
@@ -150,37 +180,52 @@ pub(crate) enum StreamChange {
 impl StreamChange {
     pub(crate) fn stream(self) -> WriteStreamId {
         match self {
-            StreamChange::Commit(stream) | StreamChange::Flush { stream, .. } => stream,
+            StreamChange::Register(stream)
+            | StreamChange::Finalize(stream)
+            | StreamChange::Commit(stream)
+            | StreamChange::Flush { stream, .. } => stream,
         }
     }
 
-    /// The table property the change sets.
-    pub(crate) fn key(self) -> String {
-        match self {
-            StreamChange::Commit(stream) => StreamProperty::State.key(stream),
-            StreamChange::Flush { stream, .. } => StreamProperty::Flushed.key(stream),
-        }
-    }
-
-    /// The property's new value, given its value `current` in the table the commit builds on.
+    /// The stream's state after the change, given the state `current` it finds.
     ///
     /// # Errors
     /// Why the stream refuses the change when `current` is not the state it starts from.
-    pub(crate) fn value(self, current: Option<&str>) -> Result<String, StreamProblem> {
-        match self {
-            StreamChange::Commit(_) => match PendingState::from_property(current) {
-                Ok(PendingState::Finalized) => Ok(PendingState::Committed.as_str().to_string()),
-                Ok(PendingState::Committed) => Err(StreamProblem::AlreadyCommitted),
-                Ok(PendingState::Open) => Err(StreamProblem::NotFinalized),
-                Err(_) => Err(StreamProblem::ChangedElsewhere),
-            },
-            StreamChange::Flush { from, to, .. } => {
-                if current == from.map(|from| from.to_string()).as_deref() {
-                    Ok(to.to_string())
-                } else {
-                    Err(StreamProblem::ChangedElsewhere)
-                }
+    pub(crate) fn apply(
+        self,
+        current: Option<StoredStream>,
+    ) -> Result<StoredStream, StreamProblem> {
+        let Some(current) = current else {
+            return match self {
+                StreamChange::Register(_) => Ok(StoredStream {
+                    state: StreamState::Open,
+                    flushed: None,
+                }),
+                _ => Err(StreamProblem::Expired),
+            };
+        };
+        match (self, current.state) {
+            (StreamChange::Finalize(_), StreamState::Open) => Ok(StoredStream {
+                state: StreamState::Finalized,
+                ..current
+            }),
+            (StreamChange::Commit(_), StreamState::Finalized) => Ok(StoredStream {
+                state: StreamState::Committed,
+                ..current
+            }),
+            (StreamChange::Commit(_), StreamState::Committed) => {
+                Err(StreamProblem::AlreadyCommitted)
             }
+            (StreamChange::Commit(_), StreamState::Open) => Err(StreamProblem::NotFinalized),
+            (StreamChange::Flush { from, to, .. }, StreamState::Open)
+                if current.flushed == from =>
+            {
+                Ok(StoredStream {
+                    flushed: Some(to),
+                    ..current
+                })
+            }
+            _ => Err(StreamProblem::ChangedElsewhere),
         }
     }
 }
@@ -473,17 +518,14 @@ impl Staging {
             .collect())
     }
 
-    /// What `segment` of the stream holds.
+    /// What `segment` of the stream holds, `None` once it is deleted.
     pub(crate) async fn read_segment(
         &self,
         stream: WriteStreamId,
         segment: &ListedSegment,
-    ) -> Result<SegmentFiles, EngineError> {
+    ) -> Result<Option<SegmentFiles>, EngineError> {
         self.get(&Self::segments_directory(stream).join(&segment.name))
-            .await?
-            .ok_or_else(|| EngineError::Internal {
-                detail: format!("segment {} of write stream {stream} is gone", segment.name),
-            })
+            .await
     }
 
     /// Deletes `segment` of the stream, logging a failure: its callers delete a segment that no

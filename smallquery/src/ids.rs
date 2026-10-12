@@ -457,6 +457,18 @@ impl Display for WriteStreamId {
     }
 }
 
+/// One run of an engine, drawn when it opens: a stream record names the run that created the
+/// stream, which alone serves the stream's offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct NodeId(uuid::Uuid);
+
+impl NodeId {
+    pub(crate) fn random() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
 impl FromStr for WriteStreamName {
     type Err = EngineError;
 

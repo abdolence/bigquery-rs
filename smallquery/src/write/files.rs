@@ -57,6 +57,16 @@ pub(crate) struct WrittenFiles {
 }
 
 impl WrittenFiles {
+    /// No files, for a commit that changes only a write stream's state in the table identity
+    /// `table_uuid`.
+    pub(crate) fn none(table_uuid: Uuid) -> Self {
+        Self {
+            files: Vec::new(),
+            table_uuid,
+            rows: 0,
+        }
+    }
+
     /// The data files of `staged`, written for the table identity `loaded` is, which holds the
     /// schemas they were written with.
     pub(crate) fn staged(staged: &[StagedFile], loaded: &LoadedTable) -> Result<Self, EngineError> {

@@ -208,10 +208,14 @@ pub enum StreamProblem {
     /// `INVALID_STREAM_STATE`: a commit of the stream's rows ended with an unknown outcome, so
     /// nothing more goes through the stream, which could land a row twice.
     OutcomeUnknown,
-    /// `INVALID_STREAM_STATE`: what the table says the stream committed is not what this
-    /// process knows of it, so another process changed the stream, or its staged requests
-    /// overlap.
+    /// `INVALID_STREAM_STATE`: the state the table holds of the stream is not the one its
+    /// creator left there, or its staged requests overlap.
     ChangedElsewhere,
+    /// `STREAM_NOT_FOUND`: the stream outlived its TTL and its state left its table.
+    Expired,
+    /// `STREAM_NOT_FOUND`: another engine created the stream, and only that engine serves its
+    /// appends, flushes and finalize.
+    CreatedElsewhere,
     /// `INVALID_STREAM_TYPE`: the request applies to other streams only.
     WrongType {
         /// The request.
@@ -238,7 +242,11 @@ impl Display for StreamProblem {
                 f.write_str("a commit of the stream's rows ended with an unknown outcome")
             }
             StreamProblem::ChangedElsewhere => {
-                f.write_str("the stream's committed state changed outside this process")
+                f.write_str("the stream's state in its table is not the one its creator left")
+            }
+            StreamProblem::Expired => f.write_str("the stream was dropped past its TTL"),
+            StreamProblem::CreatedElsewhere => {
+                f.write_str("the stream is served by the engine that created it")
             }
             StreamProblem::WrongType {
                 request,
@@ -488,6 +496,7 @@ impl From<&EngineError> for Status {
                 StreamProblem::OffsetAlreadyExists { .. } => Code::AlreadyExists,
                 StreamProblem::OffsetOutOfRange { .. } => Code::OutOfRange,
                 StreamProblem::WrongType { .. } => Code::InvalidArgument,
+                StreamProblem::Expired | StreamProblem::CreatedElsewhere => Code::NotFound,
                 StreamProblem::Finalized
                 | StreamProblem::AlreadyCommitted
                 | StreamProblem::NotFinalized

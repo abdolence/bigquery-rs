@@ -20,8 +20,8 @@ use iceberg::io::{
 pub(crate) use local::LocalBackend;
 use serde::{Deserialize, Serialize};
 pub(crate) use staging::{
-    select_segments, ListedSegment, OffsetRanges, PendingState, SegmentFiles, StagedFile, Staging,
-    StreamChange, StreamMode, StreamProperty, StreamRecord,
+    select_segments, ListedSegment, OffsetRanges, SegmentFiles, StagedFile, Staging, StoredStream,
+    StreamChange, StreamMode, StreamRecord, StreamState,
 };
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;

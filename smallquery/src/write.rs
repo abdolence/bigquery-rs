@@ -536,6 +536,9 @@ impl StreamProblem {
             | StreamProblem::OutcomeUnknown
             | StreamProblem::ChangedElsewhere => StorageErrorCode::InvalidStreamState,
             StreamProblem::WrongType { .. } => StorageErrorCode::InvalidStreamType,
+            StreamProblem::Expired | StreamProblem::CreatedElsewhere => {
+                StorageErrorCode::StreamNotFound
+            }
         }
     }
 }
