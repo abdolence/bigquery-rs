@@ -288,6 +288,59 @@ impl Columns {
         self.0.iter().find(|column| column.name.as_str() == name)
     }
 
+    /// The first difference between these columns, a table's, and a query result's `result`,
+    /// described for an error; `None` when both have the same columns in the same order with
+    /// the same names, compared exactly, the same types with their parameters, and the same
+    /// modes, the fields of a STRUCT compared the same way. Descriptions and default values
+    /// are not compared.
+    pub(crate) fn difference_from(&self, result: &Columns) -> Option<String> {
+        self.difference_at("", result)
+    }
+
+    fn difference_at(&self, path: &str, result: &Columns) -> Option<String> {
+        for (position, (ours, theirs)) in self.0.iter().zip(&result.0).enumerate() {
+            if ours.name != theirs.name {
+                return Some(format!(
+                    "column {} is `{path}{}` in the table and `{path}{}` in the result",
+                    position + 1,
+                    ours.name,
+                    theirs.name
+                ));
+            }
+            let name = format!("{path}{}", ours.name);
+            if ours.mode != theirs.mode {
+                return Some(format!(
+                    "`{name}` is {} in the table and {} in the result",
+                    ours.mode.name(),
+                    theirs.mode.name()
+                ));
+            }
+            match (&ours.column_type, &theirs.column_type) {
+                (ColumnType::Struct(fields), ColumnType::Struct(result_fields)) => {
+                    if let Some(difference) =
+                        fields.difference_at(&format!("{name}."), result_fields)
+                    {
+                        return Some(difference);
+                    }
+                }
+                (ours, theirs) if ours != theirs => {
+                    return Some(format!(
+                        "`{name}` is {ours:?} in the table and {theirs:?} in the result"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let common = self.0.len().min(result.0.len());
+        if let Some(missing) = self.0.get(common) {
+            return Some(format!("the result has no column `{path}{}`", missing.name));
+        }
+        result
+            .0
+            .get(common)
+            .map(|extra| format!("the table has no column `{path}{}`", extra.name))
+    }
+
     /// The Iceberg schema of these columns and the column properties of the table.
     ///
     /// A column that `base` already has keeps its field ID, matched by name at every level;

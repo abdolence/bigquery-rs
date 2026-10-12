@@ -276,6 +276,15 @@ impl TryFrom<&WireSchema> for v2::TableSchema {
     }
 }
 
+/// The result's columns as a table created from the result declares them.
+impl TryFrom<&WireSchema> for Columns {
+    type Error = EngineError;
+
+    fn try_from(wire: &WireSchema) -> Result<Self, Self::Error> {
+        Columns::try_from(&v2::TableSchema::try_from(wire)?)
+    }
+}
+
 /// One result column of the wire schema in the v2 API's form.
 fn result_field(field: &Field) -> Result<v2::TableFieldSchema, EngineError> {
     let (value_type, mode) = match field.data_type() {

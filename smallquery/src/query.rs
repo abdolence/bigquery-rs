@@ -133,8 +133,13 @@ impl FromStr for CreateDisposition {
 enum DestinationWrite {
     /// `WRITE_EMPTY`, the default, and `WRITE_APPEND`: the result is appended.
     Append(WriteDisposition),
-    /// `WRITE_TRUNCATE`: the result replaces every row of the table in one snapshot.
-    Overwrite,
+    /// `WRITE_TRUNCATE`: the result replaces every row of the table in one snapshot. BigQuery
+    /// also gives the table the result's schema, which the engine does not do yet, so the job
+    /// is refused unless the result's columns are the table's.
+    Truncate,
+    /// `WRITE_TRUNCATE_DATA`: the result replaces every row of the table in one snapshot, and
+    /// the table keeps its schema.
+    TruncateData,
 }
 
 impl FromStr for DestinationWrite {
@@ -144,7 +149,8 @@ impl FromStr for DestinationWrite {
         match disposition {
             "" | "WRITE_EMPTY" => Ok(DestinationWrite::Append(WriteDisposition::Empty)),
             "WRITE_APPEND" => Ok(DestinationWrite::Append(WriteDisposition::Append)),
-            "WRITE_TRUNCATE" => Ok(DestinationWrite::Overwrite),
+            "WRITE_TRUNCATE" => Ok(DestinationWrite::Truncate),
+            "WRITE_TRUNCATE_DATA" => Ok(DestinationWrite::TruncateData),
             other => Err(EngineError::invalid(
                 "write_disposition",
                 format!("{other:?} is not a write disposition"),
@@ -701,7 +707,7 @@ impl Queries {
             DestinationWrite::Append(disposition) => {
                 self.writes.append_files(table, files, disposition).await
             }
-            DestinationWrite::Overwrite => {
+            DestinationWrite::Truncate | DestinationWrite::TruncateData => {
                 let change = SnapshotChange::Overwrite {
                     table_uuid: files.table_uuid,
                     files: files.files,
@@ -877,14 +883,29 @@ impl Queries {
         .await
     }
 
-    /// A sink into the caller's destination table, created when allowed. Its write
-    /// disposition is checked by the commit.
+    /// A sink into the caller's destination table, created when allowed. A `WRITE_TRUNCATE`
+    /// into an existing table is checked here; the other write dispositions by the commit.
     async fn destination_sink(
         &self,
         destination: &Destination,
         wire: &WireSchema,
     ) -> Result<ResultSink, EngineError> {
         match self.catalog.load(&destination.table).await {
+            Ok(loaded) if destination.write == DestinationWrite::Truncate => {
+                let metadata = loaded.metadata();
+                let columns =
+                    Columns::from_iceberg(metadata.current_schema(), metadata.properties())?;
+                if let Some(difference) = columns.difference_from(&Columns::try_from(wire)?) {
+                    return Err(EngineError::unsupported(
+                        "WRITE_TRUNCATE",
+                        format!(
+                            "{}: replacing the table's schema with the result's, whose columns \
+                             differ: {difference}; WRITE_TRUNCATE_DATA keeps the table's schema",
+                            destination.table
+                        ),
+                    ));
+                }
+            }
             Ok(_) => {}
             Err(EngineError::NotFound { .. })
                 if destination.create == CreateDisposition::IfNeeded =>
@@ -906,7 +927,7 @@ impl Queries {
         wire: &WireSchema,
     ) -> Result<(), EngineError> {
         let definition = TableDefinition {
-            columns: Columns::try_from(&v2::TableSchema::try_from(wire)?)?,
+            columns: Columns::try_from(wire)?,
             description: None,
             labels: Default::default(),
             partitioning: None,

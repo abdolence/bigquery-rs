@@ -46,7 +46,7 @@ fn events() -> TableRef {
     table_ref("shop", "events")
 }
 
-/// `shop.events` in `EU`, empty.
+/// `shop.events` in `EU`, empty, with the columns of `SELECT 1 AS id, 2 AS amount`.
 async fn create_events(engine: &TestEngine) {
     engine.create_dataset("shop", "EU").await;
     engine
@@ -55,10 +55,7 @@ async fn create_events(engine: &TestEngine) {
         .schema()
         .table(SHOP.table(EVENTS))
         .columns(|columns| {
-            columns.fields([
-                columns.field("id").int64().required(),
-                columns.field("amount").int64().required(),
-            ])
+            columns.fields([columns.field("id").int64(), columns.field("amount").int64()])
         })
         .sync()
         .await

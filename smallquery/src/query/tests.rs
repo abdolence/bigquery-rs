@@ -492,6 +492,168 @@ async fn a_write_truncate_job_replaces_every_file_of_its_destination_in_one_snap
     assert_eq!(read_before, held);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_truncate_whose_result_columns_differ_from_the_table_s_is_refused() {
+    let engine = TestEngine::start().await;
+    items(&engine, 20).await;
+    empty_copies(&engine).await;
+    let appended = insert_query_job(
+        &engine,
+        "SELECT id, label FROM shop.items WHERE id < 4",
+        "copies",
+        "WRITE_APPEND",
+        None,
+    )
+    .await;
+    assert_eq!(finished_status(&engine, &appended).await.error_result, None);
+    for sql in [
+        "SELECT id FROM shop.items",
+        "SELECT id, label, 7 AS other FROM shop.items",
+        "SELECT id, 7 AS label FROM shop.items",
+        "SELECT label, id FROM shop.items",
+        "SELECT id AS ID, label FROM shop.items",
+    ] {
+        let job = insert_query_job(&engine, sql, "copies", "WRITE_TRUNCATE", None).await;
+        let status = finished_status(&engine, &job).await;
+        assert_eq!(
+            status.error_result.map(|error| error.reason).as_deref(),
+            Some("notImplemented"),
+            "{sql}"
+        );
+    }
+    assert_eq!(count_rows(&engine, "copies").await, 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_truncate_compares_the_nested_fields_and_modes_of_its_result() {
+    let engine = TestEngine::start().await;
+    items(&engine, 20).await;
+    engine
+        .db
+        .fluent()
+        .schema()
+        .table(SHOP.table(BigQueryTableId::from_static("places")))
+        .columns(|columns| {
+            columns.fields([
+                columns
+                    .field("place")
+                    .record(|place| place.fields([place.field("city").string()])),
+                columns.field("tags").string().repeated(),
+            ])
+        })
+        .sync()
+        .await
+        .expect("the table is created");
+    for sql in [
+        "SELECT STRUCT(1 AS city) AS place, tags FROM shop.items",
+        "SELECT place, [1] AS tags FROM shop.items",
+        "SELECT place, 'one' AS tags FROM shop.items",
+    ] {
+        let job = insert_query_job(&engine, sql, "places", "WRITE_TRUNCATE", None).await;
+        let status = finished_status(&engine, &job).await;
+        assert_eq!(
+            status.error_result.map(|error| error.reason).as_deref(),
+            Some("notImplemented"),
+            "{sql}"
+        );
+    }
+    let required = insert_query_job(
+        &engine,
+        "SELECT * FROM shop.items",
+        "items",
+        "WRITE_TRUNCATE",
+        None,
+    )
+    .await;
+    assert_eq!(
+        finished_status(&engine, &required)
+            .await
+            .error_result
+            .map(|error| error.reason)
+            .as_deref(),
+        Some("notImplemented"),
+        "a REQUIRED column of the table is NULLABLE in the result"
+    );
+    let job = insert_query_job(
+        &engine,
+        "SELECT place, tags FROM shop.items",
+        "places",
+        "WRITE_TRUNCATE",
+        None,
+    )
+    .await;
+    assert_eq!(finished_status(&engine, &job).await.error_result, None);
+    assert_eq!(count_rows(&engine, "places").await, 20);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_truncate_data_job_replaces_the_rows_and_keeps_the_table_s_columns() {
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct Copy {
+        id: i64,
+        label: Option<String>,
+    }
+    let engine = TestEngine::start().await;
+    items(&engine, 20).await;
+    empty_copies(&engine).await;
+    let appended = insert_query_job(
+        &engine,
+        "SELECT id, label FROM shop.items WHERE id < 4",
+        "copies",
+        "WRITE_APPEND",
+        None,
+    )
+    .await;
+    assert_eq!(finished_status(&engine, &appended).await.error_result, None);
+
+    let job = insert_query_job(
+        &engine,
+        "SELECT id FROM shop.items WHERE id >= 18",
+        "copies",
+        "WRITE_TRUNCATE_DATA",
+        None,
+    )
+    .await;
+
+    assert_eq!(finished_status(&engine, &job).await.error_result, None);
+    let read: Vec<Copy> = engine
+        .db
+        .fluent()
+        .query("SELECT id, label FROM shop.copies ORDER BY id")
+        .obj()
+        .query()
+        .await
+        .expect("the table is queried");
+    assert_eq!(
+        read,
+        [
+            Copy {
+                id: 18,
+                label: None
+            },
+            Copy {
+                id: 19,
+                label: None
+            },
+        ]
+    );
+    let loaded = engine
+        .state()
+        .catalog
+        .reload(&table_ref("shop", "copies"))
+        .await
+        .expect("the table loads");
+    let names: Vec<&str> = loaded
+        .metadata()
+        .current_schema()
+        .as_struct()
+        .fields()
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(names, ["id", "label"]);
+}
+
 const COUNTS: BigQueryTableId = BigQueryTableId::from_static("counts");
 
 /// The job `job_id` of the test project, as the engine holds it.
