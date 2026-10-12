@@ -114,6 +114,9 @@ pub(super) enum Lost {
     Stray,
     /// A requirement does not hold on the loaded table; the iceberg error says which.
     Unmet(String),
+    /// The snapshot's timestamp, this host's clock, is further behind the table's last commit
+    /// than iceberg accepts; a retry stamps it again.
+    ClockBehind,
 }
 
 impl Lost {
@@ -129,6 +132,9 @@ impl Lost {
                 format!("{table}: the commit's catalog pointer went into a name pruning had freed")
             }
             Lost::Unmet(detail) => format!("{table}: {detail}"),
+            Lost::ClockBehind => format!(
+                "{table}: this host's clock is more than a minute behind the table's last commit"
+            ),
         };
         iceberg::Error::new(iceberg::ErrorKind::CatalogCommitConflicts, detail)
             .with_retryable(false)
@@ -509,19 +515,19 @@ impl EngineCatalog {
         built: BuiltSnapshot,
         recheck: bool,
     ) -> Result<Attempted<LoadedTable>, EngineError> {
-        let unchanged = built.is_unchanged();
-        let attempted = match self
-            .attempt_engine(table, loaded, built.commit, recheck)
-            .await?
-        {
-            Attempted::Landed(_)
-                if unchanged && self.reload(table).await?.version() != loaded.version() =>
-            {
-                Attempted::Lost(Lost::Race)
-            }
-            attempted => attempted,
+        let attempted = match built.commit_at(loaded.metadata(), now_ms()) {
+            Err(lost) => Attempted::Lost(lost),
+            Ok(commit) => match self.attempt_engine(table, loaded, commit, recheck).await? {
+                Attempted::Landed(_)
+                    if built.is_unchanged()
+                        && self.reload(table).await?.version() != loaded.version() =>
+                {
+                    Attempted::Lost(Lost::Race)
+                }
+                attempted => attempted,
+            },
         };
-        if let Attempted::Lost(Lost::Race | Lost::Unmet(_)) = attempted {
+        if let Attempted::Lost(Lost::Race | Lost::Unmet(_) | Lost::ClockBehind) = attempted {
             self.discard(&built.written).await;
         }
         Ok(attempted)

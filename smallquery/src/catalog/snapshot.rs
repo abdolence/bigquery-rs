@@ -7,8 +7,8 @@
 //! truncate or an overwrite removes is what the table holds at its commit, rows appended
 //! meanwhile included.
 
-use super::commit::AttemptChange;
-use super::{now_ms, Change, EngineCatalog, EngineCommit, LoadedTable};
+use super::commit::{AttemptChange, Lost};
+use super::{Change, EngineCatalog, EngineCommit, LoadedTable};
 use crate::error::{EngineError, Resource};
 use crate::ids::TableRef;
 use iceberg::spec::{
@@ -56,16 +56,84 @@ pub(crate) enum SnapshotChange {
 #[derive(Debug)]
 pub(crate) struct BuiltSnapshot {
     base_metadata_location: String,
-    pub(super) commit: EngineCommit,
+    requirements: Vec<TableRequirement>,
+    /// `None` when the change leaves the table as it is.
+    snapshot: Option<UnstampedSnapshot>,
     /// The manifests and the manifest list, which nothing names until the commit lands.
     pub(super) written: Vec<String>,
     removed_rows: u64,
 }
 
+/// A written snapshot without its timestamp, which the attempt that commits it sets, so that
+/// a build that waited for the table lock is not stamped with the time before the wait.
+#[derive(Debug)]
+struct UnstampedSnapshot {
+    snapshot_id: i64,
+    parent_snapshot_id: Option<i64>,
+    sequence_number: i64,
+    manifest_list: String,
+    summary: Summary,
+    schema_id: i32,
+}
+
+/// How far a snapshot's timestamp may fall behind the table's last update or last snapshot:
+/// `TableMetadataBuilder::add_snapshot` refuses a snapshot further behind.
+const CLOCK_TOLERANCE_MS: i64 = 60_000;
+
 impl BuiltSnapshot {
     /// Whether the change leaves the table as it is.
     pub(super) fn is_unchanged(&self) -> bool {
-        self.commit.updates.is_empty()
+        self.snapshot.is_none()
+    }
+
+    /// The commit of the snapshot stamped `timestamp_ms`, built for `metadata`, the table the
+    /// attempt loaded.
+    ///
+    /// # Errors
+    /// [`Lost::ClockBehind`] when `timestamp_ms` is further behind the table's last update or
+    /// last snapshot than iceberg accepts: another process with a clock ahead of this host's
+    /// committed last.
+    pub(super) fn commit_at(
+        &self,
+        metadata: &TableMetadata,
+        timestamp_ms: i64,
+    ) -> Result<EngineCommit, Lost> {
+        let Some(unstamped) = &self.snapshot else {
+            return Ok(EngineCommit {
+                requirements: self.requirements.clone(),
+                updates: Vec::new(),
+            });
+        };
+        let latest = metadata
+            .history()
+            .last()
+            .map_or(i64::MIN, |entry| entry.timestamp_ms)
+            .max(metadata.last_updated_ms());
+        if timestamp_ms < latest.saturating_sub(CLOCK_TOLERANCE_MS) {
+            return Err(Lost::ClockBehind);
+        }
+        let snapshot = Snapshot::builder()
+            .with_snapshot_id(unstamped.snapshot_id)
+            .with_parent_snapshot_id(unstamped.parent_snapshot_id)
+            .with_sequence_number(unstamped.sequence_number)
+            .with_timestamp_ms(timestamp_ms)
+            .with_manifest_list(unstamped.manifest_list.clone())
+            .with_summary(unstamped.summary.clone())
+            .with_schema_id(unstamped.schema_id)
+            .build();
+        Ok(EngineCommit {
+            requirements: self.requirements.clone(),
+            updates: vec![
+                TableUpdate::AddSnapshot { snapshot },
+                TableUpdate::SetSnapshotRef {
+                    ref_name: MAIN_BRANCH.to_string(),
+                    reference: SnapshotReference::new(
+                        unstamped.snapshot_id,
+                        SnapshotRetention::branch(None, None, None),
+                    ),
+                },
+            ],
+        })
     }
 }
 
@@ -360,13 +428,10 @@ impl SnapshotChange {
             None => CurrentManifests::default(),
         };
         let Some(rewrite) = self.rewrite(&current, target_entries) else {
-            // Nothing to change: the commit only checks the requirements.
             return Ok(BuiltSnapshot {
                 base_metadata_location: loaded.metadata_location().to_string(),
-                commit: EngineCommit {
-                    requirements,
-                    updates: Vec::new(),
-                },
+                requirements,
+                snapshot: None,
                 written: Vec::new(),
                 removed_rows: 0,
             });
@@ -380,30 +445,17 @@ impl SnapshotChange {
             written: Vec::new(),
         };
         let manifest_list = output.write(&rewrite, &current.delete_manifests).await?;
-        let snapshot = Snapshot::builder()
-            .with_snapshot_id(output.snapshot_id)
-            .with_parent_snapshot_id(parent_id)
-            .with_sequence_number(output.sequence_number)
-            .with_timestamp_ms(now_ms())
-            .with_manifest_list(manifest_list)
-            .with_summary(rewrite.summary(metadata))
-            .with_schema_id(metadata.current_schema_id())
-            .build();
         Ok(BuiltSnapshot {
             base_metadata_location: loaded.metadata_location().to_string(),
-            commit: EngineCommit {
-                requirements,
-                updates: vec![
-                    TableUpdate::AddSnapshot { snapshot },
-                    TableUpdate::SetSnapshotRef {
-                        ref_name: MAIN_BRANCH.to_string(),
-                        reference: SnapshotReference::new(
-                            output.snapshot_id,
-                            SnapshotRetention::branch(None, None, None),
-                        ),
-                    },
-                ],
-            },
+            requirements,
+            snapshot: Some(UnstampedSnapshot {
+                snapshot_id: output.snapshot_id,
+                parent_snapshot_id: parent_id,
+                sequence_number: output.sequence_number,
+                manifest_list,
+                summary: rewrite.summary(metadata),
+                schema_id: metadata.current_schema_id(),
+            }),
             written: output.written,
             removed_rows: rewrite
                 .removed

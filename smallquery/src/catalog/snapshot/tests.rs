@@ -5,7 +5,8 @@
 //! remove rows.
 
 use super::SnapshotChange;
-use crate::catalog::{CommitPoint, LoadedTable};
+use crate::catalog::commit::Lost;
+use crate::catalog::{now_ms, CommitPoint, LoadedTable};
 use crate::ids::TableRef;
 use crate::testkit::{table_ref, TestEngine, PROJECT};
 use bigquery::*;
@@ -515,4 +516,62 @@ async fn a_truncate_on_a_cached_empty_table_removes_the_rows_another_engine_appe
 
     assert_eq!(removed_rows, 10);
     assert_eq!(count_and_sum(&first).await, (0, None));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_snapshot_built_before_the_table_lock_is_stamped_when_it_commits() {
+    let engine = TestEngine::start().await;
+    create_events(&engine).await;
+    insert(&engine, 0..10).await;
+    let mut held = engine.state().catalog.hooks().hold(CommitPoint::Loaded);
+    let catalog = engine.state().catalog.clone();
+    let truncate = tokio::spawn(async move {
+        catalog
+            .commit_snapshot(&events(), &SnapshotChange::Truncate)
+            .await
+    });
+    held.reached().await;
+    // The build happened before the hold, so the clock must move past its millisecond.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let released_at = now_ms();
+    held.release();
+
+    truncate
+        .await
+        .expect("the truncate task ends")
+        .expect("the truncate lands");
+
+    let loaded = reload(&engine).await;
+    let snapshot = loaded
+        .metadata()
+        .current_snapshot()
+        .expect("the truncate made a snapshot");
+    assert_eq!(snapshot.summary().operation, Operation::Delete);
+    assert!(
+        snapshot.timestamp_ms() >= released_at,
+        "stamped at {}, released at {released_at}",
+        snapshot.timestamp_ms()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_snapshot_stamped_more_than_a_minute_before_the_last_commit_loses_its_attempt() {
+    let engine = TestEngine::start().await;
+    create_events(&engine).await;
+    insert(&engine, 0..10).await;
+    let loaded = reload(&engine).await;
+    let built = SnapshotChange::Truncate
+        .build(&events(), &loaded, 8192)
+        .await
+        .expect("the snapshot builds");
+    let last_commit = loaded.metadata().last_updated_ms();
+
+    assert!(matches!(
+        built.commit_at(loaded.metadata(), last_commit - 60_001),
+        Err(Lost::ClockBehind)
+    ));
+    assert!(built
+        .commit_at(loaded.metadata(), last_commit - 60_000)
+        .is_ok());
+    engine.state().catalog.discard(&built.written).await;
 }
