@@ -13,6 +13,7 @@ use bigquery::*;
 use iceberg::spec::{Manifest, ManifestContentType, ManifestStatus, Operation, Summary};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 
 const SHOP: BigQueryDatasetId = BigQueryDatasetId::from_static("shop");
@@ -289,7 +290,8 @@ async fn merging_the_manifests_of_200_appends_keeps_every_file_row_and_total() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_truncate_removes_every_live_file_and_time_travel_still_reads_them() {
     let engine = TestEngine::with_config(|mut config| {
-        config.maintenance.manifest_merge_target_entries = 3;
+        config.maintenance.manifest_merge_target_entries =
+            NonZeroUsize::new(3).expect("3 is not zero");
         config
     })
     .await;
@@ -553,7 +555,12 @@ async fn a_snapshot_stamped_more_than_a_minute_before_the_last_commit_loses_its_
     insert(&engine, 0..10).await;
     let loaded = reload(&engine).await;
     let built = SnapshotChange::Truncate
-        .build(&events(), &loaded, 8192, &mut LoadedManifests::default())
+        .build(
+            &events(),
+            &loaded,
+            NonZeroUsize::new(8192).expect("8,192 is not zero"),
+            &mut LoadedManifests::default(),
+        )
         .await
         .expect("the snapshot builds");
     let last_commit = loaded.metadata().last_updated_ms();
@@ -576,7 +583,8 @@ async fn a_merge_drops_a_manifest_without_live_entries_beside_an_oversized_one()
         day: BigQueryDate,
     }
     let engine = TestEngine::with_config(|mut config| {
-        config.maintenance.manifest_merge_target_entries = 2;
+        config.maintenance.manifest_merge_target_entries =
+            NonZeroUsize::new(2).expect("2 is not zero");
         config
     })
     .await;

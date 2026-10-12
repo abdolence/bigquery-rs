@@ -36,6 +36,7 @@ use iceberg::spec::{TableMetadata, TableMetadataBuilder};
 use iceberg::table::Table;
 use iceberg::{Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -46,8 +47,8 @@ pub(crate) struct CatalogSettings {
     pub catalog_cache_ttl: Duration,
     pub commit_retry_deadline: Duration,
     pub default_location: Location,
-    /// The entries one manifest of an engine-built snapshot holds at most; never zero.
-    pub manifest_merge_target_entries: usize,
+    /// The entries one manifest of an engine-built snapshot holds at most.
+    pub manifest_merge_target_entries: NonZeroUsize,
 }
 
 impl From<&EngineConfig> for CatalogSettings {

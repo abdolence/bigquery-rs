@@ -31,7 +31,7 @@ fn settings(pointer_min_age: Duration) -> CatalogSettings {
         catalog_cache_ttl: Duration::ZERO,
         commit_retry_deadline: Duration::from_secs(30),
         default_location: Location::from_static("EU"),
-        manifest_merge_target_entries: 8192,
+        manifest_merge_target_entries: NonZeroUsize::new(8192).expect("8,192 is not zero"),
     }
 }
 

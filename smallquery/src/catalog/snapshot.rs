@@ -22,10 +22,11 @@ use iceberg::table::Table;
 use iceberg::{TableRequirement, TableUpdate};
 use std::collections::HashMap;
 use std::fmt::Arguments;
+use std::num::NonZeroUsize;
 use uuid::Uuid;
 
 /// What an engine-built snapshot makes of the table's current snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum SnapshotChange {
     /// A `replace` snapshot: the live entries in as few manifests as
     /// `manifest_merge_target_entries` allows, every data file kept.
@@ -66,8 +67,8 @@ pub(crate) struct BuiltSnapshot {
     removed_rows: u64,
 }
 
-/// A written snapshot without its timestamp, which the attempt that commits it sets, so that
-/// a build that waited for the table lock is not stamped with the time before the wait.
+// The attempt that commits the snapshot sets its timestamp, so that a build that waited for
+// the table lock is not stamped with the time before the wait.
 #[derive(Debug)]
 struct UnstampedSnapshot {
     snapshot_id: i64,
@@ -78,8 +79,8 @@ struct UnstampedSnapshot {
     schema_id: i32,
 }
 
-/// How far a snapshot's timestamp may fall behind the table's last update or last snapshot:
-/// `TableMetadataBuilder::add_snapshot` refuses a snapshot further behind.
+// `TableMetadataBuilder::add_snapshot` refuses a snapshot stamped further behind the table's
+// last update or last snapshot.
 const CLOCK_TOLERANCE_MS: i64 = 60_000;
 
 impl BuiltSnapshot {
@@ -142,11 +143,11 @@ impl BuiltSnapshot {
 #[derive(Default)]
 struct CurrentManifests {
     data_manifests: usize,
-    /// The data manifests without a live entry, which only a merge drops.
+    // Only a merge drops a manifest without a live entry.
     dead_data_manifests: usize,
     live_entries: Vec<ManifestEntryRef>,
     delete_manifests: Vec<ManifestFile>,
-    /// The bytes of the live delete files, which every engine-built snapshot keeps.
+    // Every engine-built snapshot carries the delete files over unchanged.
     delete_file_bytes: u64,
 }
 
@@ -183,16 +184,14 @@ impl CurrentManifests {
     }
 }
 
-/// How many manifests one build reads at once.
 const CONCURRENT_MANIFEST_READS: usize = 16;
 
-/// The live entries of the manifests a commit has read, by manifest path. A manifest is never
-/// rewritten under its path, so what one attempt read holds for every later one.
+// The live entries of the manifests a commit has read, by manifest path. A manifest is never
+// rewritten under its path, so what one attempt read holds for every later one.
 #[derive(Default)]
 struct LoadedManifests(HashMap<String, Vec<ManifestEntryRef>>);
 
 impl LoadedManifests {
-    /// Reads those of `manifests` not read yet, several at once.
     async fn load<'m>(
         &mut self,
         table: &Table,
@@ -235,7 +234,6 @@ struct Rewrite<'c> {
     kept: &'c [ManifestEntryRef],
     removed: &'c [ManifestEntryRef],
     added: &'c [DataFile],
-    /// The bytes of the delete files the snapshot carries over from its parent.
     delete_file_bytes: u64,
 }
 
@@ -292,16 +290,20 @@ impl Rewrite<'_> {
 }
 
 #[derive(Clone, Copy)]
-enum Entry<'e> {
+enum ManifestRecord<'e> {
     Existing(&'e ManifestEntry),
     Deleted(&'e ManifestEntry),
     Added(&'e DataFile),
 }
 
-impl Entry<'_> {
-    fn record(self, writer: &mut ManifestWriter, sequence_number: i64) -> Result<(), EngineError> {
+impl ManifestRecord<'_> {
+    fn write_to(
+        self,
+        writer: &mut ManifestWriter,
+        sequence_number: i64,
+    ) -> Result<(), EngineError> {
         match self {
-            Entry::Existing(entry) => {
+            ManifestRecord::Existing(entry) => {
                 let (added_by, sequence) = added_by_and_sequence(entry)?;
                 writer.add_existing_file(
                     entry.data_file().clone(),
@@ -310,7 +312,7 @@ impl Entry<'_> {
                     entry.file_sequence_number,
                 )?;
             }
-            Entry::Deleted(entry) => {
+            ManifestRecord::Deleted(entry) => {
                 let (_, sequence) = added_by_and_sequence(entry)?;
                 writer.add_delete_file(
                     entry.data_file().clone(),
@@ -318,7 +320,7 @@ impl Entry<'_> {
                     entry.file_sequence_number,
                 )?;
             }
-            Entry::Added(file) => writer.add_file(file.clone(), sequence_number)?,
+            ManifestRecord::Added(file) => writer.add_file(file.clone(), sequence_number)?,
         }
         Ok(())
     }
@@ -328,28 +330,24 @@ fn added_by_and_sequence(entry: &ManifestEntry) -> Result<(i64, i64), EngineErro
     entry
         .snapshot_id()
         .zip(entry.sequence_number())
-        .ok_or_else(|| {
-            iceberg::Error::new(
-                iceberg::ErrorKind::DataInvalid,
-                format!(
-                    "the manifest entry of {} has no snapshot id or sequence number",
-                    entry.file_path()
-                ),
-            )
-            .into()
+        .ok_or_else(|| EngineError::Internal {
+            detail: format!(
+                "the manifest entry of {} has no snapshot id or sequence number",
+                entry.file_path()
+            ),
         })
 }
 
-struct Output<'t> {
+struct SnapshotWriter<'t> {
     table: &'t Table,
     snapshot_id: i64,
     sequence_number: i64,
-    target_entries: usize,
+    target_entries: NonZeroUsize,
     commit: Uuid,
     written: Vec<String>,
 }
 
-impl Output<'_> {
+impl SnapshotWriter<'_> {
     fn location(&self, name: Arguments<'_>) -> String {
         format!("{}/metadata/{name}", self.table.metadata().location())
     }
@@ -361,22 +359,22 @@ impl Output<'_> {
         rewrite: &Rewrite<'_>,
         delete_manifests: &[ManifestFile],
     ) -> Result<String, EngineError> {
-        let groups: [Vec<Entry>; 3] = [
+        let groups: [Vec<ManifestRecord>; 3] = [
             rewrite
                 .kept
                 .iter()
-                .map(|entry| Entry::Existing(entry))
+                .map(|entry| ManifestRecord::Existing(entry))
                 .collect(),
             rewrite
                 .removed
                 .iter()
-                .map(|entry| Entry::Deleted(entry))
+                .map(|entry| ManifestRecord::Deleted(entry))
                 .collect(),
-            rewrite.added.iter().map(Entry::Added).collect(),
+            rewrite.added.iter().map(ManifestRecord::Added).collect(),
         ];
         let mut manifests = Vec::new();
         for group in &groups {
-            for entries in group.chunks(self.target_entries) {
+            for entries in group.chunks(self.target_entries.get()) {
                 manifests.push(self.manifest(entries).await?);
             }
         }
@@ -398,7 +396,10 @@ impl Output<'_> {
         Ok(location)
     }
 
-    async fn manifest(&mut self, entries: &[Entry<'_>]) -> Result<ManifestFile, EngineError> {
+    async fn manifest(
+        &mut self,
+        entries: &[ManifestRecord<'_>],
+    ) -> Result<ManifestFile, EngineError> {
         let location = self.location(format_args!("{}-m{}.avro", self.commit, self.written.len()));
         let output = self.table.file_io().new_output(&location)?;
         self.written.push(location);
@@ -411,7 +412,7 @@ impl Output<'_> {
         )
         .build_v2_data();
         for entry in entries {
-            entry.record(&mut writer, self.sequence_number)?;
+            entry.write_to(&mut writer, self.sequence_number)?;
         }
         Ok(writer.write_manifest_file().await?)
     }
@@ -430,7 +431,7 @@ impl SnapshotChange {
     fn rewrite<'c>(
         &'c self,
         current: &'c CurrentManifests,
-        target_entries: usize,
+        target_entries: NonZeroUsize,
     ) -> Option<Rewrite<'c>> {
         let live = current.live_entries.as_slice();
         let (kept, removed, added): (&[ManifestEntryRef], &[ManifestEntryRef], &[DataFile]) =
@@ -441,7 +442,7 @@ impl SnapshotChange {
             };
         let operation = match (self, removed.is_empty(), added.is_empty()) {
             (SnapshotChange::MergeManifests, ..) => (current.dead_data_manifests > 0
-                || kept.len().div_ceil(target_entries) < current.data_manifests)
+                || kept.len().div_ceil(target_entries.get()) < current.data_manifests)
                 .then_some(Operation::Replace)?,
             (_, true, true) => return None,
             (_, false, false) => Operation::Overwrite,
@@ -461,7 +462,7 @@ impl SnapshotChange {
         &self,
         table: &TableRef,
         loaded: &LoadedTable,
-        target_entries: usize,
+        target_entries: NonZeroUsize,
         manifests: &mut LoadedManifests,
     ) -> Result<BuiltSnapshot, EngineError> {
         let metadata = loaded.metadata();
@@ -509,7 +510,7 @@ impl SnapshotChange {
                 removed_rows: 0,
             });
         };
-        let mut output = Output {
+        let mut snapshot_writer = SnapshotWriter {
             table: &loaded.table,
             snapshot_id: new_snapshot_id(metadata),
             sequence_number: metadata.next_sequence_number(),
@@ -517,19 +518,21 @@ impl SnapshotChange {
             commit: Uuid::new_v4(),
             written: Vec::new(),
         };
-        let manifest_list = output.write(&rewrite, &current.delete_manifests).await?;
+        let manifest_list = snapshot_writer
+            .write(&rewrite, &current.delete_manifests)
+            .await?;
         Ok(BuiltSnapshot {
             base_metadata_location: loaded.metadata_location().to_string(),
             requirements,
             snapshot: Some(UnstampedSnapshot {
-                snapshot_id: output.snapshot_id,
+                snapshot_id: snapshot_writer.snapshot_id,
                 parent_snapshot_id: parent_id,
-                sequence_number: output.sequence_number,
+                sequence_number: snapshot_writer.sequence_number,
                 manifest_list,
                 summary: rewrite.summary(metadata),
                 schema_id: metadata.current_schema_id(),
             }),
-            written: output.written,
+            written: snapshot_writer.written,
             removed_rows: rewrite
                 .removed
                 .iter()

@@ -1,6 +1,7 @@
 use crate::error::EngineError;
 use crate::ids::Location;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -156,10 +157,6 @@ impl EngineConfig {
                 "maintenance.manifest_merge_threshold",
                 self.maintenance.manifest_merge_threshold,
             ),
-            (
-                "maintenance.manifest_merge_target_entries",
-                self.maintenance.manifest_merge_target_entries,
-            ),
             ("maintenance.max_snapshots", self.maintenance.max_snapshots),
         ] {
             if value == 0 {
@@ -186,7 +183,7 @@ pub struct Maintenance {
     /// The data manifests a table's current snapshot holds before they are merged. Default 100.
     pub manifest_merge_threshold: usize,
     /// The entries one merged manifest holds at most. Default 8,192.
-    pub manifest_merge_target_entries: usize,
+    pub manifest_merge_target_entries: NonZeroUsize,
     /// The snapshots of `main` kept beside `snapshot_retention`. Default 1,000.
     pub max_snapshots: usize,
 }
@@ -196,7 +193,7 @@ impl Default for Maintenance {
         Self {
             schedule: Some(Duration::from_secs(60 * 60)),
             manifest_merge_threshold: 100,
-            manifest_merge_target_entries: 8192,
+            manifest_merge_target_entries: const { NonZeroUsize::new(8192).expect("8,192 is not zero") },
             max_snapshots: 1000,
         }
     }
