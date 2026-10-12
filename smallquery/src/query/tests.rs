@@ -374,6 +374,124 @@ async fn a_job_appends_its_result_to_a_destination_table() {
         .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_truncate_job_replaces_every_file_of_its_destination_in_one_snapshot() {
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Copy {
+        id: i64,
+        label: String,
+    }
+    let engine = TestEngine::start().await;
+    items(&engine, 20).await;
+    empty_copies(&engine).await;
+    let copies = table_ref("shop", "copies");
+    let mut held = Vec::new();
+    for id in 0..10 {
+        let row = Copy {
+            id,
+            label: format!("held-{id}"),
+        };
+        engine
+            .db
+            .fluent()
+            .insert()
+            .into(SHOP.table(COPIES))
+            .objects(std::slice::from_ref(&row))
+            .execute()
+            .await
+            .expect("the row is written");
+        held.push(row);
+    }
+    let before = engine
+        .state()
+        .catalog
+        .reload(&copies)
+        .await
+        .expect("the table loads");
+    let replaced = before
+        .metadata()
+        .current_snapshot()
+        .expect("the inserts made a snapshot")
+        .clone();
+    let files_before: std::collections::BTreeSet<String> = engine
+        .plan_files(&copies, None)
+        .await
+        .into_iter()
+        .map(|task| task.data_file_path)
+        .collect();
+    assert_eq!(files_before.len(), 10);
+
+    let mut written: Vec<Copy> = engine
+        .db
+        .fluent()
+        .query("SELECT id, label FROM shop.items WHERE id < 3")
+        .dangerously_overwrite_destination_table(SHOP.table(COPIES))
+        .obj()
+        .query()
+        .await
+        .expect("the result replaces the table's rows");
+
+    written.sort_by_key(|row| row.id);
+    assert_eq!(
+        written.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    let after = engine
+        .state()
+        .catalog
+        .reload(&copies)
+        .await
+        .expect("the table loads");
+    assert_eq!(
+        after.metadata().snapshots().len(),
+        before.metadata().snapshots().len() + 1
+    );
+    let snapshot = after
+        .metadata()
+        .current_snapshot()
+        .expect("the job made a snapshot");
+    assert_eq!(
+        snapshot.summary().operation,
+        iceberg::spec::Operation::Overwrite
+    );
+    assert_eq!(snapshot.parent_snapshot_id(), Some(replaced.snapshot_id()));
+    let tasks = engine.plan_files(&copies, None).await;
+    assert!(tasks
+        .iter()
+        .all(|task| !files_before.contains(&task.data_file_path)));
+    assert_eq!(
+        tasks
+            .iter()
+            .filter_map(|task| task.record_count)
+            .sum::<u64>(),
+        3
+    );
+    let summary = &snapshot.summary().additional_properties;
+    assert_eq!(
+        summary.get("added-data-files"),
+        Some(&tasks.len().to_string()),
+        "the table plans exactly the files the job added"
+    );
+    assert_eq!(
+        summary.get("deleted-data-files").map(String::as_str),
+        Some("10")
+    );
+
+    let at = BigQueryInstant::from_millisecond(replaced.timestamp_ms()).expect("a valid instant");
+    let mut read_before: Vec<Copy> = engine
+        .db
+        .fluent()
+        .select()
+        .from(SHOP.table(COPIES))
+        .snapshot_time(at)
+        .obj()
+        .query()
+        .await
+        .expect("the table reads as it was");
+    read_before.sort_by_key(|row| row.id);
+    assert_eq!(read_before, held);
+}
+
 const COUNTS: BigQueryTableId = BigQueryTableId::from_static("counts");
 
 /// The job `job_id` of the test project, as the engine holds it.

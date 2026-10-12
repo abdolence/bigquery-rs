@@ -17,7 +17,7 @@ mod jobs;
 
 pub(crate) use jobs::JobRegistry;
 
-use crate::catalog::{now_ms, EngineCatalog, NewDataset};
+use crate::catalog::{now_ms, EngineCatalog, NewDataset, SnapshotChange};
 use crate::config::{ByteSize, EngineConfig};
 use crate::error::EngineError;
 use crate::ids::{DatasetId, DatasetRef, JobId, Location, ProjectId, TableId, TableRef};
@@ -101,7 +101,7 @@ enum Output {
 struct Destination {
     table: TableRef,
     create: CreateDisposition,
-    write: WriteDisposition,
+    write: DestinationWrite,
 }
 
 /// A query's `create_disposition`.
@@ -128,18 +128,23 @@ impl FromStr for CreateDisposition {
     }
 }
 
-/// A query's `write_disposition`; `WRITE_TRUNCATE` is refused.
-impl FromStr for WriteDisposition {
+/// A query's `write_disposition`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestinationWrite {
+    /// `WRITE_EMPTY`, the default, and `WRITE_APPEND`: the result is appended.
+    Append(WriteDisposition),
+    /// `WRITE_TRUNCATE`: the result replaces every row of the table in one snapshot.
+    Overwrite,
+}
+
+impl FromStr for DestinationWrite {
     type Err = EngineError;
 
     fn from_str(disposition: &str) -> Result<Self, Self::Err> {
         match disposition {
-            "" | "WRITE_EMPTY" => Ok(WriteDisposition::Empty),
-            "WRITE_APPEND" => Ok(WriteDisposition::Append),
-            "WRITE_TRUNCATE" => Err(EngineError::unsupported(
-                "WRITE_TRUNCATE",
-                "this release appends to a destination table",
-            )),
+            "" | "WRITE_EMPTY" => Ok(DestinationWrite::Append(WriteDisposition::Empty)),
+            "WRITE_APPEND" => Ok(DestinationWrite::Append(WriteDisposition::Append)),
+            "WRITE_TRUNCATE" => Ok(DestinationWrite::Overwrite),
             other => Err(EngineError::invalid(
                 "write_disposition",
                 format!("{other:?} is not a write disposition"),
@@ -216,7 +221,7 @@ struct ResultSink {
     table: TableRef,
     target: WriteTarget,
     files: FileSink,
-    disposition: WriteDisposition,
+    write: DestinationWrite,
 }
 
 impl ResultSink {
@@ -224,14 +229,14 @@ impl ResultSink {
     async fn open(
         catalog: &EngineCatalog,
         table: TableRef,
-        disposition: WriteDisposition,
+        write: DestinationWrite,
     ) -> Result<Self, EngineError> {
         let loaded = catalog.load(&table).await?;
         Ok(Self {
             target: WriteTarget::new(&loaded)?,
             files: TableWriter::new(&loaded)?.open().await?,
             table,
-            disposition,
+            write,
         })
     }
 
@@ -245,7 +250,7 @@ impl ResultSink {
 struct Written {
     table: TableRef,
     files: WrittenFiles,
-    disposition: WriteDisposition,
+    write: DestinationWrite,
     completed: Completed,
 }
 
@@ -360,7 +365,7 @@ impl Queries {
     ///
     /// # Errors
     /// [`EngineError::AlreadyExists`] for a job ID in use, [`EngineError::Unsupported`] for a
-    /// job that is not a query and for `WRITE_TRUNCATE`, and the statement's planning errors.
+    /// job that is not a query, and the statement's planning errors.
     pub(crate) async fn insert_job(
         &self,
         request: v2::InsertJobRequest,
@@ -673,8 +678,7 @@ impl Queries {
             // Answered inline.
             Ok(None) => return,
             Ok(Some(written)) if job.begin_commit() => self
-                .writes
-                .append_files(&written.table, written.files, written.disposition)
+                .land(&written.table, written.files, written.write)
                 .await
                 .map(|()| written.completed)
                 .map_err(|err| JobFailure::from(&err)),
@@ -685,6 +689,27 @@ impl Queries {
             self.drop_result_table(&job);
         }
         job.finish(outcome);
+    }
+
+    async fn land(
+        &self,
+        table: &TableRef,
+        files: WrittenFiles,
+        write: DestinationWrite,
+    ) -> Result<(), EngineError> {
+        match write {
+            DestinationWrite::Append(disposition) => {
+                self.writes.append_files(table, files, disposition).await
+            }
+            DestinationWrite::Overwrite => {
+                let change = SnapshotChange::Overwrite {
+                    table_uuid: files.table_uuid,
+                    files: files.files,
+                };
+                self.catalog.commit_snapshot(table, &change).await?;
+                Ok(())
+            }
+        }
     }
 
     /// Waits for a permit, then delivers the job's rows within its timeout.
@@ -795,7 +820,7 @@ impl Queries {
             },
             table: sink.table,
             files,
-            disposition: sink.disposition,
+            write: sink.write,
         }))
     }
 
@@ -844,7 +869,12 @@ impl Queries {
             Err(err) => return Err(err),
         }
         self.create_result_table(&table, wire).await?;
-        ResultSink::open(&self.catalog, table, WriteDisposition::Append).await
+        ResultSink::open(
+            &self.catalog,
+            table,
+            DestinationWrite::Append(WriteDisposition::Append),
+        )
+        .await
     }
 
     /// A sink into the caller's destination table, created when allowed. Its write
