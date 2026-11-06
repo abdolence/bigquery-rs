@@ -10,6 +10,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use std::path::PathBuf;
 use std::time::Duration;
 
+// redacter:allow-begin
 /// A 2048-bit RSA key generated for this test; it signs nothing outside it.
 const TEST_RSA_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC636zjJMIs+lhs
@@ -39,6 +40,7 @@ yw63Lgm5IIt0QHZePCjwyUhJmkRUWpLiuM1Ngt3ogyzDx3Y/Nk6OaBHB4Sq87oc/
 5I3cnT/1G33RDqEzAAKQqAjvmQcQB4nUnBt1U8CQbCsnR2G8eo2BUABZ3CSirgrw
 TlMXJJWmFfFfEkoozDyE+LWo
 -----END PRIVATE KEY-----";
+// redacter:allow-end
 
 /// The public half of [`TEST_RSA_PRIVATE_KEY`].
 const TEST_RSA_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
