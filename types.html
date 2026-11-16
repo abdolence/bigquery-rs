@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0c23fe2d.js";
+            window.path_to_searchindex_js = "searchindex-8f20f150.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-0dc013e9.js"></script>
@@ -333,7 +333,7 @@ either as a geography. Invalid text is rejected by BigQuery.</p>
 TIMESTAMP;</li>
 <li>a DATE or DATETIME before year 1 on write is <code>OutOfRange</code>, since jiff allows years down to -9999;</li>
 <li>a DATETIME has no offset, so <code>jiff::Timestamp</code> is not taken for it, and a TIMESTAMP is not taken
-by <code>jiff::civil::DateTime</code> or <code>jiff::Zoned</code>;</li>
+by <code>jiff::civil::DateTime</code> or <code>jiff::ZonedDateTime</code>;</li>
 <li>a DATETIME <code>String</code> uses <code>T</code> on read and takes <code>T</code> or a space on write;</li>
 <li>a TIMESTAMP <code>String</code> is always <code>...Z</code> on read, and on write needs <code>Z</code> or <code>±HH:MM</code>, with <code>T</code> or a
 space between date and time. Other shapes, such as <code>+00</code> or <code> UTC</code>, fail with <code>InvalidText</code>.</li>

@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0c23fe2d.js";
+            window.path_to_searchindex_js = "searchindex-8f20f150.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-0dc013e9.js"></script>
@@ -180,14 +180,14 @@
                         <h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
 <p>Cargo.toml:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = "0.9"
+bigquery = "0.10"
 </code></pre>
 <p>The default feature <code>tls-roots</code> uses the native TLS roots of your system. Use
 <code>tls-webpki-roots</code> instead if you want the bundled Mozilla roots. It needs
 <code>default-features = false</code>, which also turns off the default feature <code>auth-default-crypto</code>, so
 enable it again, see <a href="#crypto-provider">Crypto provider</a>:</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = { version = "0.9", default-features = false, features = ["tls-webpki-roots", "auth-default-crypto"] }
+bigquery = { version = "0.10", default-features = false, features = ["tls-webpki-roots", "auth-default-crypto"] }
 </code></pre>
 <h2 id="crypto-provider"><a class="header" href="#crypto-provider">Crypto provider</a></h2>
 <p>Service account keys sign a JWT, and <code>google-cloud-auth</code> signs it with a rustls crypto provider.
@@ -198,7 +198,7 @@ with it. <code>tls-roots</code> without <code>auth-default-crypto</code> builds 
 <p>Without <code>auth-default-crypto</code>, install a rustls provider before creating a client, with the same
 <code>rustls</code> version as <code>google-cloud-auth</code> (0.23):</p>
 <pre><code class="language-toml">[dependencies]
-bigquery = { version = "0.9", default-features = false, features = ["tls-roots"] }
+bigquery = { version = "0.10", default-features = false, features = ["tls-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 </code></pre>
 <pre><code class="language-rust ignore">rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");</code></pre>
