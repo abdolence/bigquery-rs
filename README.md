@@ -47,7 +47,7 @@ Cargo.toml:
 
 ```toml
 [dependencies]
-bigquery = "0.9"
+bigquery = "0.10"
 ```
 
 ```rust,no_run
@@ -159,6 +159,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 If you see `no process-level CryptoProvider available`, see
 [Crypto provider error](https://bigquery-rust.abdolence.dev/getting-started.html#crypto-provider-error).
+
+## Migrating from 0.9
+
+0.10 moves to jiff 1.0 and gcloud-sdk 0.34. `bigquery::jiff` and `BigQueryInstant` are jiff 1.0
+types, so an application that names them through its own `jiff` dependency needs `jiff = "1"`.
+Two copies of jiff are not interchangeable, and a `Timestamp` of jiff 0.2 does not convert into
+one of jiff 1.0.
+
+jiff 1.0 renames and changes a few items:
+
+| jiff 0.2 | jiff 1.0 |
+|---|---|
+| `Zoned` | `ZonedDateTime` |
+| `Timestamp::to_zoned` | `Timestamp::to_zoned_datetime` |
+| `Timestamp - Timestamp` returns a `Span` | returns a `SignedDuration` |
+| `SystemTime::from(timestamp)` | `SystemTime::try_from(timestamp)` |
+
+The rest of the jiff changes are listed in its
+[changelog](https://github.com/BurntSushi/jiff/blob/master/CHANGELOG.md). The BigQuery wire
+encodings of DATE, TIME, DATETIME and TIMESTAMP values are unchanged.
+
+`google-cloud-auth` 1.19 depends on jiff 0.2, so a build compiles both versions. No type of
+`bigquery` or `bigquery::gcloud_sdk` exposes the one of jiff 0.2.
 
 ## Migrating from 0.8
 
