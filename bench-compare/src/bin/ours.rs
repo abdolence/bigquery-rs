@@ -163,7 +163,7 @@ impl Ours {
         Ok(self.dataset()?.table(name.parse()?))
     }
 
-    fn query(&self, sql: impl Into<String>) -> BigQueryQueryBuilder<'_, BigQueryDb> {
+    fn query(&self, sql: impl Into<BigQuerySql>) -> BigQueryQueryBuilder<'_, BigQueryDb> {
         let query = self.base_query(sql);
         if self.job_required {
             query.job_creation_required()
@@ -172,7 +172,7 @@ impl Ours {
         }
     }
 
-    fn base_query(&self, sql: impl Into<String>) -> BigQueryQueryBuilder<'_, BigQueryDb> {
+    fn base_query(&self, sql: impl Into<BigQuerySql>) -> BigQueryQueryBuilder<'_, BigQueryDb> {
         self.db
             .fluent()
             .query(sql)
