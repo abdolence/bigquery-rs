@@ -180,7 +180,7 @@ The rest of the jiff changes are listed in its
 [changelog](https://github.com/BurntSushi/jiff/blob/master/CHANGELOG.md). The BigQuery wire
 encodings of DATE, TIME, DATETIME and TIMESTAMP values are unchanged.
 
-`google-cloud-auth` still depends on jiff 0.2, so a build compiles both versions. No type of
+`google-cloud-auth` 1.19 depends on jiff 0.2, so a build compiles both versions. No type of
 `bigquery` or `bigquery::gcloud_sdk` exposes the one of jiff 0.2.
 
 ## Migrating from 0.8
