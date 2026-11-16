@@ -4,7 +4,7 @@ Cargo.toml:
 
 ```toml
 [dependencies]
-bigquery = "0.9"
+bigquery = "0.10"
 ```
 
 The default feature `tls-roots` uses the native TLS roots of your system. Use
@@ -14,7 +14,7 @@ enable it again, see [Crypto provider](#crypto-provider):
 
 ```toml
 [dependencies]
-bigquery = { version = "0.9", default-features = false, features = ["tls-webpki-roots", "auth-default-crypto"] }
+bigquery = { version = "0.10", default-features = false, features = ["tls-webpki-roots", "auth-default-crypto"] }
 ```
 
 ## Crypto provider
@@ -31,7 +31,7 @@ Without `auth-default-crypto`, install a rustls provider before creating a clien
 
 ```toml
 [dependencies]
-bigquery = { version = "0.9", default-features = false, features = ["tls-roots"] }
+bigquery = { version = "0.10", default-features = false, features = ["tls-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ```
 

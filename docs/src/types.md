@@ -167,7 +167,7 @@ Some details for each:
   TIMESTAMP;
 - a DATE or DATETIME before year 1 on write is `OutOfRange`, since jiff allows years down to -9999;
 - a DATETIME has no offset, so `jiff::Timestamp` is not taken for it, and a TIMESTAMP is not taken
-  by `jiff::civil::DateTime` or `jiff::Zoned`;
+  by `jiff::civil::DateTime` or `jiff::ZonedDateTime`;
 - a DATETIME `String` uses `T` on read and takes `T` or a space on write;
 - a TIMESTAMP `String` is always `...Z` on read, and on write needs `Z` or `±HH:MM`, with `T` or a
   space between date and time. Other shapes, such as `+00` or ` UTC`, fail with `InvalidText`.
